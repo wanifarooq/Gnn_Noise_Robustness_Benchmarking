@@ -11,6 +11,8 @@ from torch_geometric.data import Data
 from torch_geometric.utils import from_scipy_sparse_matrix, to_undirected, negative_sampling
 import time
 
+from model.gnns import GCN, GIN, GAT, GAT2
+
 class EstimateAdj(nn.Module):
     def __init__(self, nfea, args, idx_train, device='cuda'):
         super().__init__()
@@ -152,9 +154,6 @@ class NRGNN:
             if (epoch + 1) % 10 == 0:
                 acc_val = self.evaluate(idx_val)
                 print(f"Epoch {epoch+1:03d} | Val Acc: {acc_val:.4f} | Best: {self.best_val_acc:.4f}")
-
-
-        print(f"Optimization finished. Total time: {time.time() - t_total:.4f}s")
 
         if self.weights is not None:
             self.model.load_state_dict(self.weights)
