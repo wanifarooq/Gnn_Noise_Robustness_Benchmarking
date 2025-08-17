@@ -73,10 +73,11 @@ class NRGNN:
         self.args = args
         self.gnn_type = gnn_type
         self.best_val_acc = 0.0
-        self.best_acc_pred_val = 0.0
         self.best_pred = None
         self.weights = None
         self.predictor_weights = None
+        self.patience = self.args.get("patience", 50)
+        self.patience_counter = 0
 
     def fit(self, features, adj, labels, idx_train, idx_val=None):
         edge_index, _ = from_scipy_sparse_matrix(adj)
@@ -92,9 +93,7 @@ class NRGNN:
         else:
             labels = torch.tensor(labels, dtype=torch.long, device=self.device)
 
-        self.features = features
-        self.labels = labels
-        self.edge_index = edge_index
+        self.features, self.labels, self.edge_index = features, labels, edge_index
 
         if idx_val is None:
             if isinstance(idx_train, torch.Tensor):
@@ -105,8 +104,10 @@ class NRGNN:
             rng = np.random.default_rng(42)
             val_indices = rng.choice(idx_train_list, val_size, replace=False)
             idx_val = torch.tensor(val_indices, dtype=torch.long, device=self.device)
-            idx_train = torch.tensor([i for i in idx_train_list if i not in set(val_indices.tolist())],
-                                     dtype=torch.long, device=self.device)
+            idx_train = torch.tensor(
+                [i for i in idx_train_list if i not in set(val_indices.tolist())],
+                dtype=torch.long, device=self.device
+            )
         else:
             if not isinstance(idx_val, torch.Tensor):
                 idx_val = torch.tensor(idx_val, dtype=torch.long, device=self.device)
@@ -116,11 +117,6 @@ class NRGNN:
                 idx_train = torch.tensor(idx_train, dtype=torch.long, device=self.device)
             else:
                 idx_train = idx_train.to(self.device)
-
-        self.idx_unlabel = torch.tensor(
-            list(set(range(features.size(0))) - set(idx_train.detach().cpu().tolist())),
-            dtype=torch.long, device=self.device
-        )
 
         hidden_dim = self.args.get('hidden_channels', 64)
         dropout = self.args.get('dropout', 0.5)
@@ -147,13 +143,23 @@ class NRGNN:
         params = list(self.model.parameters()) + list(self.estimator.parameters()) + list(self.predictor.parameters())
         self.optimizer = optim.Adam(params, lr=self.args.get('lr', 0.01), weight_decay=self.args.get('weight_decay', 5e-4))
 
-        t_total = time.time()
         for epoch in range(self.args.get('epochs', 200)):
             self.train_epoch(epoch, features, edge_index, idx_train, idx_val)
 
-            if (epoch + 1) % 10 == 0:
-                acc_val = self.evaluate(idx_val)
-                print(f"Epoch {epoch+1:03d} | Val Acc: {acc_val:.4f} | Best: {self.best_val_acc:.4f}")
+            acc_val = self.evaluate(idx_val)
+            print(f"Epoch {epoch+1:03d} | Val Acc: {acc_val:.4f} | Best: {self.best_val_acc:.4f}")
+
+            if acc_val > self.best_val_acc:
+                self.best_val_acc = acc_val
+                self.weights = deepcopy(self.model.state_dict())
+                self.predictor_weights = deepcopy(self.predictor.state_dict())
+                self.patience_counter = 0
+            else:
+                self.patience_counter += 1
+
+            if self.patience_counter >= self.patience:
+                print(f"Early stopping at epoch {epoch+1} (no improvement in {self.patience} epochs).")
+                break
 
         if self.weights is not None:
             self.model.load_state_dict(self.weights)
@@ -235,7 +241,6 @@ class NRGNN:
                 pred_val[idx_val].argmax(dim=1).cpu()
             )
         return acc_val
-
 
     def get_train_edge(self, edge_index, features, n_p, idx_train):
         return edge_index

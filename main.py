@@ -10,6 +10,7 @@ from utilities.noises import label_process
 from model.gnns import GCN, GIN, GAT, GAT2
 from loss.gnns_loss import train_with_standard_loss, train_with_dirichlet, train_with_ncod
 from model.NRGNN import NRGNN
+from model.PI_GNN import InnerProductTrainer, Net, InnerProductDecoder
 
 def load_dataset(name, root=None):
     if root is None:
@@ -38,14 +39,19 @@ def load_dataset(name, root=None):
 
 def get_model(model_name, in_channels, hidden_channels, out_channels, **kwargs):
     model_name = model_name.lower()
+    
     if model_name == 'gcn':
-        return GCN(in_channels, hidden_channels, out_channels, **kwargs)
+        gcn_params = {k: v for k, v in kwargs.items() if k in ['n_layers', 'dropout', 'self_loop']}
+        return GCN(in_channels, hidden_channels, out_channels, **gcn_params)
     elif model_name == 'gin':
-        return GIN(in_channels, hidden_channels, out_channels, **kwargs)
+        gin_params = {k: v for k, v in kwargs.items() if k in ['n_layers', 'dropout', 'mlp_layers', 'train_eps']}
+        return GIN(in_channels, hidden_channels, out_channels, **gin_params)
     elif model_name == 'gat':
-        return GAT(in_channels, hidden_channels, out_channels, **kwargs)
+        gat_params = {k: v for k, v in kwargs.items() if k in ['n_layers', 'dropout', 'heads', 'concat']}
+        return GAT(in_channels, hidden_channels, out_channels, **gat_params)
     elif model_name == 'gat2':
-        return GAT2(in_channels, hidden_channels, out_channels, **kwargs)
+        gat2_params = {k: v for k, v in kwargs.items() if k in ['n_layers', 'dropout', 'heads', 'concat']}
+        return GAT2(in_channels, hidden_channels, out_channels, **gat2_params)
     else:
         raise ValueError(f"Model {model_name} not recognized.")
 
@@ -55,6 +61,10 @@ def train(model, data, noisy_indices, device, config):
 
     if supplementary_gnn and supplementary_gnn.lower() == "nrgnn":
         print("Using NRGNN training")
+        return
+
+    if supplementary_gnn and supplementary_gnn.lower() == "pi_gnn":
+        print("Using PI-GNN training")
         return
 
     if method == "standard":
@@ -73,7 +83,7 @@ def train(model, data, noisy_indices, device, config):
             num_classes=config['dataset']['num_classes']
         )
     else:
-        raise ValueError(f"Training method '{method}' not recognized.")
+        raise ValueError(f"Training method '{method}' not recognized. Supported methods: standard, dirichlet, ncod")
 
 def run_experiment(config):
     setup_seed_device(config['seed'])
@@ -89,29 +99,81 @@ def run_experiment(config):
         random_seed=config['noise'].get('seed', 42),
         debug=True
     )
+
+    data.y_original = data.y.clone()
+    data.y = noisy_labels
     data.y_noisy = noisy_labels
 
-    if config['training'].get('supplementary_gnn', "").lower() == 'nrgnn' or config['training']['method'].lower() == 'nrgnn':
+    if (config['training'].get('supplementary_gnn', "").lower() == 'nrgnn' or 
+        config['training']['method'].lower() == 'nrgnn'):
         print("Using NRGNN")
         nrgnn_model = NRGNN(args=config.get('nrgnn_params', {}), device=device, gnn_type=config['model']['name'].upper())
         adj_matrix = to_scipy_sparse_matrix(data.edge_index, num_nodes=data.num_nodes)
         nrgnn_model.fit(
             features=data.x,
             adj=adj_matrix,
-            labels=data.y_noisy,
+            labels=data.y,
             idx_train=noisy_indices.cpu().numpy() if isinstance(noisy_indices, torch.Tensor) else noisy_indices
         )
         return
 
-    model_params = {k: v for k, v in config['model'].items() if k != 'name'}
-    model = get_model(config['model']['name'], data.num_features, config['model'].get('hidden_channels', 64), num_classes, **model_params).to(device)
+    if (config['training'].get('supplementary_gnn', "").lower() == 'pi_gnn' or 
+        config['training']['method'].lower() == 'pi_gnn'):
+        print("Using PI-GNN")
+        
+        trainer_params = config.get('pi_gnn_params', {})
+        trainer = InnerProductTrainer(
+            device=device,
+            epochs=int(trainer_params.get('epochs', 400)),
+            start_epoch=int(trainer_params.get('start_epoch', 200)),
+            miself=bool(trainer_params.get('miself', False)),
+            lr_main=float(trainer_params.get('lr_main', 0.01)),
+            lr_mi=float(trainer_params.get('lr_mi', 0.01)),
+            weight_decay=float(trainer_params.get('weight_decay', 5e-4)),
+            norm=trainer_params.get('norm', None),
+            vanilla=bool(trainer_params.get('vanilla', False)),
+        )
+        
+        model_params = {k: v for k, v in config['model'].items() if k not in ['name']}
+        base_model = get_model(
+            model_name=config['model']['name'], 
+            in_channels=data.num_features,
+            out_channels=num_classes, 
+            **model_params
+        )
+        decoder = InnerProductDecoder()
+        model = Net(gnn_model=base_model, supplementary_gnn=decoder)
+        
+        trainer_config = {
+            'model_name': config['model']['name'],
+            'hidden_channels': config['model'].get('hidden_channels', 64),
+            'n_layers': config['model'].get('n_layers', 2),
+            'dropout': config['model'].get('dropout', 0.5),
+            'mlp_layers': config['model'].get('mlp_layers', 2),
+            'train_eps': config['model'].get('train_eps', True),
+            'heads': config['model'].get('heads', 8),
+            'concat': config['model'].get('concat', True),
+            'self_loop': config['model'].get('self_loop', True)
+        }
+        
+        test_acc = trainer.fit(model, data, trainer_config, get_model)
+        print(f"PI-GNN Training completed with test accuracy: {test_acc:.4f}")
+        return
 
-    train(model, data, noisy_indices, device, config)
+    model_params = {k: v for k, v in config['model'].items() if k not in ['name']}
+    model = get_model(
+        model_name=config['model']['name'], 
+        in_channels=data.num_features,
+        out_channels=num_classes, 
+        **model_params
+    ).to(device)
 
+    result = train(model, data, noisy_indices, device, config)
+    
     model.eval()
     with torch.no_grad():
         pred = model(data).argmax(dim=1)
-        acc = (pred[noisy_indices] == data.y_noisy[noisy_indices]).float().mean()
+        acc = (pred[noisy_indices] == data.y[noisy_indices]).float().mean()
         print(f"Final Training Accuracy: {acc:.4f}")
 
 

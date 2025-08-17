@@ -41,6 +41,37 @@ def random_noise_cp(n_classes, noise_rate):
     assert_array_almost_equal(P.sum(axis=1), 1, decimal=6)
     return P
 
+def random_pair_noise_cp(n_classes, noise_rate, seed=1):
+    rng = np.random.default_rng(seed)
+    P = np.eye(n_classes, dtype=np.float64) * (1 - noise_rate)
+    for i in range(n_classes):
+        candidates = list(range(i)) + list(range(i + 1, n_classes))
+        chosen = rng.choice(candidates)
+        P[i, chosen] = noise_rate
+    assert_array_almost_equal(P.sum(axis=1), 1, decimal=6)
+    return P
+
+def flip_noise_cp(n_classes, noise_rate, seed=1):
+    np.random.seed(seed)
+    P = np.eye(n_classes, dtype=np.float64) * (1 - noise_rate)
+
+    P[0, 1] = noise_rate
+
+    for i in range(1, n_classes - 1):
+        P[i, i + 1] = noise_rate
+
+    P[n_classes - 1, 0] = noise_rate
+    
+    assert_array_almost_equal(P.sum(axis=1), 1, decimal=6)
+    return P
+
+def uniform_mix_revised_noise_cp(n_classes, noise_rate):
+
+    P = np.eye(n_classes, dtype=np.float64) * (1 - noise_rate)
+    P += noise_rate / n_classes
+    assert_array_almost_equal(P.sum(axis=1), 1, decimal=6)
+    return P
+
 def add_instance_independent_label_noise(labels, cp, random_seed):
     assert_array_almost_equal(cp.sum(axis=1), np.ones(cp.shape[0]), decimal=6)
     rs = np.random.RandomState(random_seed)
@@ -66,20 +97,11 @@ def add_instance_dependent_label_noise(noise_rate, feature, labels, num_classes,
     new_label = np.array([np.random.choice(num_classes, p=P[i]) for i in range(num_nodes)])
     return new_label
 
-def random_pair_noise_cp(n_classes, noise_rate, seed=1):
-    rng = np.random.default_rng(seed)
-    P = np.eye(n_classes, dtype=np.float64) * (1 - noise_rate)
-    for i in range(n_classes):
-        candidates = list(range(i)) + list(range(i + 1, n_classes))
-        chosen = rng.choice(candidates)
-        P[i, chosen] = noise_rate
-    assert_array_almost_equal(P.sum(axis=1), 1, decimal=6)
-    return P
-
 def label_process(labels, features, n_classes, noise_type='uniform', noise_rate=0, random_seed=5, debug=True):
     assert 0 <= noise_rate <= 1
     cp = None
     noisy_labels = None
+    
     if noise_rate == 0:
         cp = np.eye(n_classes)
         noisy_labels = labels.clone()
@@ -97,10 +119,15 @@ def label_process(labels, features, n_classes, noise_type='uniform', noise_rate=
             cp = pair_noise_cp(n_classes, noise_rate)
         elif noise_type == 'random_pair':
             cp = random_pair_noise_cp(n_classes, noise_rate, seed=random_seed)
+        elif noise_type == 'flip':
+            cp = flip_noise_cp(n_classes, noise_rate, seed=random_seed)
+        elif noise_type == 'uniform_mix':
+            cp = uniform_mix_revised_noise_cp(n_classes, noise_rate)
         elif noise_type == 'instance':
             pass
         else:
             cp = np.eye(n_classes)
+    
     if noisy_labels is None:
         if noise_rate > 0 and cp is not None:
             noisy_labels_np = add_instance_independent_label_noise(labels.cpu().numpy(), cp, random_seed)
@@ -110,5 +137,12 @@ def label_process(labels, features, n_classes, noise_type='uniform', noise_rate=
             noisy_labels = torch.tensor(noisy_labels_np, dtype=torch.long, device=labels.device)
         else:
             noisy_labels = labels.clone()
+    
+    if debug and noise_rate > 0:
+        noise_count = (noisy_labels != labels).sum().item()
+        actual_noise_rate = noise_count / len(labels)
+        print(f"Noise type: {noise_type}, Target rate: {noise_rate:.2f}, Actual rate: {actual_noise_rate:.2f}")
+        print(f"Total corrupted labels: {noise_count} out of {len(labels)}")
+    
     noisy_indices = (noisy_labels != labels).nonzero(as_tuple=True)[0].cpu().numpy()
     return noisy_labels, noisy_indices
