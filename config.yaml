@@ -4,14 +4,14 @@ dataset:
   name: cora # cora, citeseer, pubmed, corafull, computers, photo, coauthorcs, coauthorphysics, wikics, reddit
   root: /data
 noise:
-  type: flip # clean, uniform, uniform_simple, random, pair, random_pair, flip, uniform_mix, instance
+  type: uniform_simple # clean, uniform, uniform_simple, random, pair, random_pair, flip, uniform_mix, instance
   rate: 0.3
   seed: 42
 model:
-  name: gin # gcn, gin, gat, gat2
-  hidden_channels: 64
+  name: gcn # gcn, gin, gat, gat2
+  hidden_channels: 128
   n_layers: 2
-  dropout: 0.3
+  dropout: 0.5
   # GCN specific parameters
   self_loop: true
   # GIN specific parameters
@@ -21,22 +21,24 @@ model:
   heads: 8
   concat: true
 training:
+  # Methods:
   # - standard: Basic cross-entropy loss
   # - dirichlet: Dirichlet regularization
   # - ncod: NCOD method
   # - nrgnn: Use NRGNN as main method
   # - pi_gnn: Use PI-GNN as main method
-  method: pi_gnn # standard, dirichlet, ncod, nrgnn, pi_gnn
-  
+  # - cr_gnn: Use CR-GNN as main method
+  method: cr_gnn # standard, dirichlet, ncod, nrgnn, pi_gnn, cr_gnn
   total_epochs: 200
   
-  #Supplementary GNN
+  # Supplementary GNN options
   # - None: No supplementary GNN
   # - nrgnn: Use NRGNN
-  # - pi_gnn: Use PI-GNN
-  supplementary_gnn: pi_gnn # None, nrgnn, pi_gnn
+  # - pi_gnn: Use PI-GNN  
+  # - cr_gnn: Use CR-GNN
+  supplementary_gnn: cr_gnn # None, nrgnn, pi_gnn, cr_gnn
 
-#NRGNN
+# NRGNN Parameters
 nrgnn_params:
   edge_hidden: 64
   t_small: 0.1
@@ -46,7 +48,7 @@ nrgnn_params:
   alpha: 0.5
   beta: 0.5
 
-#PI-GNN
+# PI-GNN Parameters
 pi_gnn_params:
   epochs: 400
   start_epoch: 200
@@ -56,3 +58,16 @@ pi_gnn_params:
   weight_decay: 5e-4
   norm: null
   vanilla: false
+
+# CR-GNN Parameters
+cr_gnn_params:
+  epochs: 400
+  patience: 50
+  lr: 0.0001
+  weight_decay: 5e-4
+  T: 0.5
+  tau: 0.5
+  p: 0.5
+  alpha: 1.0
+  beta: 0.5 # weight for cross-space consistency loss (0 to disable)
+  debug: true

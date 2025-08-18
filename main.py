@@ -11,6 +11,7 @@ from model.gnns import GCN, GIN, GAT, GAT2
 from loss.gnns_loss import train_with_standard_loss, train_with_dirichlet, train_with_ncod
 from model.NRGNN import NRGNN
 from model.PI_GNN import InnerProductTrainer, Net, InnerProductDecoder
+from model.CR_GNN import CRGNNTrainer
 
 def load_dataset(name, root=None):
     if root is None:
@@ -38,7 +39,12 @@ def load_dataset(name, root=None):
     return data, dataset.num_classes
 
 def get_model(model_name, in_channels, hidden_channels, out_channels, **kwargs):
+
     model_name = model_name.lower()
+
+    kwargs.pop('in_channels', None)
+    kwargs.pop('hidden_channels', None) 
+    kwargs.pop('out_channels', None)
     
     if model_name == 'gcn':
         gcn_params = {k: v for k, v in kwargs.items() if k in ['n_layers', 'dropout', 'self_loop']}
@@ -47,10 +53,10 @@ def get_model(model_name, in_channels, hidden_channels, out_channels, **kwargs):
         gin_params = {k: v for k, v in kwargs.items() if k in ['n_layers', 'dropout', 'mlp_layers', 'train_eps']}
         return GIN(in_channels, hidden_channels, out_channels, **gin_params)
     elif model_name == 'gat':
-        gat_params = {k: v for k, v in kwargs.items() if k in ['n_layers', 'dropout', 'heads', 'concat']}
+        gat_params = {k: v for k, v in kwargs.items() if k in ['n_layers', 'dropout', 'heads']}
         return GAT(in_channels, hidden_channels, out_channels, **gat_params)
     elif model_name == 'gat2':
-        gat2_params = {k: v for k, v in kwargs.items() if k in ['n_layers', 'dropout', 'heads', 'concat']}
+        gat2_params = {k: v for k, v in kwargs.items() if k in ['n_layers', 'dropout', 'heads']}
         return GAT2(in_channels, hidden_channels, out_channels, **gat2_params)
     else:
         raise ValueError(f"Model {model_name} not recognized.")
@@ -65,6 +71,10 @@ def train(model, data, noisy_indices, device, config):
 
     if supplementary_gnn and supplementary_gnn.lower() == "pi_gnn":
         print("Using PI-GNN training")
+        return
+
+    if supplementary_gnn and supplementary_gnn.lower() == "cr_gnn":
+        print("Using CR-GNN training")
         return
 
     if method == "standard":
@@ -104,9 +114,11 @@ def run_experiment(config):
     data.y = noisy_labels
     data.y_noisy = noisy_labels
 
+    # NRGNN Training
     if (config['training'].get('supplementary_gnn', "").lower() == 'nrgnn' or 
         config['training']['method'].lower() == 'nrgnn'):
         print("Using NRGNN")
+        
         nrgnn_model = NRGNN(args=config.get('nrgnn_params', {}), device=device, gnn_type=config['model']['name'].upper())
         adj_matrix = to_scipy_sparse_matrix(data.edge_index, num_nodes=data.num_nodes)
         nrgnn_model.fit(
@@ -117,6 +129,7 @@ def run_experiment(config):
         )
         return
 
+    # PI-GNN Training
     if (config['training'].get('supplementary_gnn', "").lower() == 'pi_gnn' or 
         config['training']['method'].lower() == 'pi_gnn'):
         print("Using PI-GNN")
@@ -158,6 +171,54 @@ def run_experiment(config):
         
         test_acc = trainer.fit(model, data, trainer_config, get_model)
         print(f"PI-GNN Training completed with test accuracy: {test_acc:.4f}")
+        return
+
+    # CR-GNN Training
+    if (config['training'].get('supplementary_gnn', "").lower() == 'cr_gnn' or 
+        config['training']['method'].lower() == 'cr_gnn'):
+        print("Using CR-GNN")
+        
+        trainer_params = config.get('cr_gnn_params', {})
+        trainer = CRGNNTrainer(
+            device=device,
+            hidden_channels=config['model'].get('hidden_channels', 64),
+            lr=float(trainer_params.get('lr', 0.001)),
+            weight_decay=float(trainer_params.get('weight_decay', 5e-4)),
+            epochs=int(trainer_params.get('epochs', 200)),
+            patience=int(trainer_params.get('patience', 20)),
+            T=float(trainer_params.get('T', 0.5)),
+            tau=float(trainer_params.get('tau', 0.5)),
+            p=float(trainer_params.get('p', 0.5)),
+            alpha=float(trainer_params.get('alpha', 1.0)),
+            beta=float(trainer_params.get('beta', 0.0)),
+            debug=bool(trainer_params.get('debug', True))
+        )
+        
+        model_params = {k: v for k, v in config['model'].items() if k not in ['name']}
+
+        model_params.pop('hidden_channels', None)
+        base_model = get_model(
+            model_name=config['model']['name'], 
+            in_channels=data.num_features,
+            hidden_channels=config['model'].get('hidden_channels', 64),
+            out_channels=num_classes,
+            **model_params
+        )
+
+        trainer_config = {
+            'model_name': config['model']['name'],
+            'hidden_channels': config['model'].get('hidden_channels', 64),
+            'n_layers': config['model'].get('n_layers', 2),
+            'dropout': config['model'].get('dropout', 0.5),
+            'mlp_layers': config['model'].get('mlp_layers', 2),
+            'train_eps': config['model'].get('train_eps', True),
+            'heads': config['model'].get('heads', 8),
+            'concat': config['model'].get('concat', True),
+            'self_loop': config['model'].get('self_loop', True)
+        }
+        
+        test_acc = trainer.fit(base_model, data, trainer_config, get_model)
+        print(f"CR-GNN Training completed with test accuracy: {test_acc:.4f}")
         return
 
     model_params = {k: v for k, v in config['model'].items() if k not in ['name']}
