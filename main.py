@@ -406,7 +406,32 @@ def run_experiment(config):
     if (config['training'].get('supplementary_gnn', "").lower() == 'graphcleaner' or
         config['training']['method'].lower() == 'graphcleaner'):
         print("Using GraphCleaner")
-
+        
+        data_for_detection = data.clone()
+        
+        test_labels = data.y_original[data.test_mask]
+        test_features = data.x[data.test_mask] if config['noise']['type'] == 'instance' else None
+        test_indices = data.test_mask.nonzero(as_tuple=True)[0]
+        
+        noisy_test_labels, relative_noisy_test_indices = label_process(
+            test_labels,
+            test_features, 
+            num_classes,
+            noise_type=config['noise']['type'],
+            noise_rate=config['noise']['rate'],
+            random_seed=config['noise'].get('seed', 42) + 1000,
+            idx_train=test_indices,
+            debug=False
+        )
+        
+        data_for_detection.y_noisy = data.y_noisy.clone()
+        data_for_detection.y_noisy[data.test_mask] = noisy_test_labels
+        data_for_detection.y = data_for_detection.y_noisy.clone()
+        
+        global_noisy_test_indices = test_indices[relative_noisy_test_indices]
+        all_noisy_indices = torch.cat([global_noisy_indices, global_noisy_test_indices])
+        
+        print(f"Added noise to {len(relative_noisy_test_indices)} test samples for detection evaluation")
 
         base_model = get_model(
             model_name=config['model']['name'],
@@ -417,16 +442,17 @@ def run_experiment(config):
             dropout=config['model'].get('dropout', 0.5),
             self_loop=config['model'].get('self_loop', True)
         )
-        
         detector = GraphCleanerDetector(config, device)
 
-        predictions, probs, classifier = detector.detect_noise(data, base_model, num_classes)
-        test_ground_truth = get_noisy_ground_truth(data, global_noisy_indices)[data.test_mask.cpu()].cpu().numpy()
+        predictions, probs, _ = detector.detect_noise(data_for_detection, base_model, num_classes)
+        
+        test_ground_truth = get_noisy_ground_truth(data_for_detection, all_noisy_indices)[data.test_mask.cpu()].cpu().numpy()
         detection_results = detector.evaluate_detection(predictions, test_ground_truth, probs)
         
         print(f"\nGraphCleaner Detection Summary:")
         print(f"Detected {np.sum(predictions)} out of {len(predictions)} test samples as noisy")
         print(f"Ground truth: {np.sum(test_ground_truth)} samples are actually noisy")
+        print(f"Test noise rate: {np.sum(test_ground_truth) / len(test_ground_truth):.4f}")
         
         return detection_results
 
