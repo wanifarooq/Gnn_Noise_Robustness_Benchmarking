@@ -9,14 +9,15 @@ import yaml
 
 from utilities.usefull import setup_seed_device
 from utilities.noises import label_process
-from model.gnns import GCN, GIN, GAT, GAT2
-from loss.gnns_loss import train_with_standard_loss, train_with_dirichlet, train_with_ncod
+from model.GNNs import GCN, GIN, GAT, GAT2
+from loss.GNNs_loss import train_with_standard_loss, train_with_dirichlet, train_with_ncod
 from model.NRGNN import NRGNN
 from model.PI_GNN import InnerProductTrainer, Net, InnerProductDecoder
 from model.CR_GNN import CRGNNTrainer
 from model.LafAK import Attack, prepare_simpledata_attrs, resetBinaryClass_init
 from model.RTGNN import RTGNN
 from model.GraphCleaner import GraphCleanerDetector, get_noisy_ground_truth
+from model.UnionNET import UnionNET
 
 def load_dataset(name, root=None):
     if root is None:
@@ -85,6 +86,9 @@ def train(model, data, noisy_indices, device, config):
         return
     if supplementary_gnn and supplementary_gnn.lower() == "graphcleaner":
         print("Using GraphCleaner training")
+        return
+    if supplementary_gnn and supplementary_gnn.lower() == "unionnet":
+        print("Using UnionNET training")
         return
     
     if method == "standard":
@@ -455,6 +459,43 @@ def run_experiment(config):
         print(f"Test noise rate: {np.sum(test_ground_truth) / len(test_ground_truth):.4f}")
         
         return detection_results
+    
+    # UnionNET Training
+    if (config['training'].get('supplementary_gnn', "").lower() == 'unionnet' or
+        config['training']['method'].lower() == 'unionnet'):
+        print("Using UnionNET")
+        
+        gnn_model = get_model(
+            model_name=config['model']['name'],
+            in_channels=data.num_features,
+            hidden_channels=config['model'].get('hidden_channels', 64),
+            out_channels=num_classes,
+            mlp_layers=config.get('mlp_layers', 2),
+            train_eps=config.get('train_eps', True),
+            heads=config.get('heads', 8),
+            n_layers=config['model'].get('n_layers', 2),
+            dropout=config['model'].get('dropout', 0.5),
+            self_loop=config['model'].get('self_loop', True)
+        ).to(device)
+        
+        unionnet_config = {
+            'n_epochs': config.get('total_epochs', 200),
+            'lr': config.get('lr', 0.01),
+            'weight_decay': config.get('weight_decay', 5e-4),
+            'patience': config.get('patience', 50),
+            'k': config.get('k', 5),
+            'alpha': config.get('alpha', 0.5),
+            'feat_norm': config.get('feat_norm', True)
+        }
+        
+        unionnet = UnionNET(gnn_model, data, num_classes, unionnet_config)
+        result = unionnet.train(debug=True)
+        
+        print("UnionNET Results:")
+        print(f"Train Acc: {result['train']:.4f}")
+        print(f"Valid Acc: {result['val']:.4f}")
+        print(f"Test Acc: {result['test']:.4f}")
+        return result
 
     model_params = {k: v for k, v in config['model'].items() if k not in ['name']}
     model = get_model(

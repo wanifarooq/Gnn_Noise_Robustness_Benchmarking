@@ -30,8 +30,8 @@ training:
   # - cr_gnn: use CR-GNN as main method
   # - lafak: use LafAK as main method
   # - rtgnn: use RTGNN as main method
-  # - graphcleaner: use GraphCleaner as main method
-  method: graphcleaner # standard, dirichlet, ncod, nrgnn, pi_gnn, cr_gnn, lafak, rtgnn, graphcleaner
+  # - unionnet: use UnionNET as main method
+  method: unionnet # standard, dirichlet, ncod, nrgnn, pi_gnn, cr_gnn, lafak, rtgnn, graphcleaner, unionnet
   total_epochs: 200
   
   # Supplementary GNN options
@@ -42,7 +42,8 @@ training:
   # - lafak: use LafAK
   # - rtgnn: use RTGNN
   # - graphcleaner: use GraphCleaner
-  supplementary_gnn: graphcleaner # None, nrgnn, pi_gnn, cr_gnn, lafak, rtgnn, graphcleaner
+  # - unionnet: use UnionNET
+  supplementary_gnn: unionnet # None, nrgnn, pi_gnn, cr_gnn, lafak, rtgnn, graphcleaner, unionnet
 
 # NRGNN parameters
 nrgnn_params:
@@ -105,3 +106,9 @@ graphcleaner_params:
   k: 3
   sample_rate: 0.5
   max_iter_classifier: 3000
+
+# UnionNET parameters
+unionnet_params:
+  k: 5
+  alpha: 0.5
+  feat_norm: True

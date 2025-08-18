@@ -11,7 +11,7 @@ from torch_geometric.data import Data
 from torch_geometric.utils import from_scipy_sparse_matrix, to_undirected, negative_sampling
 import time
 
-from model.gnns import GCN, GIN, GAT, GAT2
+from model.GNNs import GCN, GIN, GAT, GAT2
 
 class EstimateAdj(nn.Module):
     def __init__(self, nfea, args, idx_train, device='cuda'):

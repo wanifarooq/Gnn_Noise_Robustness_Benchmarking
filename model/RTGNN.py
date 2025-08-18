@@ -8,7 +8,7 @@ from torch_geometric.utils import from_scipy_sparse_matrix, negative_sampling
 from sklearn.metrics import accuracy_score
 from torch_geometric.data import Data
 
-from model.gnns import GCN, GIN, GAT, GAT2
+from model.GNNs import GCN, GIN, GAT, GAT2
 
 class DualGNN(nn.Module):
     def __init__(self, gnn_type: str, nfeat: int, nhid: int, nclass: int,
