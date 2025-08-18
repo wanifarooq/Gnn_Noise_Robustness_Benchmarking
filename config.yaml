@@ -1,12 +1,16 @@
 seed: 42
+
 device: cuda
+
 dataset:
   name: cora # cora, citeseer, pubmed, corafull, computers, photo, coauthorcs, coauthorphysics, wikics, reddit
   root: /data
+
 noise:
   type: instance # clean, uniform, uniform_simple, random, pair, random_pair, flip, uniform_mix, instance, deterministic
   rate: 0.3
   seed: 42
+
 model:
   name: gcn # gcn, gin, gat, gat2
   hidden_channels: 128
@@ -20,6 +24,7 @@ model:
   # GAT/GAT2 specific parameters
   heads: 8
   concat: true
+  
 training:
   # Methods:
   # - standard: Basic cross-entropy loss
@@ -30,8 +35,8 @@ training:
   # - cr_gnn: use CR-GNN as main method
   # - lafak: use LafAK as main method
   # - rtgnn: use RTGNN as main method
-  # - unionnet: use UnionNET as main method
-  method: unionnet # standard, dirichlet, ncod, nrgnn, pi_gnn, cr_gnn, lafak, rtgnn, graphcleaner, unionnet
+  # - gnn_cleaner: use GNN Cleaner as main method
+  method: gnn_cleaner # standard, dirichlet, ncod, nrgnn, pi_gnn, cr_gnn, lafak, rtgnn, graphcleaner, unionnet, gnn_cleaner
   total_epochs: 200
   
   # Supplementary GNN options
@@ -43,7 +48,8 @@ training:
   # - rtgnn: use RTGNN
   # - graphcleaner: use GraphCleaner
   # - unionnet: use UnionNET
-  supplementary_gnn: unionnet # None, nrgnn, pi_gnn, cr_gnn, lafak, rtgnn, graphcleaner, unionnet
+  # - gnn_cleaner: use GNN Cleaner
+  supplementary_gnn: gnn_cleaner # None, nrgnn, pi_gnn, cr_gnn, lafak, rtgnn, graphcleaner, unionnet, gnn_cleaner
 
 # NRGNN parameters
 nrgnn_params:
@@ -112,3 +118,9 @@ unionnet_params:
   k: 5
   alpha: 0.5
   feat_norm: True
+
+# GNN Cleaner parameters
+gnn_cleaner_params:
+  alpha: 0.9
+  lp_iters: 30
+  sharpen_temp: 1.0

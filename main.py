@@ -18,6 +18,7 @@ from model.LafAK import Attack, prepare_simpledata_attrs, resetBinaryClass_init
 from model.RTGNN import RTGNN
 from model.GraphCleaner import GraphCleanerDetector, get_noisy_ground_truth
 from model.UnionNET import UnionNET
+from model.GNN_Cleaner import GNNCleanerTrainer
 
 def load_dataset(name, root=None):
     if root is None:
@@ -89,6 +90,9 @@ def train(model, data, noisy_indices, device, config):
         return
     if supplementary_gnn and supplementary_gnn.lower() == "unionnet":
         print("Using UnionNET training")
+        return
+    if supplementary_gnn and supplementary_gnn.lower() == "gnn_cleaner":
+        print("Using GNN Cleaner training")
         return
     
     if method == "standard":
@@ -495,6 +499,45 @@ def run_experiment(config):
         print(f"Train Acc: {result['train']:.4f}")
         print(f"Valid Acc: {result['val']:.4f}")
         print(f"Test Acc: {result['test']:.4f}")
+        return result
+    
+    # GNN Cleaner Training
+    if (config['training'].get('supplementary_gnn', "").lower() == 'gnn_cleaner' or
+        config['training']['method'].lower() == 'gnn_cleaner'):
+        print("Using GNN Cleaner")
+        print("Usando GNN Cleaner come modello principale")
+
+        gnn_model = get_model(
+            model_name=config['model']['name'],
+            in_channels=data.num_features,
+            hidden_channels=config['model'].get('hidden_channels', 64),
+            out_channels=num_classes,
+            mlp_layers=config.get('mlp_layers', 2),
+            train_eps=config.get('train_eps', True),
+            heads=config.get('heads', 8),
+            n_layers=config['model'].get('n_layers', 2),
+            dropout=config['model'].get('dropout', 0.5),
+            self_loop=config['model'].get('self_loop', True)
+        )
+        
+        gnn_cleaner_config = {
+            'epochs': config.get('total_epochs', 200),
+            'lr': config.get('lr', 0.01),
+            'weight_decay': config.get('weight_decay', 5e-4),
+            'hidden_channels': config.get('hidden_channels', 64),
+            'alpha': config.get('alpha', 0.9),
+            'lp_iters': config.get('lp_iters', 30),
+            'sharpen_temp': config.get('sharpen_temp', 1.0)
+        }
+
+        trainer = GNNCleanerTrainer(gnn_cleaner_config, data, device, num_classes, gnn_model)
+        result = trainer.train(debug=True)
+        
+        print("\n=== GNN Cleaner Results ===")
+        print(f"Train Acc: {result['train']:.4f}")
+        print(f"Valid Acc: {result['val']:.4f}")
+        print(f"Test Acc: {result['test']:.4f}")
+        
         return result
 
     model_params = {k: v for k, v in config['model'].items() if k not in ['name']}
