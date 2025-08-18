@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch_geometric.datasets import Planetoid, CoraFull, Amazon, Coauthor, WikiCS, Reddit
@@ -12,6 +13,7 @@ from loss.gnns_loss import train_with_standard_loss, train_with_dirichlet, train
 from model.NRGNN import NRGNN
 from model.PI_GNN import InnerProductTrainer, Net, InnerProductDecoder
 from model.CR_GNN import CRGNNTrainer
+from model.LafAK import Attack, prepare_simpledata_attrs, resetBinaryClass_init
 
 def load_dataset(name, root=None):
     if root is None:
@@ -220,6 +222,89 @@ def run_experiment(config):
         test_acc = trainer.fit(base_model, data, trainer_config, get_model)
         print(f"CR-GNN Training completed with test accuracy: {test_acc:.4f}")
         return
+
+    # LafAK / GradientAttack Training
+    if (config['training'].get('supplementary_gnn', "").lower() == 'lafak' or 
+        config['training']['method'].lower() == 'lafak'):
+        print("Using LafAK / GradientAttack")
+
+        data_dict = prepare_simpledata_attrs(data.cpu())
+        
+        target_classes = config.get('target_classes', None)
+        actual_classes = np.unique(data.y.cpu().numpy())
+        print(f"Available classes in dataset: {actual_classes}")
+        
+        if target_classes is None or len(target_classes) < 2:
+            if len(actual_classes) >= 2:
+                target_classes = actual_classes[:2].tolist()
+            else:
+                raise ValueError(f"Dataset has only {len(actual_classes)} classes, need at least 2 for binary attack")
+        
+        valid_targets = [tc for tc in target_classes if tc in actual_classes]
+        if len(valid_targets) < 2:
+            valid_targets = actual_classes[:2].tolist()
+        
+        target_classes = valid_targets[:2]
+        print(f"Using target classes for attack: {target_classes}")
+        
+        K = int(data.y.max().item() + 1)
+        target_classes = [min(tc, K-1) for tc in target_classes]
+        
+        resetBinaryClass_init(data_dict, a=target_classes[0], b=target_classes[1])
+        
+        gnn_model = get_model(
+            model_name=config['model']['name'],
+            in_channels=data.num_features,
+            hidden_channels=config['model'].get('hidden_channels', 64),
+            out_channels=2,
+            n_layers=config['model'].get('n_layers', 2),
+            dropout=config['model'].get('dropout', 0.5),
+            self_loop=config['model'].get('self_loop', True)
+        )
+
+        attack = Attack(
+            data_dict=data_dict,
+            gpu_id=int(device.split(':')[-1]) if ':' in str(device) else 0,
+            atkEpoch=config.get('attack_epochs', 500),
+            gcnL2=config.get('gcn_l2', 5e-4)
+        )
+        
+        print("Calculating clean accuracy...")
+        resetBinaryClass_init(data_dict, a=target_classes[0], b=target_classes[1])
+        acc_clean_runs = []
+        for run in range(3):
+            print(f"Clean run {run+1}/3...")
+            acc_clean, _, _ = attack.GNN_test(gnn_model)
+            acc_clean_runs.append(acc_clean)
+        
+        acc_clean_avg = sum(acc_clean_runs) / len(acc_clean_runs)
+        print(f"Clean accuracy (average): {acc_clean_avg:.4f}")
+        
+        print("Performing gradient attack...")
+        results = attack.binaryAttack_multiclass_with_clean(
+            c_max=config.get('c_max', 10),
+            a=target_classes[0],
+            b=target_classes[1],
+            gnn_model=gnn_model
+        )
+        
+        print(f"Final attack results")
+        print(f"Binary Clean accuracy: {results['binary_clean_acc']:.4f}")
+        print(f"Binary Attacked accuracy: {results['binary_attacked_acc']:.4f}")
+        print(f"Binary Attack success: {results['attack_success']:.4f}")
+        
+        if results.get('gnn_clean_acc') and results.get('gnn_attacked_acc'):
+            print(f"GNN Clean accuracy: {results['gnn_clean_acc']:.4f}")
+            print(f"GNN Attacked accuracy: {results['gnn_attacked_acc']:.4f}")
+            print(f"GNN Attack success: {results['gnn_attack_success']:.4f}")
+        
+        return {
+            "clean_acc": results.get('gnn_clean_acc', results['binary_clean_acc']),
+            "attacked_acc": results.get('gnn_attacked_acc', results['binary_attacked_acc']),
+            "attack_success": results.get('gnn_attack_success', results['attack_success']),
+            "target_classes": target_classes,
+            "final_acc": results.get('gnn_attacked_acc', results['binary_attacked_acc'])
+        }
 
     model_params = {k: v for k, v in config['model'].items() if k not in ['name']}
     model = get_model(

@@ -25,18 +25,20 @@ training:
   # - standard: Basic cross-entropy loss
   # - dirichlet: Dirichlet regularization
   # - ncod: NCOD method
-  # - nrgnn: Use NRGNN as main method
-  # - pi_gnn: Use PI-GNN as main method
-  # - cr_gnn: Use CR-GNN as main method
-  method: cr_gnn # standard, dirichlet, ncod, nrgnn, pi_gnn, cr_gnn
+  # - nrgnn: use NRGNN as main method
+  # - pi_gnn: use PI-GNN as main method
+  # - cr_gnn: use CR-GNN as main method
+  # - lafak: use LafAK as main method
+  method: lafak # standard, dirichlet, ncod, nrgnn, pi_gnn, cr_gnn, lafak
   total_epochs: 200
   
   # Supplementary GNN options
   # - None: No supplementary GNN
-  # - nrgnn: Use NRGNN
-  # - pi_gnn: Use PI-GNN  
-  # - cr_gnn: Use CR-GNN
-  supplementary_gnn: cr_gnn # None, nrgnn, pi_gnn, cr_gnn
+  # - nrgnn: use NRGNN
+  # - pi_gnn: use PI-GNN  
+  # - cr_gnn: use CR-GNN
+  # - lafak: use LafAK
+  supplementary_gnn: lafak # None, nrgnn, pi_gnn, cr_gnn, lafak
 
 # NRGNN Parameters
 nrgnn_params:
@@ -71,3 +73,10 @@ cr_gnn_params:
   alpha: 1.0
   beta: 0.5 # weight for cross-space consistency loss (0 to disable)
   debug: true
+
+# LafAK Parameters
+lafak_params:
+  target_classes: [2, 3]
+  attack_epochs: 200
+  c_max: 10
+  gcn_l2: 5e-4
