@@ -4,11 +4,11 @@ dataset:
   name: cora # cora, citeseer, pubmed, corafull, computers, photo, coauthorcs, coauthorphysics, wikics, reddit
   root: /data
 noise:
-  type: uniform_simple # clean, uniform, uniform_simple, random, pair, random_pair, flip, uniform_mix, instance
+  type: deterministic # clean, uniform, uniform_simple, random, pair, random_pair, flip, uniform_mix, instance, deterministic
   rate: 0.3
   seed: 42
 model:
-  name: gcn # gcn, gin, gat, gat2
+  name: gat2 # gcn, gin, gat, gat2
   hidden_channels: 128
   n_layers: 2
   dropout: 0.5
@@ -29,7 +29,8 @@ training:
   # - pi_gnn: use PI-GNN as main method
   # - cr_gnn: use CR-GNN as main method
   # - lafak: use LafAK as main method
-  method: lafak # standard, dirichlet, ncod, nrgnn, pi_gnn, cr_gnn, lafak
+  # - rtgnn: use RTGNN as main method
+  method: rtgnn # standard, dirichlet, ncod, nrgnn, pi_gnn, cr_gnn, lafak, rtgnn
   total_epochs: 200
   
   # Supplementary GNN options
@@ -38,7 +39,8 @@ training:
   # - pi_gnn: use PI-GNN  
   # - cr_gnn: use CR-GNN
   # - lafak: use LafAK
-  supplementary_gnn: lafak # None, nrgnn, pi_gnn, cr_gnn, lafak
+  # - rtgnn: use RTGNN
+  supplementary_gnn: rtgnn # None, nrgnn, pi_gnn, cr_gnn, lafak, rtgnn
 
 # NRGNN Parameters
 nrgnn_params:
@@ -80,3 +82,18 @@ lafak_params:
   attack_epochs: 200
   c_max: 10
   gcn_l2: 5e-4
+
+# RTGNN Parameters
+rtgnn_params:
+  epochs: 200
+  hidden: 64
+  edge_hidden: 64
+  dropout: 0.5
+  lr: 0.01
+  weight_decay: 5e-4
+  co_lambda: 0.1
+  alpha: 0.5
+  th: 0.8
+  K: 5
+  tau: 0.1
+  n_neg: 5

@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from torch_geometric.datasets import Planetoid, CoraFull, Amazon, Coauthor, WikiCS, Reddit
 from torch_geometric.transforms import NormalizeFeatures, RandomNodeSplit
 from torch_geometric.utils import to_scipy_sparse_matrix
+import scipy.sparse as sp
 import yaml
 
 from utilities.usefull import setup_seed_device
@@ -14,12 +15,13 @@ from model.NRGNN import NRGNN
 from model.PI_GNN import InnerProductTrainer, Net, InnerProductDecoder
 from model.CR_GNN import CRGNNTrainer
 from model.LafAK import Attack, prepare_simpledata_attrs, resetBinaryClass_init
+from model.RTGNN import RTGNN
 
 def load_dataset(name, root=None):
     if root is None:
         root = "./data"
     name_lower = name.lower()
-
+    
     if name_lower == "corafull":
         dataset = CoraFull(root=f"{root}/CoraFull", transform=NormalizeFeatures())
     elif name_lower in ["cora", "citeseer", "pubmed"]:
@@ -34,18 +36,16 @@ def load_dataset(name, root=None):
         dataset = Reddit(root=f"{root}/Reddit")
     else:
         raise ValueError(f"Dataset {name} not supported.")
-
+    
     data = dataset[0]
     if not hasattr(data, 'train_mask'):
         data = RandomNodeSplit(num_train_per_class=20, num_val=500, num_test=1000)(data)
     return data, dataset.num_classes
 
 def get_model(model_name, in_channels, hidden_channels, out_channels, **kwargs):
-
     model_name = model_name.lower()
-
     kwargs.pop('in_channels', None)
-    kwargs.pop('hidden_channels', None) 
+    kwargs.pop('hidden_channels', None)
     kwargs.pop('out_channels', None)
     
     if model_name == 'gcn':
@@ -66,19 +66,23 @@ def get_model(model_name, in_channels, hidden_channels, out_channels, **kwargs):
 def train(model, data, noisy_indices, device, config):
     method = config['training']['method'].lower()
     supplementary_gnn = config['training'].get('supplementary_gnn', None)
-
+    
     if supplementary_gnn and supplementary_gnn.lower() == "nrgnn":
         print("Using NRGNN training")
         return
-
     if supplementary_gnn and supplementary_gnn.lower() == "pi_gnn":
         print("Using PI-GNN training")
         return
-
     if supplementary_gnn and supplementary_gnn.lower() == "cr_gnn":
         print("Using CR-GNN training")
         return
-
+    if supplementary_gnn and supplementary_gnn.lower() == "lafak":
+        print("Using LafAK training")
+        return
+    if supplementary_gnn and supplementary_gnn.lower() == "rtgnn":
+        print("Using RTGNN training")
+        return
+    
     if method == "standard":
         train_with_standard_loss(model, data, noisy_indices, device, total_epochs=config['training']['total_epochs'])
     elif method == "dirichlet":
@@ -100,42 +104,63 @@ def train(model, data, noisy_indices, device, config):
 def run_experiment(config):
     setup_seed_device(config['seed'])
     device = torch.device(config['device'] if torch.cuda.is_available() else 'cpu')
-
+    
     data, num_classes = load_dataset(config['dataset']['name'], root=config['dataset'].get('root', './data'))
     data = data.to(device)
+    
+    train_mask = data.train_mask
+    val_mask = data.val_mask
+    test_mask = data.test_mask
+    
+    data.y_original = data.y.clone()
+    
+    train_labels = data.y[train_mask]
+    train_features = data.x[train_mask] if config['noise']['type'] == 'instance' else None
+    
+    train_indices = train_mask.nonzero(as_tuple=True)[0]
 
-    noisy_labels, noisy_indices = label_process(
-        data.y, data.x, num_classes,
+    noisy_train_labels, relative_noisy_indices = label_process(
+        train_labels,
+        train_features,
+        num_classes,
         noise_type=config['noise']['type'],
         noise_rate=config['noise']['rate'],
         random_seed=config['noise'].get('seed', 42),
+        idx_train=train_indices,
         debug=True
     )
+    
+    train_indices = train_mask.nonzero(as_tuple=True)[0]
+    global_noisy_indices = train_indices[relative_noisy_indices]
 
-    data.y_original = data.y.clone()
-    data.y = noisy_labels
-    data.y_noisy = noisy_labels
-
+    data.y_noisy = data.y_original.clone()
+    data.y_noisy[train_mask] = noisy_train_labels
+    
+    data.y = data.y_original.clone()
+    data.y[train_mask] = noisy_train_labels
+    
+    print(f"Applied noise to {len(relative_noisy_indices)} training samples out of {train_mask.sum().item()}")
+    print(f"Noise rate: {len(relative_noisy_indices) / train_mask.sum().item():.4f}")
+    
     # NRGNN Training
-    if (config['training'].get('supplementary_gnn', "").lower() == 'nrgnn' or 
+    if (config['training'].get('supplementary_gnn', "").lower() == 'nrgnn' or
         config['training']['method'].lower() == 'nrgnn'):
         print("Using NRGNN")
-        
         nrgnn_model = NRGNN(args=config.get('nrgnn_params', {}), device=device, gnn_type=config['model']['name'].upper())
         adj_matrix = to_scipy_sparse_matrix(data.edge_index, num_nodes=data.num_nodes)
+        
         nrgnn_model.fit(
             features=data.x,
             adj=adj_matrix,
             labels=data.y,
-            idx_train=noisy_indices.cpu().numpy() if isinstance(noisy_indices, torch.Tensor) else noisy_indices
+            idx_train=global_noisy_indices.cpu().numpy()
         )
         return
 
     # PI-GNN Training
-    if (config['training'].get('supplementary_gnn', "").lower() == 'pi_gnn' or 
+    if (config['training'].get('supplementary_gnn', "").lower() == 'pi_gnn' or
         config['training']['method'].lower() == 'pi_gnn'):
         print("Using PI-GNN")
-        
         trainer_params = config.get('pi_gnn_params', {})
         trainer = InnerProductTrainer(
             device=device,
@@ -151,11 +176,12 @@ def run_experiment(config):
         
         model_params = {k: v for k, v in config['model'].items() if k not in ['name']}
         base_model = get_model(
-            model_name=config['model']['name'], 
+            model_name=config['model']['name'],
             in_channels=data.num_features,
-            out_channels=num_classes, 
+            out_channels=num_classes,
             **model_params
         )
+        
         decoder = InnerProductDecoder()
         model = Net(gnn_model=base_model, supplementary_gnn=decoder)
         
@@ -176,10 +202,9 @@ def run_experiment(config):
         return
 
     # CR-GNN Training
-    if (config['training'].get('supplementary_gnn', "").lower() == 'cr_gnn' or 
+    if (config['training'].get('supplementary_gnn', "").lower() == 'cr_gnn' or
         config['training']['method'].lower() == 'cr_gnn'):
         print("Using CR-GNN")
-        
         trainer_params = config.get('cr_gnn_params', {})
         trainer = CRGNNTrainer(
             device=device,
@@ -197,16 +222,15 @@ def run_experiment(config):
         )
         
         model_params = {k: v for k, v in config['model'].items() if k not in ['name']}
-
         model_params.pop('hidden_channels', None)
         base_model = get_model(
-            model_name=config['model']['name'], 
+            model_name=config['model']['name'],
             in_channels=data.num_features,
             hidden_channels=config['model'].get('hidden_channels', 64),
             out_channels=num_classes,
             **model_params
         )
-
+        
         trainer_config = {
             'model_name': config['model']['name'],
             'hidden_channels': config['model'].get('hidden_channels', 64),
@@ -224,14 +248,16 @@ def run_experiment(config):
         return
 
     # LafAK / GradientAttack Training
-    if (config['training'].get('supplementary_gnn', "").lower() == 'lafak' or 
+    if (config['training'].get('supplementary_gnn', "").lower() == 'lafak' or
         config['training']['method'].lower() == 'lafak'):
         print("Using LafAK / GradientAttack")
-
-        data_dict = prepare_simpledata_attrs(data.cpu())
+        
+        data_for_lafak = data.clone()
+        data_for_lafak.y = data.y_original
+        data_dict = prepare_simpledata_attrs(data_for_lafak.cpu())
         
         target_classes = config.get('target_classes', None)
-        actual_classes = np.unique(data.y.cpu().numpy())
+        actual_classes = np.unique(data.y_original.cpu().numpy())
         print(f"Available classes in dataset: {actual_classes}")
         
         if target_classes is None or len(target_classes) < 2:
@@ -243,11 +269,11 @@ def run_experiment(config):
         valid_targets = [tc for tc in target_classes if tc in actual_classes]
         if len(valid_targets) < 2:
             valid_targets = actual_classes[:2].tolist()
-        
         target_classes = valid_targets[:2]
+        
         print(f"Using target classes for attack: {target_classes}")
         
-        K = int(data.y.max().item() + 1)
+        K = int(data.y_original.max().item() + 1)
         target_classes = [min(tc, K-1) for tc in target_classes]
         
         resetBinaryClass_init(data_dict, a=target_classes[0], b=target_classes[1])
@@ -261,7 +287,7 @@ def run_experiment(config):
             dropout=config['model'].get('dropout', 0.5),
             self_loop=config['model'].get('self_loop', True)
         )
-
+        
         attack = Attack(
             data_dict=data_dict,
             gpu_id=int(device.split(':')[-1]) if ':' in str(device) else 0,
@@ -274,7 +300,7 @@ def run_experiment(config):
         acc_clean_runs = []
         for run in range(3):
             print(f"Clean run {run+1}/3...")
-            acc_clean, _, _ = attack.GNN_test(gnn_model)
+            acc_clean, *_ = attack.GNN_test(gnn_model)
             acc_clean_runs.append(acc_clean)
         
         acc_clean_avg = sum(acc_clean_runs) / len(acc_clean_runs)
@@ -306,22 +332,92 @@ def run_experiment(config):
             "final_acc": results.get('gnn_attacked_acc', results['binary_attacked_acc'])
         }
 
+    # RTGNN Training
+    if (config['training'].get('supplementary_gnn', "").lower() == 'rtgnn' or
+        config['training']['method'].lower() == 'rtgnn'):
+        print("Using RTGNN")
+        
+        class RTGNNConfig:
+            def __init__(self, config_dict):
+                self.epochs = config_dict.get('total_epochs', 200)
+                self.hidden = config_dict.get('hidden_channels', 64)
+                self.edge_hidden = config_dict.get('edge_hidden', 64)
+                self.dropout = config_dict.get('dropout', 0.5)
+                self.lr = config_dict.get('lr', 0.01)
+                self.weight_decay = config_dict.get('weight_decay', 5e-4)
+                self.co_lambda = config_dict.get('co_lambda', 0.1)
+                self.alpha = config_dict.get('alpha', 0.5)
+                self.th = config_dict.get('th', 0.8)
+                self.K = config_dict.get('K', 5)
+                self.tau = config_dict.get('tau', 0.1)
+                self.n_neg = config_dict.get('n_neg', 5)
+        
+        rtgnn_args = RTGNNConfig(config)
+        
+        features = data.x.cpu().numpy()
+        labels = data.y_noisy.cpu().numpy()
+        
+        adj = to_scipy_sparse_matrix(data.edge_index, num_nodes=data.num_nodes)
+        adj = adj + adj.T
+        adj = adj.tolil()
+        adj[adj > 1] = 1
+        adj.setdiag(0)
+        
+        features = sp.csr_matrix(features)
+        rowsum = np.array(features.sum(1))
+        r_inv = np.power(rowsum, -1).flatten()
+        r_inv[np.isinf(r_inv)] = 0.
+        r_mat_inv = sp.diags(r_inv)
+        features = r_mat_inv.dot(features)
+        features = torch.FloatTensor(np.array(features.todense()))
+        
+        if hasattr(data, 'train_mask'):
+            idx_train = data.train_mask.nonzero(as_tuple=True)[0].cpu().numpy().tolist()
+            idx_val = data.val_mask.nonzero(as_tuple=True)[0].cpu().numpy().tolist()
+            idx_test = data.test_mask.nonzero(as_tuple=True)[0].cpu().numpy().tolist()
+        else:
+            num_nodes = data.num_nodes
+            idx_train = list(range(min(140, num_nodes // 5)))
+            idx_val = list(range(len(idx_train), min(len(idx_train) + 500, num_nodes // 2)))
+            idx_test = list(range(max(len(idx_train) + len(idx_val), num_nodes // 2), num_nodes))
+        
+        print(f"RTGNN - Dataset: {features.shape[0]} nodes, {features.shape[1]} features, "
+              f"{len(np.unique(labels))} classes")
+        print(f"RTGNN - Splits: {len(idx_train)} train, {len(idx_val)} val, {len(idx_test)} test")
+        print(f"RTGNN - Noise rate: {config['noise']['rate']}")
+        
+        nfeat, nclass = features.shape[1], len(np.unique(labels))
+        rtgnn_backbone = config.get('rtgnn_params', {}).get('gnn_type', config['model']['name'].lower())
+        rtgnn_model = RTGNN(nfeat, nclass, rtgnn_args, device, gnn_type=rtgnn_backbone).to(device)
+                
+        rtgnn_model.fit(features, adj, labels, idx_train, idx_val, idx_test)
+        
+        clean_labels = data.y_original.cpu().numpy()
+        test_acc = rtgnn_model.test(features, clean_labels, idx_test)
+        
+        print(f"RTGNN - Final test accuracy: {test_acc:.4f}")
+        return {"test_acc": test_acc}
+
     model_params = {k: v for k, v in config['model'].items() if k not in ['name']}
     model = get_model(
-        model_name=config['model']['name'], 
+        model_name=config['model']['name'],
         in_channels=data.num_features,
-        out_channels=num_classes, 
+        out_channels=num_classes,
         **model_params
     ).to(device)
-
-    result = train(model, data, noisy_indices, device, config)
     
+    train(model, data, global_noisy_indices, device, config)
     model.eval()
     with torch.no_grad():
         pred = model(data).argmax(dim=1)
-        acc = (pred[noisy_indices] == data.y[noisy_indices]).float().mean()
-        print(f"Final Training Accuracy: {acc:.4f}")
-
+        
+        train_acc = (pred[train_mask] == data.y[train_mask]).float().mean()
+        print(f"Final Training Accuracy (noisy labels): {train_acc:.4f}")
+        
+        test_acc = (pred[test_mask] == data.y_original[test_mask]).float().mean()
+        print(f"Final Test Accuracy (clean labels): {test_acc:.4f}")
+        
+        return {"train_acc": train_acc.item(), "test_acc": test_acc.item()}
 
 if __name__ == "__main__":
     print("\n" + "-"*50)
