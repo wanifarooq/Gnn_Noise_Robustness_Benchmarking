@@ -4,11 +4,11 @@ dataset:
   name: cora # cora, citeseer, pubmed, corafull, computers, photo, coauthorcs, coauthorphysics, wikics, reddit
   root: /data
 noise:
-  type: deterministic # clean, uniform, uniform_simple, random, pair, random_pair, flip, uniform_mix, instance, deterministic
+  type: instance # clean, uniform, uniform_simple, random, pair, random_pair, flip, uniform_mix, instance, deterministic
   rate: 0.3
   seed: 42
 model:
-  name: gat2 # gcn, gin, gat, gat2
+  name: gcn # gcn, gin, gat, gat2
   hidden_channels: 128
   n_layers: 2
   dropout: 0.5
@@ -30,7 +30,8 @@ training:
   # - cr_gnn: use CR-GNN as main method
   # - lafak: use LafAK as main method
   # - rtgnn: use RTGNN as main method
-  method: rtgnn # standard, dirichlet, ncod, nrgnn, pi_gnn, cr_gnn, lafak, rtgnn
+  # - graphcleaner: use GraphCleaner as main method
+  method: graphcleaner # standard, dirichlet, ncod, nrgnn, pi_gnn, cr_gnn, lafak, rtgnn, graphcleaner
   total_epochs: 200
   
   # Supplementary GNN options
@@ -40,9 +41,10 @@ training:
   # - cr_gnn: use CR-GNN
   # - lafak: use LafAK
   # - rtgnn: use RTGNN
-  supplementary_gnn: rtgnn # None, nrgnn, pi_gnn, cr_gnn, lafak, rtgnn
+  # - graphcleaner: use GraphCleaner
+  supplementary_gnn: graphcleaner # None, nrgnn, pi_gnn, cr_gnn, lafak, rtgnn, graphcleaner
 
-# NRGNN Parameters
+# NRGNN parameters
 nrgnn_params:
   edge_hidden: 64
   t_small: 0.1
@@ -52,7 +54,7 @@ nrgnn_params:
   alpha: 0.5
   beta: 0.5
 
-# PI-GNN Parameters
+# PI-GNN parameters
 pi_gnn_params:
   epochs: 400
   start_epoch: 200
@@ -63,7 +65,7 @@ pi_gnn_params:
   norm: null
   vanilla: false
 
-# CR-GNN Parameters
+# CR-GNN parameters
 cr_gnn_params:
   epochs: 400
   patience: 50
@@ -76,14 +78,14 @@ cr_gnn_params:
   beta: 0.5 # weight for cross-space consistency loss (0 to disable)
   debug: true
 
-# LafAK Parameters
+# LafAK parameters
 lafak_params:
   target_classes: [2, 3]
   attack_epochs: 200
   c_max: 10
   gcn_l2: 5e-4
 
-# RTGNN Parameters
+# RTGNN parameters
 rtgnn_params:
   epochs: 200
   hidden: 64
@@ -97,3 +99,9 @@ rtgnn_params:
   K: 5
   tau: 0.1
   n_neg: 5
+
+# GraphCleaner parameters
+graphcleaner_params:
+  k: 3
+  sample_rate: 0.5
+  max_iter_classifier: 3000

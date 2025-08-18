@@ -16,6 +16,7 @@ from model.PI_GNN import InnerProductTrainer, Net, InnerProductDecoder
 from model.CR_GNN import CRGNNTrainer
 from model.LafAK import Attack, prepare_simpledata_attrs, resetBinaryClass_init
 from model.RTGNN import RTGNN
+from model.GraphCleaner import GraphCleanerDetector, get_noisy_ground_truth
 
 def load_dataset(name, root=None):
     if root is None:
@@ -81,6 +82,9 @@ def train(model, data, noisy_indices, device, config):
         return
     if supplementary_gnn and supplementary_gnn.lower() == "rtgnn":
         print("Using RTGNN training")
+        return
+    if supplementary_gnn and supplementary_gnn.lower() == "graphcleaner":
+        print("Using GraphCleaner training")
         return
     
     if method == "standard":
@@ -397,6 +401,34 @@ def run_experiment(config):
         
         print(f"RTGNN - Final test accuracy: {test_acc:.4f}")
         return {"test_acc": test_acc}
+    
+    # GraphCleaner Training
+    if (config['training'].get('supplementary_gnn', "").lower() == 'graphcleaner' or
+        config['training']['method'].lower() == 'graphcleaner'):
+        print("Using GraphCleaner")
+
+
+        base_model = get_model(
+            model_name=config['model']['name'],
+            in_channels=data.num_features,
+            hidden_channels=config['model'].get('hidden_channels', 64),
+            out_channels=num_classes,
+            n_layers=config['model'].get('n_layers', 2),
+            dropout=config['model'].get('dropout', 0.5),
+            self_loop=config['model'].get('self_loop', True)
+        )
+        
+        detector = GraphCleanerDetector(config, device)
+
+        predictions, probs, classifier = detector.detect_noise(data, base_model, num_classes)
+        test_ground_truth = get_noisy_ground_truth(data, global_noisy_indices)[data.test_mask.cpu()].cpu().numpy()
+        detection_results = detector.evaluate_detection(predictions, test_ground_truth, probs)
+        
+        print(f"\nGraphCleaner Detection Summary:")
+        print(f"Detected {np.sum(predictions)} out of {len(predictions)} test samples as noisy")
+        print(f"Ground truth: {np.sum(test_ground_truth)} samples are actually noisy")
+        
+        return detection_results
 
     model_params = {k: v for k, v in config['model'].items() if k not in ['name']}
     model = get_model(
