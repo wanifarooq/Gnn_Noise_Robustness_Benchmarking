@@ -20,6 +20,7 @@ from model.GraphCleaner import GraphCleanerDetector, get_noisy_ground_truth
 from model.UnionNET import UnionNET
 from model.GNN_Cleaner import GNNCleanerTrainer
 from model.ERASE import ERASETrainer
+from model.GNNGuard import GNNGuard
 
 def load_dataset(name, root=None):
     if root is None:
@@ -98,6 +99,9 @@ def train(model, data, noisy_indices, device, config):
     if supplementary_gnn and supplementary_gnn.lower() == "erase":
         print("Using ERASE training")
         return
+    if supplementary_gnn and supplementary_gnn.lower() == "gnnguard":
+        print("Using GNNGuard training")
+        return
     
     if method == "standard":
         train_with_standard_loss(model, data, noisy_indices, device, total_epochs=config['training']['total_epochs'])
@@ -115,7 +119,7 @@ def train(model, data, noisy_indices, device, config):
             num_classes=config['dataset']['num_classes']
         )
     else:
-        raise ValueError(f"Training method '{method}' not recognized. Supported methods: standard, dirichlet, ncod")
+        raise ValueError(f"Training method '{method}' not recognized.")
 
 def run_experiment(config):
     setup_seed_device(config['seed'])
@@ -581,6 +585,56 @@ def run_experiment(config):
         print(f"Valid Acc: {result['val']:.4f}")
         print(f"Test Acc: {result['test']:.4f}")
         return result
+    
+    # GNNGuard Training
+    if (config['training'].get('supplementary_gnn', "").lower() == 'gnnguard' or
+        config['training']['method'].lower() == 'gnnguard'):
+        print("Using GNNGuard")
+        
+        gnnguard_args = {
+            'dropout': config.get('dropout', 0.5),
+            'lr': config.get('lr', 0.01),
+            'weight_decay': config.get('weight_decay', 5e-4),
+            'attention': config.get('attention', True),
+            'device': device
+        }
+        
+        gnnguard_model = GNNGuard(
+            nfeat=data.num_features,
+            nhid=config.get('hidden_channels', 64),
+            nclass=num_classes,
+            **gnnguard_args
+        ).to(device)
+
+        adj_matrix = to_scipy_sparse_matrix(data.edge_index, num_nodes=data.num_nodes)
+
+        if hasattr(data, 'train_mask'):
+            idx_train = data.train_mask.nonzero(as_tuple=True)[0].cpu().numpy()
+            idx_val = data.val_mask.nonzero(as_tuple=True)[0].cpu().numpy()
+            idx_test = data.test_mask.nonzero(as_tuple=True)[0].cpu().numpy()
+        else:
+
+            num_nodes = data.num_nodes
+            idx_train = np.arange(min(140, num_nodes // 5))
+            idx_val = np.arange(len(idx_train), min(len(idx_train) + 500, num_nodes // 2))
+            idx_test = np.arange(max(len(idx_train) + len(idx_val), num_nodes // 2), num_nodes)
+        
+        gnnguard_model.fit(
+            features=data.x,
+            adj=adj_matrix,
+            labels=data.y_noisy,
+            idx_train=idx_train,
+            idx_val=idx_val,
+            idx_test=idx_test,
+            train_iters=config.get('total_epochs', 200),
+            verbose=True,
+            patience=config.get('patience', 5)
+        )
+        
+        test_acc, _ = gnnguard_model.test(idx_test)
+        
+        print(f"Final test accuracy: {test_acc:.4f}")
+        return {"test_acc": test_acc.item()}
 
     model_params = {k: v for k, v in config['model'].items() if k not in ['name']}
     model = get_model(
