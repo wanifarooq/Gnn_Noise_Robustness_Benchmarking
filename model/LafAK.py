@@ -219,8 +219,8 @@ class Attack:
                     val_f1 = f1_score(y[val_mask].cpu(), pred_val.cpu(), average='macro')
                     
                     print(f"Epoch {epoch:03d} | Train Loss: {loss.item():.4f}, Val Loss: {val_loss:.4f} | "
-                          f"Train Acc: {train_acc:.4f}, Train F1: {train_f1:.4f} | "
-                          f"Val Acc: {val_acc:.4f}, Val F1: {val_f1:.4f}")
+                          f"Train Acc: {train_acc:.4f}, Val Acc: {val_acc:.4f} | "
+                          f"Train F1: {train_f1:.4f}, Val F1: {val_f1:.4f}")
 
                 if val_loss < best_val_loss:
                     best_val_loss = val_loss
@@ -258,8 +258,6 @@ class Attack:
 
             return acc, loss, eachAcc
 
-
-    
     def getK_GCN(self):
         A = self.data['_A_obs'][np.ix_(self.data['nodes_AB_all'], self.data['nodes_AB_all'])]
         if hasattr(A, "toarray"):

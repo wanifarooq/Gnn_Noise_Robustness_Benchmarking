@@ -2,7 +2,7 @@ import time
 from copy import deepcopy
 import torch
 import torch.nn.functional as F
-from sklearn.metrics import accuracy_score
+from sklearn.metrics import accuracy_score, f1_score
 
 def normalize_features(features):
     row_sum = torch.sum(features, dim=1, keepdim=True)
@@ -93,7 +93,6 @@ class UnionNET:
             self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay
         )
         self.best_loss = float('inf')
-        self.best_metric = -1
         self.wait = 0
         self.best_weights = None
         self.results = {'train': -1, 'val': -1, 'test': -1}
@@ -159,7 +158,7 @@ class UnionNET:
         correction_loss = F.cross_entropy(output[self.train_mask], train_noisy_labels)
         
         return self.alpha * reweight_loss + (1 - self.alpha) * correction_loss
-    
+
     def train(self, debug=True):
         start_time = time.time()
         
@@ -168,33 +167,34 @@ class UnionNET:
             self.optimizer.zero_grad()
             
             output = self.model(self.data)
-
             loss_train = self._compute_unionnet_loss(output)
-            
-            with torch.no_grad():
-                y_true = self.noisy_labels[self.train_mask].cpu().numpy()
-                y_pred = output[self.train_mask].detach().cpu().numpy().argmax(1)
-                acc_train = accuracy_score(y_true, y_pred)
-            
             loss_train.backward()
             self.optimizer.step()
             
-            _, loss_val, acc_val = self._forward('val')
+            train_labels = self.noisy_labels[self.train_mask].cpu().numpy()
+            train_preds = output[self.train_mask].detach().cpu().numpy().argmax(1)
+            train_acc = accuracy_score(train_labels, train_preds)
+            train_f1 = f1_score(train_labels, train_preds, average='macro')
             
-            improved = acc_val > self.best_metric
-            if improved:
-                self.best_metric = acc_val
-                self.best_loss = loss_val.item()
+            _, val_loss, _ = self._forward('val')
+            val_labels = self.noisy_labels[self.val_mask].cpu().numpy()
+            val_preds = output[self.val_mask].detach().cpu().numpy().argmax(1)
+            val_acc = accuracy_score(val_labels, val_preds)
+            val_f1 = f1_score(val_labels, val_preds, average='macro')
+            
+            if val_loss.item() < self.best_loss:
+                self.best_loss = val_loss.item()
                 self.wait = 0
-                self.results['train'] = acc_train
-                self.results['val'] = acc_val
+                self.results['train'] = train_acc
+                self.results['val'] = val_acc
                 self.best_weights = deepcopy(self.model.state_dict())
             else:
                 self.wait += 1
-            
-            if debug and epoch % 10 == 0:
-                print(f"Epoch {epoch:3d} | Loss: {loss_train:.4f} | "
-                      f"Train Acc: {acc_train:.4f} | Val Acc: {acc_val:.4f}")
+
+            if debug:
+                print(f"Epoch {epoch:03d} | Train Loss: {loss_train:.4f}, Val Loss: {val_loss:.4f} | "
+                      f"Train Acc: {train_acc:.4f}, Val Acc: {val_acc:.4f} | "
+                      f"Train F1: {train_f1:.4f}, Val F1: {val_f1:.4f}")
             
             if self.patience and self.wait >= self.patience:
                 if debug:
@@ -203,14 +203,25 @@ class UnionNET:
         
         if self.best_weights is not None:
             self.model.load_state_dict(self.best_weights)
-        
-        _, loss_test, acc_test = self._forward('test', use_clean=True)
-        self.results['test'] = acc_test
-        
+
+        self.model.eval()
+        with torch.no_grad():
+            output = self.model(self.data)
+            test_labels = self.clean_labels[self.test_mask].cpu().numpy()
+            test_preds = output[self.test_mask].cpu().numpy().argmax(1)
+            test_acc = accuracy_score(test_labels, test_preds)
+            test_f1 = f1_score(test_labels, test_preds, average='macro')
+            
+            test_loss = F.cross_entropy(output[self.test_mask], self.clean_labels[self.test_mask])
+
+        self.results['test'] = test_acc
+
         if debug:
+            print(f"Test Loss: {test_loss:.4f} | Test Acc: {test_acc:.4f} | Test F1: {test_f1:.4f}")
             total_time = time.time() - start_time
             print(f"\nUnionNET Training completed in {total_time:.2f}s")
             print(f"Final Results - Train: {self.results['train']:.4f}, "
                   f"Val: {self.results['val']:.4f}, Test: {self.results['test']:.4f}")
-        
+
         return self.results
+    

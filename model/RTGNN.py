@@ -277,8 +277,8 @@ class RTGNN(nn.Module):
                 val_f1 = f1_score(labels[idx_val].cpu(), val_pred.argmax(dim=1).cpu(), average='macro')
 
             print(f"Epoch {epoch:03d} | Train Loss: {loss_train:.4f}, Val Loss: {val_loss:.4f} | "
-                  f"Train Acc: {train_acc:.4f}, Train F1: {train_f1:.4f} | "
-                  f"Val Acc: {val_acc:.4f}, Val F1: {val_f1:.4f}")
+                  f"Train Acc: {train_acc:.4f}, Val Acc: {val_acc:.4f} | "
+                  f"Train F1: {train_f1:.4f}, Val F1: {val_f1:.4f}")
 
             if epoch == 0:
                 best_val_loss = val_loss

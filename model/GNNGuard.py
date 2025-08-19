@@ -11,6 +11,7 @@ from scipy.sparse import lil_matrix, diags
 import scipy.sparse as sp
 import numpy as np
 from copy import deepcopy
+from sklearn.metrics import accuracy_score, f1_score
 
 class GNNGuard(nn.Module):
 
@@ -153,32 +154,41 @@ class GNNGuard(nn.Module):
         optimizer = optim.Adam(self.parameters(), lr=self.lr, weight_decay=self.weight_decay)
 
         early_stopping = patience
-        best_loss_val = 100
+        best_loss_val = float('inf')
+        patience_counter = early_stopping
+        weights = deepcopy(self.state_dict())
 
         for i in range(train_iters):
             self.train()
             optimizer.zero_grad()
-            output = self.forward(self.features, self.adj_norm)
-            loss_train = F.nll_loss(output[idx_train], labels[idx_train])
-            pred_train = output[idx_train].max(1)[1]
-            acc_train = pred_train.eq(labels[idx_train]).double().mean()
+            output_train = self.forward(self.features, self.adj_norm)
+            loss_train = F.nll_loss(output_train[idx_train], labels[idx_train])
             loss_train.backward()
             optimizer.step()
 
             self.eval()
             with torch.no_grad():
-                output = self.forward(self.features, self.adj_norm)
-                loss_val = F.nll_loss(output[idx_val], labels[idx_val])
-                pred_val = output[idx_val].max(1)[1]
-                acc_val = pred_val.eq(labels[idx_val]).double().mean()
+                output_val = self.forward(self.features, self.adj_norm)
+                loss_val = F.nll_loss(output_val[idx_val], labels[idx_val])
 
-            if verbose and i % 10 == 0:
-                print(f'Epoch {i}: loss_train={loss_train.item():.4f}, acc_train={acc_train:.4f}, '
-                      f'loss_val={loss_val.item():.4f}, acc_val={acc_val:.4f}')
+                pred_train_labels = output_train[idx_train].max(1)[1].cpu().numpy()
+                pred_val_labels = output_val[idx_val].max(1)[1].cpu().numpy()
+                true_train_labels = labels[idx_train].cpu().numpy()
+                true_val_labels = labels[idx_val].cpu().numpy()
 
-            if best_loss_val > loss_val:
+                train_acc = accuracy_score(true_train_labels, pred_train_labels)
+                val_acc = accuracy_score(true_val_labels, pred_val_labels)
+                train_f1 = f1_score(true_train_labels, pred_train_labels, average='macro')
+                val_f1 = f1_score(true_val_labels, pred_val_labels, average='macro')
+
+            if verbose:
+                print(f"Epoch {i:03d} | Train Loss: {loss_train:.4f}, Val Loss: {loss_val:.4f} | "
+                    f"Train Acc: {train_acc:.4f}, Val Acc: {val_acc:.4f} | "
+                    f"Train F1: {train_f1:.4f}, Val F1: {val_f1:.4f}")
+
+            if loss_val < best_loss_val:
                 best_loss_val = loss_val
-                self.output = output
+                self.output = output_val
                 weights = deepcopy(self.state_dict())
                 patience_counter = early_stopping
             else:
@@ -196,6 +206,10 @@ class GNNGuard(nn.Module):
         with torch.no_grad():
             output = self.forward(self.features, self.adj_norm)
             loss_test = F.nll_loss(output[idx_test], self.labels[idx_test])
-            pred_test = output[idx_test].max(1)[1]
-            acc_test = pred_test.eq(self.labels[idx_test]).double().mean()
-        return acc_test, output
+            pred_test_labels = output[idx_test].max(1)[1].cpu().numpy()
+            true_test_labels = self.labels[idx_test].cpu().numpy()
+            acc_test = accuracy_score(true_test_labels, pred_test_labels)
+            f1_test = f1_score(true_test_labels, pred_test_labels, average='macro')
+
+        print(f"Test Loss: {loss_test:.4f} | Test Acc: {acc_test:.4f} | Test F1: {f1_test:.4f}")
+        return acc_test, f1_test

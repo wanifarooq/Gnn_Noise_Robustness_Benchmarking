@@ -45,44 +45,76 @@ class GraphCleanerDetector:
         
         all_sm_vectors = []
         best_sm_vectors = []
-        best_f1 = 0
         best_model_state = None
         
         data = data.to(self.device)
         model = model.to(self.device)
-        
+        best_val_loss = float('inf')
+        best_model_state = None
+        best_f1 = 0
+        patience = self.config.get('patience', 10)
+        patience_counter = 0
+
         for epoch in range(n_epochs):
             model.train()
             optimizer.zero_grad()
-            
+
             out = model(data)
             loss = F.cross_entropy(out[data.train_mask], data.y_noisy[data.train_mask])
-            
-            if epoch % 50 == 0:
-                print(f"Epoch[{epoch + 1}] Loss: {loss.item():.4f}")
-            
+
             loss.backward()
             optimizer.step()
-            
+
             model.eval()
             with torch.no_grad():
-                eval_out = model(data)
-                y_pred = eval_out[data.val_mask].argmax(dim=-1).cpu()
-                y_true = data.y[data.val_mask].cpu()
-                f1 = f1_score(y_true, y_pred, average='micro')
-                
-                if f1 > best_f1:
-                    print(f"New Best Validation F1: {f1:.4f}")
-                    best_f1 = f1
-                    best_sm_vectors = eval_out.cpu().detach().numpy()
+                out = model(data)
+
+                train_pred = out[data.train_mask].argmax(dim=-1).cpu()
+                train_true = data.y[data.train_mask].cpu()
+                loss_train = F.cross_entropy(out[data.train_mask], data.y_noisy[data.train_mask]).item()
+                train_acc = accuracy_score(train_true, train_pred)
+                train_f1 = f1_score(train_true, train_pred, average='micro')
+
+                val_pred = out[data.val_mask].argmax(dim=-1).cpu()
+                val_true = data.y[data.val_mask].cpu()
+                val_loss = F.cross_entropy(out[data.val_mask], data.y_noisy[data.val_mask]).item()
+                val_acc = accuracy_score(val_true, val_pred)
+                val_f1 = f1_score(val_true, val_pred, average='micro')
+
+                print(f"Epoch {epoch:03d} | Train Loss: {loss_train:.4f}, Val Loss: {val_loss:.4f} | "
+                    f"Train Acc: {train_acc:.4f}, Val Acc: {val_acc:.4f} | "
+                    f"Train F1: {train_f1:.4f}, Val F1: {val_f1:.4f}")
+
+                if val_loss < best_val_loss:
+                    best_val_loss = val_loss
                     best_model_state = copy.deepcopy(model.state_dict())
-            
+                    best_sm_vectors = out.cpu().detach().numpy()
+                    best_f1 = val_f1
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+                    if patience_counter >= patience:
+                        print(f"Early stopping at epoch {epoch+1}")
+                        break
+
             if (epoch + 1) % 20 == 0:
-                all_sm_vectors.append(eval_out.cpu().detach().numpy())
-        
+                all_sm_vectors.append(out.cpu().detach().numpy())
+
         if best_model_state is not None:
             model.load_state_dict(best_model_state)
-            
+
+        model.eval()
+        with torch.no_grad():
+            out = model(data)
+
+            test_pred = out[data.test_mask].argmax(dim=-1).cpu()
+            test_true = data.y[data.test_mask].cpu()
+            test_loss = F.cross_entropy(out[data.test_mask], data.y_noisy[data.test_mask]).item()
+            test_acc = accuracy_score(test_true, test_pred)
+            test_f1 = f1_score(test_true, test_pred, average='micro')
+
+            print(f"Test Loss: {test_loss:.4f} | Test Acc: {test_acc:.4f} | Test F1: {test_f1:.4f}")
+
         return np.array(all_sm_vectors), best_sm_vectors, model
     
     def confident_joint_estimation(self, noisy_labels, pred_probs, num_classes):

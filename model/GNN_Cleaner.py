@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from scipy import sparse
+from sklearn.metrics import f1_score
 
 class GNN_Cleaner(nn.Module):
     def __init__(self, feat_dim, hidden=64):
@@ -49,8 +50,9 @@ class GNNCleanerTrainer:
         )
         
         self.results = {'train': -1, 'val': -1, 'test': -1}
-        
         self._print_stats()
+        self.patience = config.get('patience', 10)
+
     
     def _print_stats(self):
         print("GNN Cleaner Dataset Statistics")
@@ -162,24 +164,50 @@ class GNNCleanerTrainer:
     def train(self, debug=True):
         start_time = time.time()
         
-        best_val = 0.0
-        best_train = 0.0
+        best_val_loss = float('inf')
         best_state = None
-
-        patience = 20
+        patience = self.patience
         counter = 0
         
-        for epoch in range(1, self.epochs + 1):
-            loss = self.train_step()
-            accs = self.evaluate()
+        x, edge_index = self.data.x.to(self.device), self.data.edge_index.to(self.device)
+        labels = self.data.y.to(self.device)
 
-            if accs['val'] > best_val:
-                best_val = accs['val']
-                best_train = accs['train']
+        for epoch in range(1, self.epochs + 1):
+            self.model.train()
+            self.gnn_cleaner.train()
+            loss_train = self.train_step()
+            
+            self.model.eval()
+            with torch.no_grad():
+                try:
+                    logits = self.model(self.data)
+                except:
+                    logits = self.model(x, edge_index)
+                
+                train_mask = self.data.train_mask.to(self.device)
+                val_mask = self.data.val_mask.to(self.device)
+                
+                val_loss = F.cross_entropy(logits[val_mask], labels[val_mask]).item()
+
+                train_preds = logits[train_mask].argmax(dim=1)
+                val_preds = logits[val_mask].argmax(dim=1)
+                
+                train_acc = (train_preds == labels[train_mask]).float().mean().item()
+                val_acc = (val_preds == labels[val_mask]).float().mean().item()
+
+                train_f1 = f1_score(labels[train_mask].cpu(), train_preds.cpu(), average='macro')
+                val_f1 = f1_score(labels[val_mask].cpu(), val_preds.cpu(), average='macro')
+
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
                 best_state = {
                     "model": self.model.state_dict(),
                     "cleaner": self.gnn_cleaner.state_dict()
                 }
+                best_train_acc = train_acc
+                best_val_acc = val_acc
+                best_train_f1 = train_f1
+                best_val_f1 = val_f1
                 counter = 0
             else:
                 counter += 1
@@ -189,22 +217,36 @@ class GNNCleanerTrainer:
                     print(f"Early stopping at epoch {epoch}")
                 break
 
-            if debug and (epoch % 20 == 0 or epoch == 1):
-                print(f"Epoch {epoch:03d} | Loss {loss:.4f} | Train {accs['train']:.4f} "
-                    f"Val {accs['val']:.4f}")
+            if debug:
+                print(f"Epoch {epoch:03d} | Train Loss: {loss_train:.4f}, Val Loss: {val_loss:.4f} | "
+                      f"Train Acc: {train_acc:.4f}, Val Acc: {val_acc:.4f} | "
+                      f"Train F1: {train_f1:.4f}, Val F1: {val_f1:.4f}")
         
         if best_state is not None:
             self.model.load_state_dict(best_state["model"])
             self.gnn_cleaner.load_state_dict(best_state["cleaner"])
 
-        final_accs = self.evaluate()
-        self.results = {'train': best_train, 'val': best_val, 'test': final_accs['test']}
+        self.model.eval()
+        with torch.no_grad():
+            try:
+                logits = self.model(self.data)
+            except:
+                logits = self.model(x, edge_index)
+            
+            test_mask = self.data.test_mask.to(self.device)
+            test_preds = logits[test_mask].argmax(dim=1)
+            test_labels = labels[test_mask]
+            
+            test_loss = F.cross_entropy(logits[test_mask], test_labels).item()
+            test_acc = (test_preds == test_labels).float().mean().item()
+            test_f1 = f1_score(test_labels.cpu(), test_preds.cpu(), average='macro')
+        
+        self.results = {'train': best_train_acc, 'val': best_val_acc, 'test': test_acc}
         
         if debug:
             total_time = time.time() - start_time
-            print(f"\nGNN Cleaner Training completed in {total_time:.2f}s")
-            print(f"Best Results - Train: {self.results['train']:.4f}, "
-                f"Val: {self.results['val']:.4f}, Test: {self.results['test']:.4f}")
+            print(f"\nTraining completed in {total_time:.2f}s")
+            print(f"Test Loss: {test_loss:.4f} | Test Acc: {test_acc:.4f} | Test F1: {test_f1:.4f}")
         
         return self.results
     

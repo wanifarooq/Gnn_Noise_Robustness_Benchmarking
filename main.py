@@ -475,7 +475,7 @@ def run_experiment(config):
             'n_epochs': config.get('total_epochs', 200),
             'lr': config.get('lr', 0.01),
             'weight_decay': config.get('weight_decay', 5e-4),
-            'patience': config.get('patience', 50),
+            'patience': config.get('patience', 10),
             'k': config.get('k', 5),
             'alpha': config.get('alpha', 0.5),
             'feat_norm': config.get('feat_norm', True)
@@ -511,6 +511,7 @@ def run_experiment(config):
             'epochs': config.get('total_epochs', 200),
             'lr': config.get('lr', 0.01),
             'weight_decay': config.get('weight_decay', 5e-4),
+            'patience': config.get('patience', 10),
             'hidden_channels': config.get('hidden_channels', 64),
             'alpha': config.get('alpha', 0.9),
             'lp_iters': config.get('lp_iters', 30),
@@ -609,10 +610,9 @@ def run_experiment(config):
             patience=config.get('patience', 5)
         )
         
-        test_acc, _ = gnnguard_model.test(idx_test)
-        
-        print(f"Final test accuracy: {test_acc:.4f}")
-        return {"test_acc": test_acc.item()}
+        test_acc, test_f1 = gnnguard_model.test(idx_test)
+        print(f"Final test accuracy and test F1 score: {test_acc:.4f}")
+        return {"test_acc": test_acc, "test_f1": test_f1}
 
     model_params = {k: v for k, v in config['model'].items() if k not in ['name']}
     model = get_model(
