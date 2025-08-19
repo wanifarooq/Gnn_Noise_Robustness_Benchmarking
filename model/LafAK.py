@@ -9,6 +9,7 @@ import time
 from sklearn.model_selection import train_test_split
 from torch_geometric.utils import from_scipy_sparse_matrix, subgraph
 from torch_geometric.data import Data as PyGData
+from sklearn.metrics import f1_score
 
 def BinaryLabelToPosNeg(labels):
     if isinstance(labels, torch.Tensor):
@@ -187,51 +188,77 @@ class Attack:
             optimizer.zero_grad()
             
             data_batch = PyGData(x=X, edge_index=edge_index_sub, y=y)
-            
             out = model(data_batch)
             
             loss = criterion(out[train_mask], y[train_mask])
             loss.backward()
             optimizer.step()
-    
+
+            model.eval()
+            for epoch in range(epochs):
+                model.train()
+                optimizer.zero_grad()
+                
+                data_batch = PyGData(x=X, edge_index=edge_index_sub, y=y)
+                out = model(data_batch)
+                
+                loss = criterion(out[train_mask], y[train_mask])
+                loss.backward()
+                optimizer.step()
+
+                model.eval()
+                with torch.no_grad():
+                    pred_train = out[train_mask].argmax(dim=1)
+                    train_acc = (pred_train == y[train_mask]).float().mean().item()
+                    train_f1 = f1_score(y[train_mask].cpu(), pred_train.cpu(), average='macro')
+                    
+                    out_val = model(data_batch)
+                    val_loss = criterion(out_val[val_mask], y[val_mask]).item()
+                    pred_val = out_val[val_mask].argmax(dim=1)
+                    val_acc = (pred_val == y[val_mask]).float().mean().item()
+                    val_f1 = f1_score(y[val_mask].cpu(), pred_val.cpu(), average='macro')
+                    
+                    print(f"Epoch {epoch:03d} | Train Loss: {loss.item():.4f}, Val Loss: {val_loss:.4f} | "
+                          f"Train Acc: {train_acc:.4f}, Train F1: {train_f1:.4f} | "
+                          f"Val Acc: {val_acc:.4f}, Val F1: {val_f1:.4f}")
+
+                if val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    best_model_wts = copy.deepcopy(model.state_dict())
+                    epochs_no_improve = 0
+                else:
+                    epochs_no_improve += 1
+                    if epochs_no_improve >= early_stopping:
+                        break
+
+            model.load_state_dict(best_model_wts)
             model.eval()
             with torch.no_grad():
                 data_batch = PyGData(x=X, edge_index=edge_index_sub, y=y)
-                out_val = model(data_batch)
-                val_loss = criterion(out_val[val_mask], y[val_mask]).item()
-    
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                best_model_wts = copy.deepcopy(model.state_dict())
-                epochs_no_improve = 0
-            else:
-                epochs_no_improve += 1
-                if epochs_no_improve >= early_stopping:
-                    break
-    
-        model.load_state_dict(best_model_wts)
-        model.eval()
-        with torch.no_grad():
-            data_batch = PyGData(x=X, edge_index=edge_index_sub, y=y)
-            out = model(data_batch)
-            
-            probs = torch.softmax(out, dim=1)
-            pred = out.argmax(dim=1)
-    
-            correct = pred[test_mask] == y[test_mask]
-            acc = int(correct.sum()) / int(test_mask.sum())
-    
-            eachAcc = []
-            for c in range(probs.shape[1]):
-                mask_c = (y[test_mask] == c)
-                if mask_c.sum() == 0:
-                    eachAcc.append(None)
-                else:
-                    eachAcc.append(int((pred[test_mask][mask_c] == c).sum()) / int(mask_c.sum()))
-    
-            loss = criterion(out[test_mask], y[test_mask]).item()
-    
-        return acc, loss, eachAcc
+                out = model(data_batch)
+                
+                probs = torch.softmax(out, dim=1)
+                pred = out.argmax(dim=1)
+
+                correct = pred[test_mask] == y[test_mask]
+                acc = int(correct.sum()) / int(test_mask.sum())
+
+                eachAcc = []
+                for c in range(probs.shape[1]):
+                    mask_c = (y[test_mask] == c)
+                    if mask_c.sum() == 0:
+                        eachAcc.append(None)
+                    else:
+                        eachAcc.append(int((pred[test_mask][mask_c] == c).sum()) / int(mask_c.sum()))
+
+                loss = criterion(out[test_mask], y[test_mask]).item()
+                f1 = f1_score(y[test_mask].cpu(), pred[test_mask].cpu(), average='macro')
+
+            print(f"Test Loss: {loss:.4f} | Test Acc: {acc:.4f} | Test F1: {f1:.4f}")
+
+            return acc, loss, eachAcc
+
+
     
     def getK_GCN(self):
         A = self.data['_A_obs'][np.ix_(self.data['nodes_AB_all'], self.data['nodes_AB_all'])]

@@ -52,74 +52,63 @@ def get_model(model_name, in_channels, hidden_channels, out_channels, **kwargs):
     kwargs.pop('in_channels', None)
     kwargs.pop('hidden_channels', None)
     kwargs.pop('out_channels', None)
-    
-    if model_name == 'gcn':
-        gcn_params = {k: v for k, v in kwargs.items() if k in ['n_layers', 'dropout', 'self_loop']}
-        return GCN(in_channels, hidden_channels, out_channels, **gcn_params)
-    elif model_name == 'gin':
-        gin_params = {k: v for k, v in kwargs.items() if k in ['n_layers', 'dropout', 'mlp_layers', 'train_eps']}
-        return GIN(in_channels, hidden_channels, out_channels, **gin_params)
-    elif model_name == 'gat':
-        gat_params = {k: v for k, v in kwargs.items() if k in ['n_layers', 'dropout', 'heads']}
-        return GAT(in_channels, hidden_channels, out_channels, **gat_params)
-    elif model_name == 'gat2':
-        gat2_params = {k: v for k, v in kwargs.items() if k in ['n_layers', 'dropout', 'heads']}
-        return GAT2(in_channels, hidden_channels, out_channels, **gat2_params)
-    else:
+
+    model_registry = {
+        'gcn':  (GCN, ['n_layers', 'dropout', 'self_loop']),
+        'gin':  (GIN, ['n_layers', 'dropout', 'mlp_layers', 'train_eps']),
+        'gat':  (GAT, ['n_layers', 'dropout', 'heads']),
+        'gat2': (GAT2, ['n_layers', 'dropout', 'heads']),
+    }
+
+    if model_name not in model_registry:
         raise ValueError(f"Model {model_name} not recognized.")
+
+    model_cls, valid_params = model_registry[model_name]
+    filtered_kwargs = {k: v for k, v in kwargs.items() if k in valid_params}
+    return model_cls(in_channels, hidden_channels, out_channels, **filtered_kwargs)
 
 def train(model, data, noisy_indices, device, config):
     method = config['training']['method'].lower()
-    supplementary_gnn = config['training'].get('supplementary_gnn', None)
-    
-    if supplementary_gnn and supplementary_gnn.lower() == "nrgnn":
-        print("Using NRGNN training")
+    supplementary_gnn = (config['training'].get('supplementary_gnn') or "").lower()
+
+    supplementary_registry = {
+        "nrgnn": "Using NRGNN training",
+        "pi_gnn": "Using PI-GNN training",
+        "cr_gnn": "Using CR-GNN training",
+        "lafak": "Using LafAK training",
+        "rtgnn": "Using RTGNN training",
+        "graphcleaner": "Using GraphCleaner training",
+        "unionnet": "Using UnionNET training",
+        "gnn_cleaner": "Using GNN Cleaner training",
+        "erase": "Using ERASE training",
+        "gnnguard": "Using GNNGuard training",
+    }
+
+    if supplementary_gnn in supplementary_registry:
+        print(supplementary_registry[supplementary_gnn])
         return
-    if supplementary_gnn and supplementary_gnn.lower() == "pi_gnn":
-        print("Using PI-GNN training")
-        return
-    if supplementary_gnn and supplementary_gnn.lower() == "cr_gnn":
-        print("Using CR-GNN training")
-        return
-    if supplementary_gnn and supplementary_gnn.lower() == "lafak":
-        print("Using LafAK training")
-        return
-    if supplementary_gnn and supplementary_gnn.lower() == "rtgnn":
-        print("Using RTGNN training")
-        return
-    if supplementary_gnn and supplementary_gnn.lower() == "graphcleaner":
-        print("Using GraphCleaner training")
-        return
-    if supplementary_gnn and supplementary_gnn.lower() == "unionnet":
-        print("Using UnionNET training")
-        return
-    if supplementary_gnn and supplementary_gnn.lower() == "gnn_cleaner":
-        print("Using GNN Cleaner training")
-        return
-    if supplementary_gnn and supplementary_gnn.lower() == "erase":
-        print("Using ERASE training")
-        return
-    if supplementary_gnn and supplementary_gnn.lower() == "gnnguard":
-        print("Using GNNGuard training")
-        return
-    
-    if method == "standard":
-        train_with_standard_loss(model, data, noisy_indices, device, total_epochs=config['training']['total_epochs'])
-    elif method == "dirichlet":
-        train_with_dirichlet(
-            model, data, noisy_indices, device,
-            lambda_dir=config['training'].get('lambda_dir', 0.1),
-            epochs=config['training']['total_epochs']
-        )
-    elif method == "ncod":
-        train_with_ncod(
-            model, data, noisy_indices, device,
-            total_epochs=config['training']['total_epochs'],
-            lambda_dir=config['training'].get('lambda_dir', 0.1),
-            num_classes=config['dataset']['num_classes']
-        )
-    else:
+
+    method_registry = {
+        "standard": train_with_standard_loss,
+        "dirichlet": train_with_dirichlet,
+        "ncod": train_with_ncod,
+    }
+
+    if method not in method_registry:
         raise ValueError(f"Training method '{method}' not recognized.")
+
+    if method == "standard":
+        method_registry[method](model, data, noisy_indices, device,
+                                total_epochs=config['training']['total_epochs'])
+    elif method == "dirichlet":
+        method_registry[method](model, data, noisy_indices, device,
+                                lambda_dir=config['training'].get('lambda_dir', 0.1),
+                                epochs=config['training']['total_epochs'])
+    elif method == "ncod":
+        method_registry[method](model, data, noisy_indices, device,
+                                total_epochs=config['training']['total_epochs'],
+                                lambda_dir=config['training'].get('lambda_dir', 0.1),
+                                num_classes=config['dataset']['num_classes'])
 
 def run_experiment(config):
     setup_seed_device(config['seed'])
@@ -150,21 +139,19 @@ def run_experiment(config):
         debug=True
     )
     
-    train_indices = train_mask.nonzero(as_tuple=True)[0]
     global_noisy_indices = train_indices[relative_noisy_indices]
 
-    data.y_noisy = data.y_original.clone()
-    data.y_noisy[train_mask] = noisy_train_labels
-    
-    data.y = data.y_original.clone()
+    data.y_noisy = data.y.clone()
     data.y[train_mask] = noisy_train_labels
-    
+
     print(f"Applied noise to {len(relative_noisy_indices)} training samples out of {train_mask.sum().item()}")
     print(f"Noise rate: {len(relative_noisy_indices) / train_mask.sum().item():.4f}")
+
+    supp_gnn = config['training'].get('supplementary_gnn', "").lower()
+    method = config['training']['method'].lower()
     
     # NRGNN Training
-    if (config['training'].get('supplementary_gnn', "").lower() == 'nrgnn' or
-        config['training']['method'].lower() == 'nrgnn'):
+    if supp_gnn in ['nrgnn'] or method == 'nrgnn':
         print("Using NRGNN")
         nrgnn_model = NRGNN(args=config.get('nrgnn_params', {}), device=device, gnn_type=config['model']['name'].upper())
         adj_matrix = to_scipy_sparse_matrix(data.edge_index, num_nodes=data.num_nodes)
@@ -178,8 +165,7 @@ def run_experiment(config):
         return
 
     # PI-GNN Training
-    if (config['training'].get('supplementary_gnn', "").lower() == 'pi_gnn' or
-        config['training']['method'].lower() == 'pi_gnn'):
+    if supp_gnn in ['pi_gnn'] or method == 'pi_gnn':
         print("Using PI-GNN")
         trainer_params = config.get('pi_gnn_params', {})
         trainer = InnerProductTrainer(
@@ -222,8 +208,7 @@ def run_experiment(config):
         return
 
     # CR-GNN Training
-    if (config['training'].get('supplementary_gnn', "").lower() == 'cr_gnn' or
-        config['training']['method'].lower() == 'cr_gnn'):
+    if supp_gnn in ['cr_gnn'] or method == 'cr_gnn':
         print("Using CR-GNN")
         trainer_params = config.get('cr_gnn_params', {})
         trainer = CRGNNTrainer(
@@ -268,8 +253,7 @@ def run_experiment(config):
         return
 
     # LafAK / GradientAttack Training
-    if (config['training'].get('supplementary_gnn', "").lower() == 'lafak' or
-        config['training']['method'].lower() == 'lafak'):
+    if supp_gnn in ['lafak'] or method == 'lafak':
         print("Using LafAK / GradientAttack")
         
         data_for_lafak = data.clone()
@@ -353,8 +337,7 @@ def run_experiment(config):
         }
 
     # RTGNN Training
-    if (config['training'].get('supplementary_gnn', "").lower() == 'rtgnn' or
-        config['training']['method'].lower() == 'rtgnn'):
+    if supp_gnn in ['rtgnn'] or method == 'rtgnn':
         print("Using RTGNN")
         
         class RTGNNConfig:
@@ -419,8 +402,7 @@ def run_experiment(config):
         return {"test_acc": test_acc}
     
     # GraphCleaner Training
-    if (config['training'].get('supplementary_gnn', "").lower() == 'graphcleaner' or
-        config['training']['method'].lower() == 'graphcleaner'):
+    if supp_gnn in ['graphcleaner'] or method == 'graphcleaner':
         print("Using GraphCleaner")
         
         data_for_detection = data.clone()
@@ -473,8 +455,7 @@ def run_experiment(config):
         return detection_results
     
     # UnionNET Training
-    if (config['training'].get('supplementary_gnn', "").lower() == 'unionnet' or
-        config['training']['method'].lower() == 'unionnet'):
+    if supp_gnn in ['unionnet'] or method == 'unionnet':
         print("Using UnionNET")
         
         gnn_model = get_model(
@@ -510,8 +491,7 @@ def run_experiment(config):
         return result
     
     # GNN Cleaner Training
-    if (config['training'].get('supplementary_gnn', "").lower() == 'gnn_cleaner' or
-        config['training']['method'].lower() == 'gnn_cleaner'):
+    if supp_gnn in ['gnn_cleaner'] or method == 'gnn_cleaner':
         print("Using GNN Cleaner")
 
         gnn_model = get_model(
@@ -548,8 +528,7 @@ def run_experiment(config):
         return result
     
     # ERASE Training
-    if (config['training'].get('supplementary_gnn', "").lower() == 'erase' or
-        config['training']['method'].lower() == 'erase'):
+    if supp_gnn in ['erase'] or method == 'erase':
         print("Using ERASE")
         
         erase_config = {
@@ -587,8 +566,7 @@ def run_experiment(config):
         return result
     
     # GNNGuard Training
-    if (config['training'].get('supplementary_gnn', "").lower() == 'gnnguard' or
-        config['training']['method'].lower() == 'gnnguard'):
+    if supp_gnn in ['gnnguard'] or method == 'gnnguard':
         print("Using GNNGuard")
         
         gnnguard_args = {

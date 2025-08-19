@@ -7,6 +7,7 @@ from torch_geometric.nn import GCNConv
 from torch_geometric.utils import from_scipy_sparse_matrix, negative_sampling
 from sklearn.metrics import accuracy_score
 from torch_geometric.data import Data
+from sklearn.metrics import f1_score
 
 from model.GNNs import GCN, GIN, GAT, GAT2
 
@@ -208,6 +209,10 @@ class RTGNN(nn.Module):
         
         optimizer = optim.Adam(self.parameters(), lr=self.args.lr, 
                              weight_decay=self.args.weight_decay)
+
+        patience = getattr(self.args, 'patience', 20)
+        counter = 0
+        best_val_acc = 0
         
         print(f"Starting RTGNN training with {self.gnn_type.upper()}...")
         
@@ -245,35 +250,67 @@ class RTGNN(nn.Module):
             pseudo_loss = self._compute_pseudo_loss(output1, output2, idx_train)
 
             total_loss = (pred_loss + self.args.alpha * rec_loss + 
-                         self.args.co_lambda * pseudo_loss)
+                          self.args.co_lambda * pseudo_loss)
             
             total_loss.backward()
             optimizer.step()
 
-            if epoch % 10 == 0 or epoch == self.args.epochs - 1:
-                val_acc = self._evaluate(features, final_edges, final_weights, 
-                                       labels, idx_val)
-                
-                print(f"Epoch {epoch:3d}: Loss={total_loss:.4f}, "
-                      f"Val Acc={val_acc:.4f} ({self.gnn_type.upper()})")
-                
-                if val_acc > self.best_val_acc:
-                    self.best_val_acc = val_acc
-                    self.best_state = {
-                        'model': deepcopy(self.state_dict()),
-                        'edges': final_edges.clone(),
-                        'weights': final_weights.clone()
-                    }
+            self.eval()
+            with torch.no_grad():
+
+                output1_train, output2_train = self.predictor(features, final_edges, final_weights)
+                loss_train1 = F.cross_entropy(output1_train[idx_train], labels[idx_train])
+                loss_train2 = F.cross_entropy(output2_train[idx_train], labels[idx_train])
+                loss_train = (loss_train1 + loss_train2) / 2
+
+                train_pred = (output1_train[idx_train] + output2_train[idx_train]) / 2
+                train_acc = (train_pred.argmax(dim=1) == labels[idx_train]).float().mean().item()
+                train_f1 = f1_score(labels[idx_train].cpu(), train_pred.argmax(dim=1).cpu(), average='macro')
+
+                output1_val, output2_val = self.predictor(features, final_edges, final_weights)
+                val_loss1 = F.cross_entropy(output1_val[idx_val], labels[idx_val])
+                val_loss2 = F.cross_entropy(output2_val[idx_val], labels[idx_val])
+                val_loss = (val_loss1 + val_loss2) / 2
+
+                val_pred = (output1_val[idx_val] + output2_val[idx_val]) / 2
+                val_acc = (val_pred.argmax(dim=1) == labels[idx_val]).float().mean().item()
+                val_f1 = f1_score(labels[idx_val].cpu(), val_pred.argmax(dim=1).cpu(), average='macro')
+
+            print(f"Epoch {epoch:03d} | Train Loss: {loss_train:.4f}, Val Loss: {val_loss:.4f} | "
+                  f"Train Acc: {train_acc:.4f}, Train F1: {train_f1:.4f} | "
+                  f"Val Acc: {val_acc:.4f}, Val F1: {val_f1:.4f}")
+
+            if epoch == 0:
+                best_val_loss = val_loss
+                counter = 0
+                self.best_state = {
+                    'model': deepcopy(self.state_dict()),
+                    'edges': final_edges.clone(),
+                    'weights': final_weights.clone()
+                }
+            elif val_loss < best_val_loss:
+                best_val_loss = val_loss
+                counter = 0
+                self.best_state = {
+                    'model': deepcopy(self.state_dict()),
+                    'edges': final_edges.clone(),
+                    'weights': final_weights.clone()
+                }
+            else:
+                counter += 1
+                if counter >= patience:
+                    print(f"Early stopping at epoch {epoch} (no improvement per {patience} epoche)")
+                    break
 
         if self.best_state is not None:
             self.load_state_dict(self.best_state['model'])
-            print(f"Training completed! Best validation accuracy: {self.best_val_acc:.4f}")
-        
+            print(f"Training completed! Best validation loss: {best_val_loss:.4f}")
+
     def test(self, features, labels, idx_test):
         if self.best_state is None:
             print("Model not trained yet!")
             return 0.0
-            
+
         self.eval()
         with torch.no_grad():
             features = features.to(self.device)
@@ -284,19 +321,20 @@ class RTGNN(nn.Module):
                 self.best_state['edges'], 
                 self.best_state['weights']
             )
+
+            test_loss1 = F.cross_entropy(output1[idx_test], labels[idx_test])
+            test_loss2 = F.cross_entropy(output2[idx_test], labels[idx_test])
+            test_loss = (test_loss1 + test_loss2) / 2
+
+            test_pred = (output1[idx_test] + output2[idx_test]) / 2
+            test_acc = (test_pred.argmax(dim=1) == labels[idx_test]).float().mean().item()
+            test_f1 = f1_score(labels[idx_test].cpu(), test_pred.argmax(dim=1).cpu(), average='macro')
+
+            print(f"Test Loss: {test_loss:.4f} | Test Acc: {test_acc:.4f} | Test F1: {test_f1:.4f}")
             
-            pred1 = output1[idx_test].max(1)[1]
-            pred2 = output2[idx_test].max(1)[1]
-            
-            acc1 = accuracy_score(labels[idx_test].cpu(), pred1.cpu())
-            acc2 = accuracy_score(labels[idx_test].cpu(), pred2.cpu())
-            
-            avg_acc = (acc1 + acc2) / 2
-            print(f"Test Accuracy ({self.gnn_type.upper()}): Branch1={acc1:.4f}, "
-                  f"Branch2={acc2:.4f}, Average={avg_acc:.4f}")
-            
-            return avg_acc
-    
+            return test_acc
+
+        
     def _generate_knn_edges(self, features, edge_index, idx_train, k=None):
         if k is None:
             k = self.args.K

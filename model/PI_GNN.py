@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import scipy.sparse as sp
 import numpy as np
+from sklearn.metrics import f1_score
 
 class InnerProductDecoder(nn.Module):
     def __init__(self, act=lambda x: x):
@@ -50,7 +51,7 @@ class InnerProductTrainer:
         data = data.to(self.device)
         model = model.to(self.device)
         num_classes = data.y.max().item() + 1
-        
+
         if get_model_func and config:
             gnn_mi = get_model_func(
                 model_name=config['model_name'],
@@ -93,18 +94,16 @@ class InnerProductTrainer:
         adj_train = (adj_train + adj_train.T) / 2
         adj_label = adj_train + sp.eye(adj_train.shape[0])
         adj_label = torch.FloatTensor(adj_label.toarray()).to(self.device)
-        
         pos_weight = torch.tensor(
             [float(data.num_nodes ** 2 - len(data_context)) / len(data_context)], 
             device=self.device
         )
-        
-        norm = self.norm if self.norm is not None and self.norm != 10000 else data.num_nodes ** 2 / float((data.num_nodes ** 2 - len(data_context)) * 2)
+        norm = self.norm if self.norm is not None and self.norm != 10000 else \
+              data.num_nodes ** 2 / float((data.num_nodes ** 2 - len(data_context)) * 2)
 
         corrupted_labels = data.y[data.train_mask]
 
-        best_val_acc = 0
-        cor_test_acc = 0
+        best_val_loss = float('inf')
         best_epoch = 0
         patience_counter = 0
 
@@ -113,9 +112,11 @@ class InnerProductTrainer:
             model_mi.train()
             optimizer.zero_grad()
             optimizer_mi.zero_grad()
+
             out, out_product = model(data)
             out_mi, out_product_mi = model_mi(data)
-            loss = F.nll_loss(out[data.train_mask], corrupted_labels)
+
+            loss_train = F.nll_loss(out[data.train_mask], corrupted_labels)
             loss_mi = norm * F.binary_cross_entropy_with_logits(out_product_mi, adj_label, pos_weight=pos_weight)
             loss_mi.backward()
             optimizer_mi.step()
@@ -138,32 +139,48 @@ class InnerProductTrainer:
                 else:
                     loss_context = norm * F.binary_cross_entropy_with_logits(out_product, adj_label, pos_weight=pos_weight)
 
-            total_loss = loss + loss_context
+            total_loss = loss_train + loss_context
             total_loss.backward()
             optimizer.step()
 
             model.eval()
             with torch.no_grad():
-                out, _ = model(data)
-                pred = out.argmax(dim=1)
-                correct_val = pred[data.val_mask].eq(data.y[data.val_mask]).sum().item()
-                val_acc = correct_val / data.val_mask.sum().item()
-                correct_test = pred[data.test_mask].eq(data.y[data.test_mask]).sum().item()
-                test_acc = correct_test / data.test_mask.sum().item()
+                out_train, _ = model(data)
+                pred_train = out_train.argmax(dim=1)
 
-                if val_acc > best_val_acc + self.delta:
-                    best_val_acc = val_acc
-                    cor_test_acc = test_acc
-                    best_epoch = epoch
-                    patience_counter = 0
-                else:
-                    patience_counter += 1
+                train_acc = pred_train[data.train_mask].eq(data.y[data.train_mask]).sum().item() / data.train_mask.sum().item()
+                train_f1 = f1_score(data.y[data.train_mask].cpu(), pred_train[data.train_mask].cpu(), average='micro')
 
-            print(f'Epoch {epoch:03d}, Loss: {total_loss:.4f}, Val Acc: {val_acc:.4f}, Test Acc: {test_acc:.4f}')
+                pred_val = pred_train[data.val_mask]
+                val_acc = pred_val.eq(data.y[data.val_mask]).sum().item() / data.val_mask.sum().item()
+                val_f1 = f1_score(data.y[data.val_mask].cpu(), pred_val.cpu(), average='micro')
+                val_loss = F.nll_loss(out_train[data.val_mask], data.y[data.val_mask])
+
+            print(f"Epoch {epoch:03d} | Train Loss: {loss_train:.4f}, Val Loss: {val_loss:.4f} | "
+                f"Train Acc: {train_acc:.4f}, Train F1: {train_f1:.4f} | "
+                f"Val Acc: {val_acc:.4f}, Val F1: {val_f1:.4f}")
+
+            if val_loss < best_val_loss - self.delta:
+                best_val_loss = val_loss
+                best_epoch = epoch
+                patience_counter = 0
+                best_model_state = deepcopy(model.state_dict())
+            else:
+                patience_counter += 1
 
             if patience_counter >= self.patience:
                 print(f"Early stopping at epoch {epoch}, best epoch {best_epoch}")
+                model.load_state_dict(best_model_state)
                 break
 
-        print(f"InnerProduct - Best Val Acc: {best_val_acc:.4f}, Corresponding Test Acc: {cor_test_acc:.4f}")
-        return cor_test_acc
+        model.eval()
+        with torch.no_grad():
+            out_test, _ = model(data)
+            pred_test = out_test.argmax(dim=1)
+            test_loss = F.nll_loss(out_test[data.test_mask], data.y[data.test_mask]).item()
+            test_acc = pred_test[data.test_mask].eq(data.y[data.test_mask]).sum().item() / data.test_mask.sum().item()
+            test_f1 = f1_score(data.y[data.test_mask].cpu(), pred_test[data.test_mask].cpu(), average='micro')
+
+        print(f"Test Loss: {test_loss:.4f} | Test Acc: {test_acc:.4f} | Test F1: {test_f1:.4f}")
+        return test_acc
+

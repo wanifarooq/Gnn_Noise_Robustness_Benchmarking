@@ -37,7 +37,7 @@ training:
   # - rtgnn: use RTGNN as main method
   # - gnn_cleaner: use GNN Cleaner as main method
   # - gnnguard: use GNNGuard as main method
-  method: gnnguard # standard, dirichlet, ncod, nrgnn, pi_gnn, cr_gnn, lafak, rtgnn, graphcleaner, unionnet, gnn_cleaner, erase, gnnguard
+  method: rtgnn # standard, dirichlet, ncod, nrgnn, pi_gnn, cr_gnn, lafak, rtgnn, graphcleaner, unionnet, gnn_cleaner, erase, gnnguard
   total_epochs: 200
   
   # Supplementary GNN options
@@ -52,7 +52,7 @@ training:
   # - gnn_cleaner: use GNN Cleaner
   # - erase: use ERASE
   # - gnnguard: use GNNGuard
-  supplementary_gnn: gnnguard # None, nrgnn, pi_gnn, cr_gnn, lafak, rtgnn, graphcleaner, unionnet, gnn_cleaner, erase, gnnguard
+  supplementary_gnn: rtgnn # None, nrgnn, pi_gnn, cr_gnn, lafak, rtgnn, graphcleaner, unionnet, gnn_cleaner, erase, gnnguard
 
 # NRGNN parameters
 nrgnn_params:
