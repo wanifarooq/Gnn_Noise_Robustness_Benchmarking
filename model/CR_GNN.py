@@ -1,19 +1,11 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.utils import dropout_edge
+from torch_geometric.utils import dropout_adj, mask_feature
 from torch_geometric.data import Data
 from copy import deepcopy
 import time
 from sklearn.metrics import accuracy_score
-
-def mask_feature(features, p=0.5):
-    if p <= 0:
-        return features, None
-    
-    mask = torch.bernoulli(torch.full_like(features, 1-p))
-    masked_features = features * mask
-    return masked_features, mask
 
 class ProjectionHead(torch.nn.Module):
     def __init__(self, in_channels, out_channels):
@@ -34,7 +26,6 @@ class ClassificationHead(torch.nn.Module):
         return self.fc(x)
 
 def contrastive_loss(z1, z2, tau: float):
-
     z1 = F.normalize(z1, p=2, dim=1)
     z2 = F.normalize(z2, p=2, dim=1)
 
@@ -46,18 +37,11 @@ def contrastive_loss(z1, z2, tau: float):
     return 0.5 * (loss_a + loss_b)
 
 def dynamic_cross_entropy_loss(p1, p2, labels):
-
-    with torch.no_grad():
-        pseudo_labels = (F.softmax(p1, dim=1) + F.softmax(p2, dim=1)) / 2
-        pseudo_labels = pseudo_labels.argmax(dim=1)
-    
-    loss1 = F.cross_entropy(p1, pseudo_labels)
-    loss2 = F.cross_entropy(p2, pseudo_labels)
-    
+    loss1 = F.cross_entropy(p1, labels)
+    loss2 = F.cross_entropy(p2, labels)
     return (loss1 + loss2) / 2
 
 def cross_space_consistency_loss(zm, pm):
-
     return F.mse_loss(zm, pm)
 
 class CRGNNTrainer:
@@ -74,12 +58,72 @@ class CRGNNTrainer:
             'tau': kwargs.get('tau', 0.5),
             'p': kwargs.get('p', 0.5),
             'alpha': kwargs.get('alpha', 1.0),
-            'beta': kwargs.get('beta', 0.0),
             'debug': kwargs.get('debug', True)
         }
+
+        self.best_val_loss = float('inf')
+        self.patience_counter = 0
+        self.best_weights = None
+    
+    def get_prediction(self, encoder, projection_adapter, projection_head, classifier, 
+                      features, edge_index, labels=None, mask=None):
+        h = encoder(Data(x=features, edge_index=edge_index))
+        h = projection_adapter(h)
+        output = h
+        
+        loss, acc = None, None
+        
+        if labels is not None and mask is not None:
+            with torch.no_grad():
+                edge_index1, _ = dropout_adj(edge_index, p=0.3)
+                edge_index2, _ = dropout_adj(edge_index, p=0.3)
+                x1, _ = mask_feature(features, p=0.3)
+                x2, _ = mask_feature(features, p=0.3)
+
+            h1 = encoder(Data(x=x1, edge_index=edge_index1))
+            h1 = projection_adapter(h1)
+            h2 = encoder(Data(x=x2, edge_index=edge_index2))
+            h2 = projection_adapter(h2)
+
+            z1 = projection_head(h1)
+            z2 = projection_head(h2)
+
+            loss_con = contrastive_loss(z1, z2, self.config['tau'])
+
+            p1 = classifier(h1)
+            p2 = classifier(h2)
+
+            loss_sup = dynamic_cross_entropy_loss(p1[mask], p2[mask], labels[mask])
+
+            loss = self.config['alpha'] * loss_con + loss_sup
+            
+            with torch.no_grad():
+                pred_output = classifier(output)
+                pred_labels = pred_output[mask].argmax(dim=1)
+                acc = accuracy_score(labels[mask].cpu().numpy(), pred_labels.cpu().numpy())
+                
+        return output, loss, acc
+    
+    def evaluate(self, encoder, projection_adapter, classifier, features, edge_index, labels, mask):
+        encoder.eval()
+        projection_adapter.eval() 
+        classifier.eval()
+        
+        with torch.no_grad():
+            h = encoder(Data(x=features, edge_index=edge_index))
+            h = projection_adapter(h)
+            output = classifier(h)
+            
+        loss = F.cross_entropy(output[mask], labels[mask])
+        pred_labels = output[mask].argmax(dim=1)
+        acc = accuracy_score(labels[mask].cpu().numpy(), pred_labels.cpu().numpy())
+        return loss, acc
     
     def fit(self, base_model, data, config, get_model_func):
-        print(f"Training CRGNN with {config['model_name'].upper()} backbone...")
+        print(f"Training CR-GNN with {config['model_name'].upper()} backbone...")
+
+        if data.num_nodes > 10000:
+            print(f"Warning: large dataset with {data.num_nodes} nodes.")
         
         data = data.to(self.device)
         n_classes = data.y.max().item() + 1
@@ -91,29 +135,25 @@ class CRGNNTrainer:
         out_dim = tmp_out.size(1)
 
         hidden_dim = self.config['hidden_channels']
-
-        if out_dim <= n_classes:
+        
+        if out_dim != hidden_dim:
             projection_adapter = nn.Linear(out_dim, hidden_dim).to(self.device)
             encoder_out_dim = hidden_dim
         else:
             projection_adapter = nn.Identity().to(self.device)
             encoder_out_dim = out_dim
 
-        projection_head = ProjectionHead(encoder_out_dim, hidden_dim).to(self.device)
-        classifier = ClassificationHead(encoder_out_dim if isinstance(projection_adapter, nn.Identity) else hidden_dim, n_classes).to(self.device)
-
+        projection_head = ProjectionHead(encoder_out_dim, encoder_out_dim).to(self.device)
+        classifier = ClassificationHead(encoder_out_dim, n_classes).to(self.device)
 
         optimizer = torch.optim.Adam(
-            list(encoder.parameters()) +
+            list(encoder.parameters()) + 
+            list(projection_adapter.parameters()) +
             list(projection_head.parameters()) +
             list(classifier.parameters()),
             lr=self.config['lr'],
             weight_decay=self.config['weight_decay']
         )
-        
-        best_val_acc = 0
-        patience_counter = 0
-        best_weights = None
         
         if hasattr(data, 'train_mask') and hasattr(data, 'val_mask') and hasattr(data, 'test_mask'):
             train_mask = data.train_mask
@@ -141,147 +181,79 @@ class CRGNNTrainer:
         noisy_labels = data.y
         
         start_time = time.time()
+        total_time = 0
         
         for epoch in range(self.config['epochs']):
-
+            
             encoder.train()
+            projection_adapter.train()
             projection_head.train()
             classifier.train()
             optimizer.zero_grad()
-            
-            edge_index1, _ = dropout_edge(data.edge_index, p=0.3)
-            edge_index2, _ = dropout_edge(data.edge_index, p=0.3)
-            x1, _ = mask_feature(data.x, p=0.3)
-            x2, _ = mask_feature(data.x, p=0.3)
-            
-            data1 = Data(x=x1, edge_index=edge_index1)
-            data2 = Data(x=x2, edge_index=edge_index2)
 
-            h1 = encoder(data1)
-            h2 = encoder(data2)
-
-
-            h1 = projection_adapter(h1)
-            h2 = projection_adapter(h2)
-            
-            z1 = projection_head(h1)
-            z2 = projection_head(h2)
-            
-            p1 = classifier(h1)
-            p2 = classifier(h2)
-            
-            loss_con = contrastive_loss(z1, z2, self.config['tau'])
-            
-            loss_pseudo = dynamic_cross_entropy_loss(
-                p1[train_mask], p2[train_mask], noisy_labels[train_mask]
+            output, loss_train, acc_train = self.get_prediction(
+                encoder, projection_adapter, projection_head, classifier,
+                data.x, data.edge_index, noisy_labels, train_mask
             )
-            loss_sup = dynamic_cross_entropy_loss(p1[train_mask], p2[train_mask], noisy_labels[train_mask])
-
             
-            if self.config['beta'] > 0:
-
-                z1n = F.normalize(z1, p=2, dim=1)
-                z2n = F.normalize(z2, p=2, dim=1)
-                Sz = z1n @ z2n.t()
-                Sz = (Sz / self.config['T']).clamp(min=-10, max=10)
-                zm = torch.exp(Sz).mean(dim=1)
-
-                p1_prob = F.softmax(p1, dim=1)
-                p2_prob = F.softmax(p2, dim=1)
-
-                Sp = p1_prob @ p2_prob.t()
-                Sp = (Sp / self.config['T']).clamp(min=-10, max=10)
-                pm = Sp.mean(dim=1)
-                pm = torch.where(pm > self.config['p'], pm, torch.zeros_like(pm))
-                pm = pm.detach()
-
-
-                zm = torch.sigmoid(zm)
-                pm = torch.sigmoid(pm)
-
-                loss_ccon = F.mse_loss(zm, pm)
-                total_loss = self.config['alpha'] * loss_con + loss_sup + self.config['beta'] * loss_ccon
-            else:
-                total_loss = self.config['alpha'] * loss_con + loss_sup
-
-            if torch.isfinite(total_loss):
-                total_loss.backward()
+            if loss_train is not None and torch.isfinite(loss_train):
+                loss_train.backward()
                 torch.nn.utils.clip_grad_norm_(
                     list(encoder.parameters()) + 
+                    list(projection_adapter.parameters()) +
                     list(projection_head.parameters()) +
                     list(classifier.parameters()),
                     max_norm=1.0
                 )
                 optimizer.step()
 
-            encoder.eval()
-            classifier.eval()
+            torch.cuda.empty_cache() if torch.cuda.is_available() else None
+
+            loss_val, acc_val = self.evaluate(
+                encoder, projection_adapter, classifier,
+                data.x, data.edge_index, noisy_labels, val_mask
+            )
             
-            with torch.no_grad():
-                data_clean = Data(x=data.x, edge_index=data.edge_index)
-                h_val = encoder(data_clean)
-                h_val = projection_adapter(h_val)
-                h_val = projection_head(h_val)
-                p_val = classifier(h_val)
-
-                pred_labels = torch.argmax(p_val, dim=1)
-
-                train_acc = accuracy_score(
-                    noisy_labels[train_mask].cpu().numpy(),
-                    pred_labels[train_mask].cpu().numpy()
-                )
-                val_pred_labels = torch.argmax(p_val, dim=1)
-                val_acc = accuracy_score(
-                    clean_labels[val_mask].cpu().numpy(),
-                    val_pred_labels[val_mask].cpu().numpy()
-                )
-
+            flag_earlystop = False
             
-            if val_acc > best_val_acc:
-                best_val_acc = val_acc
-                patience_counter = 0
-                best_weights = {
+            if loss_val < self.best_val_loss:
+                self.best_val_loss = loss_val
+                self.patience_counter = 0
+                total_time = time.time() - start_time
+                
+                self.best_weights = {
                     'encoder': deepcopy(encoder.state_dict()),
+                    'projection_adapter': deepcopy(projection_adapter.state_dict()),
                     'projection_head': deepcopy(projection_head.state_dict()),
                     'classifier': deepcopy(classifier.state_dict())
                 }
             else:
-                patience_counter += 1
-            
-            if self.config['debug']:
-                print(f"Epoch {epoch+1:05d} | Train Acc: {train_acc:.4f} | Val Acc: {val_acc:.4f} | Loss: {total_loss.item():.4f}")
-            
-            if patience_counter >= self.config['patience']:
-                if self.config['debug']:
-                    print("Early stopping triggered.")
+                self.patience_counter += 1
+                if self.patience_counter >= self.config['patience']:
+                    flag_earlystop = True
+
+            if flag_earlystop:
                 break
-        
-        if best_weights is not None:
-            encoder.load_state_dict(best_weights['encoder'])
-            classifier.load_state_dict(best_weights['classifier'])
-        
-        encoder.eval()
-        classifier.eval()
-        
-        with torch.no_grad():
-            data_test = Data(x=data.x, edge_index=data.edge_index)
-            h_test = encoder(data_test)
-            h_test = projection_adapter(h_test)
-            p_test = classifier(h_test)
 
-            
-            test_pred_labels = torch.argmax(p_test, dim=1)
-            test_acc = accuracy_score(
-                clean_labels[test_mask].cpu().numpy(),
-                test_pred_labels[test_mask].cpu().numpy()
-            )
+            if self.config['debug']:
+                print(f"Epoch {epoch+1:05d} | Time(s) {time.time() - start_time:.4f} | "
+                     f"Loss(train) {loss_train.item():.4f} | Acc(train) {acc_train:.4f} | "
+                     f"Loss(val) {loss_val.item():.4f} | Acc(val) {acc_val:.4f} |")
+        
+        if self.best_weights is not None:
+            encoder.load_state_dict(self.best_weights['encoder'])
+            projection_adapter.load_state_dict(self.best_weights['projection_adapter'])
+            projection_head.load_state_dict(self.best_weights['projection_head'])
+            classifier.load_state_dict(self.best_weights['classifier'])
 
-        total_time = time.time() - start_time
+        loss_test, test_acc = self.evaluate(
+            encoder, projection_adapter, classifier,
+            data.x, data.edge_index, clean_labels, test_mask
+        )
         
         if self.config['debug']:
-            print(f'CRGNN Training completed!')
-            print(f'Time: {total_time:.4f}s')
-            print(f'Best Val Acc: {best_val_acc:.4f}')
-            print(f'Test Acc: {test_acc:.4f}')
+            print('Optimization Finished!')
+            print(f'Time(s): {total_time:.4f}')
+            print(f"Loss(test) {loss_test.item():.4f} | Acc(test) {test_acc:.4f}")
         
         return test_acc

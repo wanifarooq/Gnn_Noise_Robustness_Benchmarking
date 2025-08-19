@@ -37,7 +37,7 @@ training:
   # - rtgnn: use RTGNN as main method
   # - gnn_cleaner: use GNN Cleaner as main method
   # - gnnguard: use GNNGuard as main method
-  method: rtgnn # standard, dirichlet, ncod, nrgnn, pi_gnn, cr_gnn, lafak, rtgnn, graphcleaner, unionnet, gnn_cleaner, erase, gnnguard
+  method: nrgnn # standard, dirichlet, ncod, nrgnn, pi_gnn, cr_gnn, lafak, rtgnn, graphcleaner, unionnet, gnn_cleaner, erase, gnnguard
   total_epochs: 200
   
   # Supplementary GNN options
@@ -52,17 +52,23 @@ training:
   # - gnn_cleaner: use GNN Cleaner
   # - erase: use ERASE
   # - gnnguard: use GNNGuard
-  supplementary_gnn: rtgnn # None, nrgnn, pi_gnn, cr_gnn, lafak, rtgnn, graphcleaner, unionnet, gnn_cleaner, erase, gnnguard
+  supplementary_gnn: nrgnn # None, nrgnn, pi_gnn, cr_gnn, lafak, rtgnn, graphcleaner, unionnet, gnn_cleaner, erase, gnnguard
 
 # NRGNN parameters
 nrgnn_params:
-  edge_hidden: 64
+  hidden: 64
+  edge_hidden: 32
+  dropout: 0.3
+  lr: 0.005
+  weight_decay: 1e-4
+  epochs: 200
+  n_p: 3
+  p_u: 0.9
+  alpha: 0.1
+  beta: 1.0
   t_small: 0.1
   n_n: 1
-  n_p: 5
-  p_u: 0.8
-  alpha: 0.5
-  beta: 0.5
+  debug: True
 
 # PI-GNN parameters
 pi_gnn_params:
@@ -85,7 +91,6 @@ cr_gnn_params:
   tau: 0.5
   p: 0.5
   alpha: 1.0
-  beta: 0.5 # weight for cross-space consistency loss (0 to disable)
   debug: true
 
 # LafAK parameters
