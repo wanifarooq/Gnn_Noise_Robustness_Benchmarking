@@ -12,7 +12,7 @@ noise:
   seed: 42
 
 model:
-  name: gcn # gcn, gin, gat, gat2
+  name: gat # gcn, gin, gat, gat2
   hidden_channels: 128
   n_layers: 2
   dropout: 0.5
@@ -36,7 +36,8 @@ training:
   # - lafak: use LafAK as main method
   # - rtgnn: use RTGNN as main method
   # - gnn_cleaner: use GNN Cleaner as main method
-  method: gnn_cleaner # standard, dirichlet, ncod, nrgnn, pi_gnn, cr_gnn, lafak, rtgnn, graphcleaner, unionnet, gnn_cleaner
+  # - erase: use ERASE as main method
+  method: erase # standard, dirichlet, ncod, nrgnn, pi_gnn, cr_gnn, lafak, rtgnn, graphcleaner, unionnet, gnn_cleaner, erase
   total_epochs: 200
   
   # Supplementary GNN options
@@ -49,7 +50,8 @@ training:
   # - graphcleaner: use GraphCleaner
   # - unionnet: use UnionNET
   # - gnn_cleaner: use GNN Cleaner
-  supplementary_gnn: gnn_cleaner # None, nrgnn, pi_gnn, cr_gnn, lafak, rtgnn, graphcleaner, unionnet, gnn_cleaner
+  # - erase: use ERASE
+  supplementary_gnn: erase # None, nrgnn, pi_gnn, cr_gnn, lafak, rtgnn, graphcleaner, unionnet, gnn_cleaner, erase
 
 # NRGNN parameters
 nrgnn_params:
@@ -124,3 +126,22 @@ gnn_cleaner_params:
   alpha: 0.9
   lp_iters: 30
   sharpen_temp: 1.0
+
+# ERASE parameters
+erase_params:
+  n_embedding: 512
+  n_heads: 8
+  use_layer_norm: false
+  use_residual: false
+  use_residual_linear: false
+    
+  # MCR2 loss parameters
+  gam1: 1.0
+  gam2: 2.0
+  eps: 0.05
+  corafull: false
+    
+  # label propagation parameters
+  alpha: 0.6
+  beta: 0.6
+  T: 5

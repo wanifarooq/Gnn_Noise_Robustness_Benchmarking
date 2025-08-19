@@ -19,6 +19,7 @@ from model.RTGNN import RTGNN
 from model.GraphCleaner import GraphCleanerDetector, get_noisy_ground_truth
 from model.UnionNET import UnionNET
 from model.GNN_Cleaner import GNNCleanerTrainer
+from model.ERASE import ERASETrainer
 
 def load_dataset(name, root=None):
     if root is None:
@@ -93,6 +94,9 @@ def train(model, data, noisy_indices, device, config):
         return
     if supplementary_gnn and supplementary_gnn.lower() == "gnn_cleaner":
         print("Using GNN Cleaner training")
+        return
+    if supplementary_gnn and supplementary_gnn.lower() == "erase":
+        print("Using ERASE training")
         return
     
     if method == "standard":
@@ -505,7 +509,6 @@ def run_experiment(config):
     if (config['training'].get('supplementary_gnn', "").lower() == 'gnn_cleaner' or
         config['training']['method'].lower() == 'gnn_cleaner'):
         print("Using GNN Cleaner")
-        print("Usando GNN Cleaner come modello principale")
 
         gnn_model = get_model(
             model_name=config['model']['name'],
@@ -533,11 +536,50 @@ def run_experiment(config):
         trainer = GNNCleanerTrainer(gnn_cleaner_config, data, device, num_classes, gnn_model)
         result = trainer.train(debug=True)
         
-        print("\n=== GNN Cleaner Results ===")
+        print("\nGNN Cleaner Results")
         print(f"Train Acc: {result['train']:.4f}")
         print(f"Valid Acc: {result['val']:.4f}")
         print(f"Test Acc: {result['test']:.4f}")
         
+        return result
+    
+    # ERASE Training
+    if (config['training'].get('supplementary_gnn', "").lower() == 'erase' or
+        config['training']['method'].lower() == 'erase'):
+        print("Using ERASE")
+        
+        erase_config = {
+            'seed': config.get('seed', 42),
+            'erase_gnn_type': config['model']['name'],
+            'hidden_channels': config['model'].get('hidden_channels', 128),
+            'n_embedding': config['training'].get('erase_params', {}).get('n_embedding', 512),
+            'n_layers': config['model'].get('n_layers', 2),
+            'n_heads': config['training'].get('erase_params', {}).get('n_heads', config.get('heads', 8)),
+            'dropout': config['model'].get('dropout', 0.5),
+            'self_loop': config['model'].get('self_loop', True),
+            'mlp_layers': config.get('mlp_layers', 2),
+            'train_eps': config.get('train_eps', True),
+            'lr': config.get('lr', 0.001),
+            'weight_decay': config.get('weight_decay', 0.0005),
+            'total_epochs': config.get('total_epochs', 200),
+            'patience': config.get('patience', 5),
+            'gam1': config['training'].get('erase_params', {}).get('gam1', 1.0),
+            'gam2': config['training'].get('erase_params', {}).get('gam2', 2.0),
+            'eps': config['training'].get('erase_params', {}).get('eps', 0.05),
+            'corafull': config['training'].get('erase_params', {}).get('corafull', False),
+            'alpha': config['training'].get('erase_params', {}).get('alpha', 0.6),
+            'beta': config['training'].get('erase_params', {}).get('beta', 0.6),
+            'T': config['training'].get('erase_params', {}).get('T', 5),
+            'noise_rate': config.get('noise', {}).get('rate', 0.3),
+        }
+        
+        trainer = ERASETrainer(erase_config, device, num_classes, get_model)
+        result = trainer.train(data, debug=True)
+        
+        print("ERASE Results:")
+        print(f"Train Acc: {result['train']:.4f}")
+        print(f"Valid Acc: {result['val']:.4f}")
+        print(f"Test Acc: {result['test']:.4f}")
         return result
 
     model_params = {k: v for k, v in config['model'].items() if k not in ['name']}

@@ -3,7 +3,6 @@ import torch
 import torch.nn.functional as F
 from scipy import stats
 from numpy.testing import assert_array_almost_equal
-from utilities.usefull import setup_seed_device
 
 def simple_uniform_noise(labels, n_classes, noise_rate, random_seed):
     if noise_rate == 0:
