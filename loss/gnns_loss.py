@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-
+from sklearn.metrics import f1_score
 
 def dirichlet_energy(x, edge_index):
     row, col = edge_index
@@ -136,47 +136,130 @@ class ncodLoss(nn.Module):
         with torch.no_grad():
             return torch.zeros(len(x), self.num_classes).to(self.device).scatter_(1, x.argmax(dim=1).view(-1, 1), 1)
 
-
-def train_with_standard_loss(model, data, noisy_indices, device, total_epochs=200):
-    model.train()
+def train_with_standard_loss(model, data, noisy_indices, device, total_epochs=200, patience=20):
+    model.to(device)
     optimizer = optim.Adam(model.parameters(), lr=0.01, weight_decay=5e-4)
     criterion = nn.CrossEntropyLoss()
-    for epoch in range(total_epochs):
+
+    best_val_loss = float('inf')
+    best_model_state = None
+    epochs_no_improve = 0
+
+    for epoch in range(1, total_epochs + 1):
+        model.train()
         optimizer.zero_grad()
         out = model(data)
-        loss = criterion(out[noisy_indices], data.y_noisy[noisy_indices])
-        loss.backward()
+
+        train_idx = data.train_mask.nonzero(as_tuple=True)[0]
+        loss_train = criterion(out[train_idx], data.y[train_idx])
+        loss_train.backward()
         optimizer.step()
-        if (epoch + 1) % 20 == 0:
-            print(f"Epoch {epoch+1}/{total_epochs}, Loss: {loss.item():.4f}")
-    print(f"\nDone. Noise injected on {len(noisy_indices)} train samples.")
 
+        model.eval()
+        with torch.no_grad():
+            val_idx = data.val_mask.nonzero(as_tuple=True)[0]
+            val_loss = criterion(out[val_idx], data.y[val_idx])
 
-def train_with_dirichlet(model, data, noisy_indices, device, lambda_dir=0.1, epochs=200):
+            pred = out.argmax(dim=1)
+            train_acc = (pred[train_idx] == data.y[train_idx]).sum().item() / len(train_idx)
+            val_acc = (pred[val_idx] == data.y[val_idx]).sum().item() / len(val_idx)
+            train_f1 = f1_score(data.y[train_idx].cpu(), pred[train_idx].cpu(), average='macro')
+            val_f1 = f1_score(data.y[val_idx].cpu(), pred[val_idx].cpu(), average='macro')
+
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_model_state = model.state_dict()
+            epochs_no_improve = 0
+        else:
+            epochs_no_improve += 1
+
+        if epochs_no_improve >= patience:
+            print(f"Early stopping at epoch {epoch}")
+            model.load_state_dict(best_model_state)
+            break
+
+        print(f"Epoch {epoch:03d} | Train Loss: {loss_train:.4f}, Val Loss: {val_loss:.4f} | "
+              f"Train Acc: {train_acc:.4f}, Val Acc: {val_acc:.4f} | "
+              f"Train F1: {train_f1:.4f}, Val F1: {val_f1:.4f}")
+
+    model.eval()
+    with torch.no_grad():
+        test_idx = data.test_mask.nonzero(as_tuple=True)[0]
+        test_loss = criterion(out[test_idx], data.y[test_idx])
+        pred = out.argmax(dim=1)
+        test_acc = (pred[test_idx] == data.y[test_idx]).sum().item() / len(test_idx)
+        test_f1 = f1_score(data.y[test_idx].cpu(), pred[test_idx].cpu(), average='macro')
+
+    print(f"Test Loss: {test_loss:.4f} | Test Acc: {test_acc:.4f} | Test F1: {test_f1:.4f}")
+
+def train_with_dirichlet(model, data, noisy_indices, device, lambda_dir=0.1, epochs=200, patience=20):
+    model.to(device)
     optimizer = optim.Adam(model.parameters(), lr=0.01, weight_decay=5e-4)
+
+    best_val_loss = float('inf')
+    best_model_state = None
+    epochs_no_improve = 0
+
     for epoch in range(1, epochs + 1):
         model.train()
         optimizer.zero_grad()
         out = model(data)
-        loss_ce = F.cross_entropy(out[data.train_mask], data.y[data.train_mask])
+
+        train_idx = data.train_mask.nonzero(as_tuple=True)[0]
+        loss_ce = F.cross_entropy(out[train_idx], data.y[train_idx])
         loss_dir = dirichlet_energy(out, data.edge_index)
-        loss = loss_ce + lambda_dir * loss_dir
-        loss.backward()
+        loss_train = loss_ce + lambda_dir * loss_dir
+        loss_train.backward()
         optimizer.step()
+
         model.eval()
         with torch.no_grad():
+            val_idx = data.val_mask.nonzero(as_tuple=True)[0]
+            val_loss_ce = F.cross_entropy(out[val_idx], data.y[val_idx])
+            val_loss_dir = dirichlet_energy(out, data.edge_index)
+            val_loss = val_loss_ce + lambda_dir * val_loss_dir
+
             pred = out.argmax(dim=1)
-            acc = (pred[data.test_mask] == data.y[data.test_mask]).sum().item() / data.test_mask.sum().item()
-        if epoch % 10 == 0 or epoch == 1:
-            print(f"Epoch {epoch:3d} | CE Loss: {loss_ce:.4f} | Dir Energy: {loss_dir:.4f} | Test Acc: {acc:.4f}")
-    print(f"\nDone. Noise injected on {len(noisy_indices)} train samples.")
+            train_acc = (pred[train_idx] == data.y[train_idx]).sum().item() / len(train_idx)
+            val_acc = (pred[val_idx] == data.y[val_idx]).sum().item() / len(val_idx)
+            train_f1 = f1_score(data.y[train_idx].cpu(), pred[train_idx].cpu(), average='macro')
+            val_f1 = f1_score(data.y[val_idx].cpu(), pred[val_idx].cpu(), average='macro')
 
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_model_state = model.state_dict()
+            epochs_no_improve = 0
+        else:
+            epochs_no_improve += 1
 
-def train_with_ncod(model, data, noisy_indices, device, total_epochs=200, lambda_dir=0.1, num_classes=None):
+        if epochs_no_improve >= patience:
+            print(f"Early stopping at epoch {epoch}")
+            model.load_state_dict(best_model_state)
+            break
+
+        print(f"Epoch {epoch:03d} | Train Loss: {loss_train:.4f}, Val Loss: {val_loss:.4f} | "
+              f"Train Acc: {train_acc:.4f}, Val Acc: {val_acc:.4f} | "
+              f"Train F1: {train_f1:.4f}, Val F1: {val_f1:.4f}")
+
+    model.eval()
+    with torch.no_grad():
+        test_idx = data.test_mask.nonzero(as_tuple=True)[0]
+        test_loss_ce = F.cross_entropy(out[test_idx], data.y[test_idx])
+        test_loss_dir = dirichlet_energy(out, data.edge_index)
+        test_loss = test_loss_ce + lambda_dir * test_loss_dir
+        pred = out.argmax(dim=1)
+        test_acc = (pred[test_idx] == data.y[test_idx]).sum().item() / len(test_idx)
+        test_f1 = f1_score(data.y[test_idx].cpu(), pred[test_idx].cpu(), average='macro')
+
+    print(f"Test Loss: {test_loss:.4f} | Test Acc: {test_acc:.4f} | Test F1: {test_f1:.4f}")
+
+def train_with_ncod(model, data, noisy_indices, device, total_epochs=200, lambda_dir=0.1, num_classes=None, patience=20):
     if num_classes is None:
         num_classes = int(data.y.max().item()) + 1
+
     optimizer = optim.Adam(model.parameters(), lr=0.01, weight_decay=5e-4)
     sample_labels = data.y.cpu().numpy()
+
     ncod_loss_fn = ncodLoss(
         sample_labels=sample_labels,
         device=device,
@@ -187,30 +270,88 @@ def train_with_ncod(model, data, noisy_indices, device, total_epochs=200, lambda
         encoder_features=num_classes,
         total_epochs=total_epochs
     ).to(device)
+
+    best_val_loss = float('inf')
+    best_model_state = None
+    epochs_no_improve = 0
+
     for epoch in range(1, total_epochs + 1):
         model.train()
         optimizer.zero_grad()
         out = model(data)
-        logits = out
+
         train_idx = data.train_mask.nonzero(as_tuple=True)[0]
-        label_onehot = F.one_hot(data.y[train_idx], num_classes=num_classes).float()
-        loss_ncod = ncod_loss_fn(
+        label_onehot_train = F.one_hot(data.y[train_idx], num_classes=num_classes).float()
+        loss_ncod_train = ncod_loss_fn(
             index=train_idx,
-            outputs=logits[train_idx],
-            label=label_onehot,
-            out=logits[train_idx],
+            outputs=out[train_idx],
+            label=label_onehot_train,
+            out=out[train_idx],
             flag=0,
             epoch=epoch,
             train_acc_cater=None
         )
-        loss_dir = dirichlet_energy(out, data.edge_index)
-        loss = loss_ncod + lambda_dir * loss_dir
-        loss.backward()
+        loss_dir_train = dirichlet_energy(out, data.edge_index)
+        loss_train = loss_ncod_train + lambda_dir * loss_dir_train
+        loss_train.backward()
         optimizer.step()
+
         model.eval()
         with torch.no_grad():
+            val_idx = data.val_mask.nonzero(as_tuple=True)[0]
+            label_onehot_val = F.one_hot(data.y[val_idx], num_classes=num_classes).float()
+            val_loss_ncod = ncod_loss_fn(
+                index=val_idx,
+                outputs=out[val_idx],
+                label=label_onehot_val,
+                out=out[val_idx],
+                flag=0,
+                epoch=epoch,
+                train_acc_cater=None
+            )
+            val_loss_dir = dirichlet_energy(out, data.edge_index)
+            val_loss = val_loss_ncod + lambda_dir * val_loss_dir
+
             pred = out.argmax(dim=1)
-            acc = (pred[data.test_mask] == data.y[data.test_mask]).sum().item() / data.test_mask.sum().item()
-        if epoch % 10 == 0 or epoch == 1:
-            print(f"Epoch {epoch:3d} | NCOD Loss: {loss_ncod:.4f} | Dir Energy: {loss_dir:.4f} | Test Acc: {acc:.4f}")
-    print(f"\nDone. Noise injected on {len(noisy_indices)} train samples.")
+            train_acc = (pred[train_idx] == data.y[train_idx]).sum().item() / len(train_idx)
+            val_acc = (pred[val_idx] == data.y[val_idx]).sum().item() / len(val_idx)
+            train_f1 = f1_score(data.y[train_idx].cpu(), pred[train_idx].cpu(), average='macro')
+            val_f1 = f1_score(data.y[val_idx].cpu(), pred[val_idx].cpu(), average='macro')
+
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_model_state = model.state_dict()
+            epochs_no_improve = 0
+        else:
+            epochs_no_improve += 1
+
+        if epochs_no_improve >= patience:
+            print(f"Early stopping at epoch {epoch}")
+            model.load_state_dict(best_model_state)
+            break
+
+        print(f"Epoch {epoch:03d} | Train Loss: {loss_train:.4f}, Val Loss: {val_loss:.4f} | "
+              f"Train Acc: {train_acc:.4f}, Val Acc: {val_acc:.4f} | "
+              f"Train F1: {train_f1:.4f}, Val F1: {val_f1:.4f}")
+
+    model.eval()
+    with torch.no_grad():
+        test_idx = data.test_mask.nonzero(as_tuple=True)[0]
+        label_onehot_test = F.one_hot(data.y[test_idx], num_classes=num_classes).float()
+        loss_ncod_test = ncod_loss_fn(
+            index=test_idx,
+            outputs=out[test_idx],
+            label=label_onehot_test,
+            out=out[test_idx],
+            flag=0,
+            epoch=epoch,
+            train_acc_cater=None
+        )
+        loss_dir_test = dirichlet_energy(out, data.edge_index)
+        test_loss = loss_ncod_test + lambda_dir * loss_dir_test
+
+        pred = out.argmax(dim=1)
+        test_acc = (pred[test_idx] == data.y[test_idx]).sum().item() / len(test_idx)
+        test_f1 = f1_score(data.y[test_idx].cpu(), pred[test_idx].cpu(), average='macro')
+
+    print(f"Test Loss: {test_loss:.4f} | Test Acc: {test_acc:.4f} | Test F1: {test_f1:.4f}")

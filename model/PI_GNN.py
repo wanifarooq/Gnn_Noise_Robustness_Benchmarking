@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import scipy.sparse as sp
 import numpy as np
 from sklearn.metrics import f1_score
+from copy import deepcopy
 
 class InnerProductDecoder(nn.Module):
     def __init__(self, act=lambda x: x):

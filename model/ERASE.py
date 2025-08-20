@@ -5,8 +5,9 @@ import numpy as np
 from torch_geometric.utils import to_dense_adj
 from sklearn.preprocessing import normalize
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score
+from sklearn.metrics import accuracy_score, f1_score
 from typing import Tuple
+import copy
 
 class MaximalCodingRateReduction(nn.Module):
     def __init__(self, gam1: float = 1.0, gam2: float = 1.0, eps: float = 0.01, corafull: bool = False):
@@ -317,7 +318,6 @@ class ERASETrainer:
         self.get_model_fn = get_model_fn
         
     def train(self, data, debug=False):
-
         enhancement_config = {
             'use_layer_norm': self.config.get('use_layer_norm', False),
             'use_residual': self.config.get('use_residual', False),
@@ -365,6 +365,7 @@ class ERASETrainer:
         )
         
         best_val_acc = 0
+        best_val_loss = float('inf')
         best_train_acc = 0
         patience_counter = 0
         num_epochs = self.config.get('total_epochs', 200)
@@ -373,30 +374,36 @@ class ERASETrainer:
         for epoch in range(1, num_epochs + 1):
             train_result = self._train_epoch(model, data, optimizer, loss_fn, A, Y_all, L_all)
             train_loss, loss_components, L_all = train_result
-            train_acc, val_acc = self._evaluate_train_val(model, data, L_all)
             
-            if val_acc > best_val_acc:
-                best_val_acc = val_acc
+            train_acc, val_acc, val_loss = self._evaluate_train_val(model, data, L_all)
+
+            train_f1, val_f1 = self._compute_f1_scores(model, data, L_all)
+                    
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
                 best_train_acc = train_acc
+                best_val_acc = val_acc
                 patience_counter = 0
+                best_model_state = copy.deepcopy(model.state_dict())
             else:
                 patience_counter += 1
-            
+
             if debug:
-                print(f'Epoch {epoch:03d}: Train {100*train_acc:.2f}%, Val {100*val_acc:.2f}%, '
-                    f'Loss {train_loss:.4f} [D:{loss_components[0]:.3f}, C:{loss_components[1]:.3f}]')
-            
+                print(f"Epoch {epoch:03d} | Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f} | "
+                      f"Train Acc: {train_acc:.4f}, Val Acc: {val_acc:.4f} | "
+                      f"Train F1: {train_f1:.4f}, Val F1: {val_f1:.4f}")
+
             if patience_counter >= patience:
                 if debug:
                     print(f'Early stopping at epoch {epoch}')
                 break
+
+        model.load_state_dict(best_model_state)
         
-        test_acc = self._evaluate_test(model, data, L_all)
-        
-        if debug:
-            print(f'Final Results: Train {100*best_train_acc:.2f}%, '
-                f'Val {100*best_val_acc:.2f}%, Test {100*test_acc:.2f}%')
-        
+        test_acc, test_f1, test_loss = self._evaluate_test_final(model, data, L_all)
+
+        print(f"Test Loss: {test_loss:.4f} | Test Acc: {test_acc:.4f} | Test F1: {test_f1:.4f}")
+
         return {
             'train': best_train_acc,
             'val': best_val_acc,
@@ -404,12 +411,88 @@ class ERASETrainer:
         }
 
     @torch.no_grad()
+    def _compute_f1_scores(self, model, data, L_all):
+        model.eval()
+        features = model(data)
+
+        features_norm = normalize(features.detach().cpu().numpy(), norm='l2')
+        
+        train_features = features_norm[data.train_mask.cpu()]
+        val_features = features_norm[data.val_mask.cpu()]
+        
+        train_labels = L_all[data.train_mask].cpu().numpy()
+        y_true = data.y.cpu().numpy()
+        
+        clf = LogisticRegression(solver='lbfgs', multi_class='auto', max_iter=1000, random_state=42)
+        clf.fit(train_features, train_labels)
+        
+        train_pred = clf.predict(train_features)
+        val_pred = clf.predict(val_features)
+        
+        train_f1 = f1_score(
+            y_true[data.train_mask.cpu()], 
+            train_pred, 
+            average='weighted', 
+            zero_division=0
+        )
+        val_f1 = f1_score(
+            y_true[data.val_mask.cpu()], 
+            val_pred, 
+            average='weighted', 
+            zero_division=0
+        )
+        
+        return train_f1, val_f1
+
+    @torch.no_grad()
+    def _evaluate_test_final(self, model, data, L_all):
+        model.eval()
+        features = model(data)
+
+        _, _, test_acc = evaluate_linear_probe(features, data, L_all, data.y)
+
+        features_norm = normalize(features.detach().cpu().numpy(), norm='l2')
+        
+        train_features = features_norm[data.train_mask.cpu()]
+        test_features = features_norm[data.test_mask.cpu()]
+        
+        train_labels = L_all[data.train_mask].cpu().numpy()
+        y_true = data.y.cpu().numpy()
+        
+        clf = LogisticRegression(solver='lbfgs', multi_class='auto', max_iter=1000, random_state=42)
+        clf.fit(train_features, train_labels)
+        
+        test_pred = clf.predict(test_features)
+        test_f1 = f1_score(
+            y_true[data.test_mask.cpu()], 
+            test_pred, 
+            average='macro',
+            zero_division=0
+        )
+        
+        test_loss = self._compute_val_loss_ce(model, data, data.test_mask)
+        
+        return test_acc, test_f1, test_loss.item()
+
+    @torch.no_grad()
+    def _compute_val_loss_ce(self, model, data, val_mask):
+        features = model(data)
+        y_val = data.y[val_mask]
+        ce_loss = torch.nn.CrossEntropyLoss()
+        val_loss = ce_loss(features[val_mask], y_val)
+        return val_loss
+
+    @torch.no_grad()
     def _evaluate_train_val(self, model, data, L_all):
         model.eval()
         features = model(data)
 
         train_acc, val_acc, _ = evaluate_linear_probe(features, data, L_all, data.y)
-        return train_acc, val_acc
+
+        val_mask = data.val_mask
+        val_loss = self._compute_val_loss_ce(model, data, val_mask)
+
+        return train_acc, val_acc, val_loss
 
     @torch.no_grad()
     def _evaluate_test(self, model, data, L_all):

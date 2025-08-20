@@ -113,21 +113,18 @@ def train(model, data, noisy_indices, device, config):
 def run_experiment(config):
     setup_seed_device(config['seed'])
     device = torch.device(config['device'] if torch.cuda.is_available() else 'cpu')
-    
     data, num_classes = load_dataset(config['dataset']['name'], root=config['dataset'].get('root', './data'))
     data = data.to(device)
     
     train_mask = data.train_mask
     val_mask = data.val_mask
     test_mask = data.test_mask
-    
     data.y_original = data.y.clone()
     
     train_labels = data.y[train_mask]
     train_features = data.x[train_mask] if config['noise']['type'] == 'instance' else None
-    
     train_indices = train_mask.nonzero(as_tuple=True)[0]
-
+    
     noisy_train_labels, relative_noisy_indices = label_process(
         train_labels,
         train_features,
@@ -140,29 +137,63 @@ def run_experiment(config):
     )
     
     global_noisy_indices = train_indices[relative_noisy_indices]
-
     data.y_noisy = data.y.clone()
     data.y[train_mask] = noisy_train_labels
-
+    
     print(f"Applied noise to {len(relative_noisy_indices)} training samples out of {train_mask.sum().item()}")
     print(f"Noise rate: {len(relative_noisy_indices) / train_mask.sum().item():.4f}")
-
-    supp_gnn = config['training'].get('supplementary_gnn', "").lower()
-    method = config['training']['method'].lower()
+    
+    supp_gnn = config['training'].get('supplementary_gnn', "")
+    method = config['training']['method']
     
     # NRGNN Training
-    if supp_gnn in ['nrgnn'] or method == 'nrgnn':
+    if supp_gnn == 'nrgnn' or method == 'nrgnn':
         print("Using NRGNN")
-        nrgnn_model = NRGNN(args=config.get('nrgnn_params', {}), device=device, gnn_type=config['model']['name'].upper())
-        adj_matrix = to_scipy_sparse_matrix(data.edge_index, num_nodes=data.num_nodes)
-        
-        nrgnn_model.fit(
-            features=data.x,
-            adj=adj_matrix,
-            labels=data.y,
-            idx_train=global_noisy_indices.cpu().numpy()
+
+        model_params = {k: v for k, v in config['model'].items() if k not in ['name']}
+        model_params.pop('hidden_channels', None)
+        base_model = get_model(
+            model_name=config['model']['name'],
+            in_channels=data.num_features,
+            hidden_channels=config['model'].get('hidden_channels', 64),
+            out_channels=num_classes,
+            **model_params
         )
-        return
+
+        adj = to_scipy_sparse_matrix(data.edge_index, num_nodes=data.x.size(0))
+        features = data.x.cpu().numpy()
+        labels = data.y.cpu().numpy()
+        idx_train = train_mask.nonzero(as_tuple=True)[0].cpu().numpy()
+        idx_val = val_mask.nonzero(as_tuple=True)[0].cpu().numpy()
+        idx_test = test_mask.nonzero(as_tuple=True)[0].cpu().numpy()
+        
+        nrgnn_config = config.get('nrgnn_params', {})
+        
+        class Args:
+            def __init__(self, nrgnn_config):
+                self.hidden = nrgnn_config.get('hidden', 64)
+                self.edge_hidden = nrgnn_config.get('edge_hidden', 32)
+                self.dropout = nrgnn_config.get('dropout', 0.5)
+                self.lr = nrgnn_config.get('lr', 0.01)
+                self.weight_decay = nrgnn_config.get('weight_decay', 5e-4)
+                self.epochs = nrgnn_config.get('epochs', 200)
+                self.n_p = nrgnn_config.get('n_p', 10)
+                self.alpha = nrgnn_config.get('alpha', 1.0)
+                self.beta = nrgnn_config.get('beta', 1.0)
+                self.p_u = nrgnn_config.get('p_u', 0.7)
+                self.t_small = nrgnn_config.get('t_small', 0.1)
+                self.n_n = nrgnn_config.get('n_n', 1)
+                self.debug = nrgnn_config.get('debug', False)
+                self.patience = nrgnn_config.get('patience', 10)
+        
+        args = Args(nrgnn_config)
+        
+        model = NRGNN(args, device, base_model=base_model)
+        
+        model.fit(features, adj, labels, idx_train, idx_val)
+        test_acc = model.test(idx_test)
+        print(f"Final test accuracy: {test_acc:.4f}")
+        return test_acc
 
     # PI-GNN Training
     if supp_gnn in ['pi_gnn'] or method == 'pi_gnn':
@@ -615,6 +646,7 @@ def run_experiment(config):
         return {"test_acc": test_acc, "test_f1": test_f1}
 
     model_params = {k: v for k, v in config['model'].items() if k not in ['name']}
+    print(f"Using {config['model']['name']} with method {config['training']['method']}")
     model = get_model(
         model_name=config['model']['name'],
         in_channels=data.num_features,
@@ -623,17 +655,6 @@ def run_experiment(config):
     ).to(device)
     
     train(model, data, global_noisy_indices, device, config)
-    model.eval()
-    with torch.no_grad():
-        pred = model(data).argmax(dim=1)
-        
-        train_acc = (pred[train_mask] == data.y[train_mask]).float().mean()
-        print(f"Final Training Accuracy (noisy labels): {train_acc:.4f}")
-        
-        test_acc = (pred[test_mask] == data.y_original[test_mask]).float().mean()
-        print(f"Final Test Accuracy (clean labels): {test_acc:.4f}")
-        
-        return {"train_acc": train_acc.item(), "test_acc": test_acc.item()}
 
 if __name__ == "__main__":
     print("\n" + "-"*50)

@@ -5,7 +5,7 @@ from torch_geometric.utils import dropout_adj, mask_feature
 from torch_geometric.data import Data
 from copy import deepcopy
 import time
-from sklearn.metrics import accuracy_score
+from sklearn.metrics import accuracy_score, f1_score
 
 class ProjectionHead(torch.nn.Module):
     def __init__(self, in_channels, out_channels):
@@ -53,7 +53,7 @@ class CRGNNTrainer:
             'lr': kwargs.get('lr', 0.001),
             'weight_decay': kwargs.get('weight_decay', 5e-4),
             'epochs': kwargs.get('epochs', 200),
-            'patience': kwargs.get('patience', 20),
+            'patience': kwargs.get('patience', 10),
             'T': kwargs.get('T', 0.5),
             'tau': kwargs.get('tau', 0.5),
             'p': kwargs.get('p', 0.5),
@@ -66,13 +66,12 @@ class CRGNNTrainer:
         self.best_weights = None
     
     def get_prediction(self, encoder, projection_adapter, projection_head, classifier, 
-                      features, edge_index, labels=None, mask=None):
+                   features, edge_index, labels=None, mask=None):
         h = encoder(Data(x=features, edge_index=edge_index))
         h = projection_adapter(h)
         output = h
-        
-        loss, acc = None, None
-        
+        loss, acc, f1 = None, None, None
+
         if labels is not None and mask is not None:
             with torch.no_grad():
                 edge_index1, _ = dropout_adj(edge_index, p=0.3)
@@ -87,26 +86,26 @@ class CRGNNTrainer:
 
             z1 = projection_head(h1)
             z2 = projection_head(h2)
-
             loss_con = contrastive_loss(z1, z2, self.config['tau'])
 
             p1 = classifier(h1)
             p2 = classifier(h2)
-
             loss_sup = dynamic_cross_entropy_loss(p1[mask], p2[mask], labels[mask])
 
             loss = self.config['alpha'] * loss_con + loss_sup
-            
+
             with torch.no_grad():
                 pred_output = classifier(output)
                 pred_labels = pred_output[mask].argmax(dim=1)
                 acc = accuracy_score(labels[mask].cpu().numpy(), pred_labels.cpu().numpy())
-                
-        return output, loss, acc
+                f1 = f1_score(labels[mask].cpu().numpy(), pred_labels.cpu().numpy(), average='macro')
+
+        return output, loss, acc, f1
+
     
     def evaluate(self, encoder, projection_adapter, classifier, features, edge_index, labels, mask):
         encoder.eval()
-        projection_adapter.eval() 
+        projection_adapter.eval()
         classifier.eval()
         
         with torch.no_grad():
@@ -117,7 +116,8 @@ class CRGNNTrainer:
         loss = F.cross_entropy(output[mask], labels[mask])
         pred_labels = output[mask].argmax(dim=1)
         acc = accuracy_score(labels[mask].cpu().numpy(), pred_labels.cpu().numpy())
-        return loss, acc
+        f1 = f1_score(labels[mask].cpu().numpy(), pred_labels.cpu().numpy(), average='macro')
+        return loss, acc, f1
     
     def fit(self, base_model, data, config, get_model_func):
         print(f"Training CR-GNN with {config['model_name'].upper()} backbone...")
@@ -191,7 +191,7 @@ class CRGNNTrainer:
             classifier.train()
             optimizer.zero_grad()
 
-            output, loss_train, acc_train = self.get_prediction(
+            output, loss_train, acc_train, f1_train = self.get_prediction(
                 encoder, projection_adapter, projection_head, classifier,
                 data.x, data.edge_index, noisy_labels, train_mask
             )
@@ -209,10 +209,20 @@ class CRGNNTrainer:
 
             torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
-            loss_val, acc_val = self.evaluate(
+            loss_val, acc_val, f1_val = self.evaluate(
                 encoder, projection_adapter, classifier,
                 data.x, data.edge_index, noisy_labels, val_mask
             )
+
+            output_train, loss_train, acc_train, f1_train = self.get_prediction(
+                encoder, projection_adapter, projection_head, classifier,
+                data.x, data.edge_index, noisy_labels, train_mask
+            )
+
+            if self.config['debug']:
+                print(f"Epoch {epoch:03d} | Train Loss: {loss_train:.4f}, Val Loss: {loss_val:.4f} | "
+                      f"Train Acc: {acc_train:.4f}, Val Acc: {acc_val:.4f} | "
+                      f"Train F1: {f1_train:.4f}, Val F1: {f1_val:.4f}")
             
             flag_earlystop = False
             
@@ -234,11 +244,6 @@ class CRGNNTrainer:
 
             if flag_earlystop:
                 break
-
-            if self.config['debug']:
-                print(f"Epoch {epoch+1:05d} | Time(s) {time.time() - start_time:.4f} | "
-                     f"Loss(train) {loss_train.item():.4f} | Acc(train) {acc_train:.4f} | "
-                     f"Loss(val) {loss_val.item():.4f} | Acc(val) {acc_val:.4f} |")
         
         if self.best_weights is not None:
             encoder.load_state_dict(self.best_weights['encoder'])
@@ -246,14 +251,11 @@ class CRGNNTrainer:
             projection_head.load_state_dict(self.best_weights['projection_head'])
             classifier.load_state_dict(self.best_weights['classifier'])
 
-        loss_test, test_acc = self.evaluate(
+        loss_test, test_acc, test_f1 = self.evaluate(
             encoder, projection_adapter, classifier,
             data.x, data.edge_index, clean_labels, test_mask
         )
-        
-        if self.config['debug']:
-            print('Optimization Finished!')
-            print(f'Time(s): {total_time:.4f}')
-            print(f"Loss(test) {loss_test.item():.4f} | Acc(test) {test_acc:.4f}")
-        
+
+        print(f"Test Loss: {loss_test:.4f} | Test Acc: {test_acc:.4f} | Test F1: {test_f1:.4f}")
+
         return test_acc
