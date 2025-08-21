@@ -150,14 +150,14 @@ def run_experiment(config):
     if supp_gnn == 'nrgnn' or method == 'nrgnn':
         print("Using NRGNN")
 
-        model_params = {k: v for k, v in config['model'].items() if k not in ['name']}
-        model_params.pop('hidden_channels', None)
         base_model = get_model(
             model_name=config['model']['name'],
             in_channels=data.num_features,
             hidden_channels=config['model'].get('hidden_channels', 64),
             out_channels=num_classes,
-            **model_params
+            n_layers=config['model'].get('n_layers', 2),
+            dropout=config['model'].get('dropout', 0.5),
+            self_loop=config['model'].get('self_loop', True)
         )
 
         adj = to_scipy_sparse_matrix(data.edge_index, num_nodes=data.x.size(0))
@@ -176,7 +176,7 @@ def run_experiment(config):
                 self.dropout = nrgnn_config.get('dropout', 0.5)
                 self.lr = nrgnn_config.get('lr', 0.01)
                 self.weight_decay = nrgnn_config.get('weight_decay', 5e-4)
-                self.epochs = nrgnn_config.get('epochs', 200)
+                self.epochs = nrgnn_config.get('epochs', 400)
                 self.n_p = nrgnn_config.get('n_p', 10)
                 self.alpha = nrgnn_config.get('alpha', 1.0)
                 self.beta = nrgnn_config.get('beta', 1.0)
@@ -184,14 +184,18 @@ def run_experiment(config):
                 self.t_small = nrgnn_config.get('t_small', 0.1)
                 self.n_n = nrgnn_config.get('n_n', 1)
                 self.debug = nrgnn_config.get('debug', False)
-                self.patience = nrgnn_config.get('patience', 10)
+                self.patience = nrgnn_config.get('patience', 50)
         
         args = Args(nrgnn_config)
         
         model = NRGNN(args, device, base_model=base_model)
         
+        print(f"Training NRGNN with {args.epochs} epochs...")
+        print(f"Key parameters: lr={args.lr}, n_p={args.n_p}, p_u={args.p_u}, alpha={args.alpha}")
+        
         model.fit(features, adj, labels, idx_train, idx_val)
         test_acc = model.test(idx_test)
+        
         print(f"Final test accuracy: {test_acc:.4f}")
         return test_acc
 
