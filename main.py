@@ -1,16 +1,11 @@
 import numpy as np
 import torch
-import torch.nn.functional as F
-from torch_geometric.datasets import Planetoid, CoraFull, Amazon, Coauthor, WikiCS, Reddit
-from torch_geometric.transforms import NormalizeFeatures, RandomNodeSplit
 from torch_geometric.utils import to_scipy_sparse_matrix
 import scipy.sparse as sp
 import yaml
 
-from utilities.usefull import setup_seed_device
-from utilities.noises import label_process
-from model.GNNs import GCN, GIN, GAT, GAT2
-from loss.GNNs_loss import train_with_standard_loss, train_with_dirichlet, train_with_ncod
+from utilities import setup_seed_device, load_dataset, get_model, train
+from utilities import label_process
 from model.NRGNN import NRGNN
 from model.PI_GNN import InnerProductTrainer, Net, InnerProductDecoder
 from model.CR_GNN import CRGNNTrainer
@@ -21,94 +16,6 @@ from model.UnionNET import UnionNET
 from model.GNN_Cleaner import GNNCleanerTrainer
 from model.ERASE import ERASETrainer
 from model.GNNGuard import GNNGuard
-
-def load_dataset(name, root=None):
-    if root is None:
-        root = "./data"
-    name_lower = name.lower()
-    
-    if name_lower == "corafull":
-        dataset = CoraFull(root=f"{root}/CoraFull", transform=NormalizeFeatures())
-    elif name_lower in ["cora", "citeseer", "pubmed"]:
-        dataset = Planetoid(root=f"{root}/{name}", name=name.capitalize(), transform=NormalizeFeatures())
-    elif name_lower in ["computers", "photo"]:
-        dataset = Amazon(root=f"{root}/Amazon", name=name.capitalize(), transform=NormalizeFeatures())
-    elif name_lower in ["coauthorcs", "coauthorphysics"]:
-        dataset = Coauthor(root=f"{root}/Coauthor", name=name_lower.replace("coauthor", "").capitalize(), transform=NormalizeFeatures())
-    elif name_lower == "wikics":
-        dataset = WikiCS(root=f"{root}/WikiCS", transform=NormalizeFeatures())
-    elif name_lower == "reddit":
-        dataset = Reddit(root=f"{root}/Reddit")
-    else:
-        raise ValueError(f"Dataset {name} not supported.")
-    
-    data = dataset[0]
-    if not hasattr(data, 'train_mask'):
-        data = RandomNodeSplit(num_train_per_class=20, num_val=500, num_test=1000)(data)
-    return data, dataset.num_classes
-
-def get_model(model_name, in_channels, hidden_channels, out_channels, **kwargs):
-    model_name = model_name.lower()
-    kwargs.pop('in_channels', None)
-    kwargs.pop('hidden_channels', None)
-    kwargs.pop('out_channels', None)
-
-    model_registry = {
-        'gcn':  (GCN, ['n_layers', 'dropout', 'self_loop']),
-        'gin':  (GIN, ['n_layers', 'dropout', 'mlp_layers', 'train_eps']),
-        'gat':  (GAT, ['n_layers', 'dropout', 'heads']),
-        'gat2': (GAT2, ['n_layers', 'dropout', 'heads']),
-    }
-
-    if model_name not in model_registry:
-        raise ValueError(f"Model {model_name} not recognized.")
-
-    model_cls, valid_params = model_registry[model_name]
-    filtered_kwargs = {k: v for k, v in kwargs.items() if k in valid_params}
-    return model_cls(in_channels, hidden_channels, out_channels, **filtered_kwargs)
-
-def train(model, data, noisy_indices, device, config):
-    method = config['training']['method'].lower()
-    supplementary_gnn = (config['training'].get('supplementary_gnn') or "").lower()
-
-    supplementary_registry = {
-        "nrgnn": "Using NRGNN training",
-        "pi_gnn": "Using PI-GNN training",
-        "cr_gnn": "Using CR-GNN training",
-        "lafak": "Using LafAK training",
-        "rtgnn": "Using RTGNN training",
-        "graphcleaner": "Using GraphCleaner training",
-        "unionnet": "Using UnionNET training",
-        "gnn_cleaner": "Using GNN Cleaner training",
-        "erase": "Using ERASE training",
-        "gnnguard": "Using GNNGuard training",
-    }
-
-    if supplementary_gnn in supplementary_registry:
-        print(supplementary_registry[supplementary_gnn])
-        return
-
-    method_registry = {
-        "standard": train_with_standard_loss,
-        "dirichlet": train_with_dirichlet,
-        "ncod": train_with_ncod,
-    }
-
-    if method not in method_registry:
-        raise ValueError(f"Training method '{method}' not recognized.")
-
-    if method == "standard":
-        method_registry[method](model, data, noisy_indices, device,
-                                total_epochs=config['training']['total_epochs'])
-    elif method == "dirichlet":
-        method_registry[method](model, data, noisy_indices, device,
-                                lambda_dir=config['training'].get('lambda_dir', 0.1),
-                                epochs=config['training']['total_epochs'])
-    elif method == "ncod":
-        method_registry[method](model, data, noisy_indices, device,
-                                total_epochs=config['training']['total_epochs'],
-                                lambda_dir=config['training'].get('lambda_dir', 0.1),
-                                num_classes=config['dataset']['num_classes'])
 
 def run_experiment(config):
     setup_seed_device(config['seed'])
@@ -211,6 +118,7 @@ def run_experiment(config):
             lr_main=float(trainer_params.get('lr_main', 0.01)),
             lr_mi=float(trainer_params.get('lr_mi', 0.01)),
             weight_decay=float(trainer_params.get('weight_decay', 5e-4)),
+            patience=float(trainer_params.get('patience', 20)),
             norm=trainer_params.get('norm', None),
             vanilla=bool(trainer_params.get('vanilla', False)),
         )

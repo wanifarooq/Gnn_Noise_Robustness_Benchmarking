@@ -8,7 +8,7 @@ dataset:
 
 noise:
   type: uniform # clean, uniform, uniform_simple, random, pair, random_pair, flip, uniform_mix, instance, deterministic
-  rate: 0.2
+  rate: 0.4
   seed: 22
 
 model:
@@ -37,7 +37,7 @@ training:
   # - rtgnn: use RTGNN as main method
   # - gnn_cleaner: use GNN Cleaner as main method
   # - gnnguard: use GNNGuard as main method
-  method: nrgnn # standard, dirichlet, ncod, nrgnn, pi_gnn, cr_gnn, lafak, rtgnn, graphcleaner, unionnet, gnn_cleaner, erase, gnnguard
+  method: pi_gnn # standard, dirichlet, ncod, nrgnn, pi_gnn, cr_gnn, lafak, rtgnn, graphcleaner, unionnet, gnn_cleaner, erase, gnnguard
   total_epochs: 1000
   
   # Supplementary GNN options
@@ -52,7 +52,7 @@ training:
   # - gnn_cleaner: use GNN Cleaner
   # - erase: use ERASE
   # - gnnguard: use GNNGuard
-  supplementary_gnn: nrgnn # None, nrgnn, pi_gnn, cr_gnn, lafak, rtgnn, graphcleaner, unionnet, gnn_cleaner, erase, gnnguard
+  supplementary_gnn: pi_gnn # None, nrgnn, pi_gnn, cr_gnn, lafak, rtgnn, graphcleaner, unionnet, gnn_cleaner, erase, gnnguard
 
 # NRGNN parameters
 nrgnn_params:
@@ -73,13 +73,14 @@ nrgnn_params:
 # PI-GNN parameters
 pi_gnn_params:
   epochs: 400
-  start_epoch: 200
+  start_epoch: 50
   miself: false
   lr_main: 0.01
   lr_mi: 0.01
   weight_decay: 5e-4
   norm: null
   vanilla: false
+  patience: 30
 
 # CR-GNN parameters
 cr_gnn_params:
