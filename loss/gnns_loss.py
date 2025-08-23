@@ -191,6 +191,7 @@ def train_with_standard_loss(model, data, noisy_indices, device, total_epochs=20
         test_f1 = f1_score(data.y[test_idx].cpu(), pred[test_idx].cpu(), average='macro')
 
     print(f"Test Loss: {test_loss:.4f} | Test Acc: {test_acc:.4f} | Test F1: {test_f1:.4f}")
+    return test_acc
 
 def train_with_dirichlet(model, data, noisy_indices, device, lambda_dir=0.1, epochs=200, patience=20):
     model.to(device)
@@ -252,6 +253,7 @@ def train_with_dirichlet(model, data, noisy_indices, device, lambda_dir=0.1, epo
         test_f1 = f1_score(data.y[test_idx].cpu(), pred[test_idx].cpu(), average='macro')
 
     print(f"Test Loss: {test_loss:.4f} | Test Acc: {test_acc:.4f} | Test F1: {test_f1:.4f}")
+    return test_acc
 
 def train_with_ncod(model, data, noisy_indices, device, total_epochs=200, lambda_dir=0.1, num_classes=None, patience=20):
     if num_classes is None:
@@ -355,3 +357,4 @@ def train_with_ncod(model, data, noisy_indices, device, total_epochs=200, lambda
         test_f1 = f1_score(data.y[test_idx].cpu(), pred[test_idx].cpu(), average='macro')
 
     print(f"Test Loss: {test_loss:.4f} | Test Acc: {test_acc:.4f} | Test F1: {test_f1:.4f}")
+    return test_acc

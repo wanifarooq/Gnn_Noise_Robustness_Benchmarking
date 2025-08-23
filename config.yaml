@@ -1,4 +1,4 @@
-seed: 22
+seed: 42
 
 device: cuda
 
@@ -8,12 +8,12 @@ dataset:
 
 noise:
   type: uniform # clean, uniform, uniform_simple, random, pair, random_pair, flip, uniform_mix, instance, deterministic
-  rate: 0.4
-  seed: 22
+  rate: 0.6
+  seed: 42
 
 model:
   name: gcn # gcn, gin, gat, gat2
-  hidden_channels: 16
+  hidden_channels: 64
   n_layers: 2
   dropout: 0.2
   # GCN specific parameters
@@ -37,7 +37,7 @@ training:
   # - rtgnn: use RTGNN as main method
   # - gnn_cleaner: use GNN Cleaner as main method
   # - gnnguard: use GNNGuard as main method
-  method: pi_gnn # standard, dirichlet, ncod, nrgnn, pi_gnn, cr_gnn, lafak, rtgnn, graphcleaner, unionnet, gnn_cleaner, erase, gnnguard
+  method: standard # standard, dirichlet, ncod, nrgnn, pi_gnn, cr_gnn, lafak, rtgnn, graphcleaner, unionnet, gnn_cleaner, erase, gnnguard
   total_epochs: 1000
   
   # Supplementary GNN options
@@ -52,7 +52,7 @@ training:
   # - gnn_cleaner: use GNN Cleaner
   # - erase: use ERASE
   # - gnnguard: use GNNGuard
-  supplementary_gnn: pi_gnn # None, nrgnn, pi_gnn, cr_gnn, lafak, rtgnn, graphcleaner, unionnet, gnn_cleaner, erase, gnnguard
+  supplementary_gnn: None # None, nrgnn, pi_gnn, cr_gnn, lafak, rtgnn, graphcleaner, unionnet, gnn_cleaner, erase, gnnguard
 
 # NRGNN parameters
 nrgnn_params:
@@ -85,13 +85,14 @@ pi_gnn_params:
 # CR-GNN parameters
 cr_gnn_params:
   epochs: 400
-  patience: 10
-  lr: 0.001
-  weight_decay: 1e-4
+  patience: 50
+  lr: 0.01
+  weight_decay: 1e-3
   T: 2
-  tau: 2
-  p: 0.2
-  alpha: 1.0
+  tau: 0.6
+  p: 0.9
+  alpha: 0.2
+  beta: 0.9
   debug: true
 
 # LafAK parameters

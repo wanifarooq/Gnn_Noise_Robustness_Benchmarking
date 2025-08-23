@@ -3,6 +3,7 @@ import torch
 from torch_geometric.utils import to_scipy_sparse_matrix
 import scipy.sparse as sp
 import yaml
+import statistics
 
 from utilities import setup_seed_device, load_dataset, get_model, train
 from utilities import label_process
@@ -17,8 +18,9 @@ from model.GNN_Cleaner import GNNCleanerTrainer
 from model.ERASE import ERASETrainer
 from model.GNNGuard import GNNGuard
 
-def run_experiment(config):
-    setup_seed_device(config['seed'])
+def run_experiment(config, run_id=1):
+    seed = config['seed'] + run_id * 100
+    setup_seed_device(seed)
     device = torch.device(config['device'] if torch.cuda.is_available() else 'cpu')
     data, num_classes = load_dataset(config['dataset']['name'], root=config['dataset'].get('root', './data'))
     data = data.to(device)
@@ -38,24 +40,23 @@ def run_experiment(config):
         num_classes,
         noise_type=config['noise']['type'],
         noise_rate=config['noise']['rate'],
-        random_seed=config['noise'].get('seed', 42),
+        random_seed=config['noise'].get('seed', 42) + run_id * 10,
         idx_train=train_indices,
-        debug=True
+        debug=False
     )
     
     global_noisy_indices = train_indices[relative_noisy_indices]
     data.y_noisy = data.y.clone()
     data.y[train_mask] = noisy_train_labels
     
-    print(f"Applied noise to {len(relative_noisy_indices)} training samples out of {train_mask.sum().item()}")
-    print(f"Noise rate: {len(relative_noisy_indices) / train_mask.sum().item():.4f}")
+    print(f"Run {run_id}: Applied noise to {len(relative_noisy_indices)} training samples out of {train_mask.sum().item()}")
     
     supp_gnn = config['training'].get('supplementary_gnn', "")
     method = config['training']['method']
     
     # NRGNN Training
     if supp_gnn == 'nrgnn' or method == 'nrgnn':
-        print("Using NRGNN")
+        print(f"Run {run_id}: Using NRGNN")
 
         base_model = get_model(
             model_name=config['model']['name'],
@@ -90,25 +91,21 @@ def run_experiment(config):
                 self.p_u = nrgnn_config.get('p_u', 0.7)
                 self.t_small = nrgnn_config.get('t_small', 0.1)
                 self.n_n = nrgnn_config.get('n_n', 1)
-                self.debug = nrgnn_config.get('debug', False)
+                self.debug = False
                 self.patience = nrgnn_config.get('patience', 50)
         
         args = Args(nrgnn_config)
         
         model = NRGNN(args, device, base_model=base_model)
         
-        print(f"Training NRGNN with {args.epochs} epochs...")
-        print(f"Key parameters: lr={args.lr}, n_p={args.n_p}, p_u={args.p_u}, alpha={args.alpha}")
-        
         model.fit(features, adj, labels, idx_train, idx_val)
         test_acc = model.test(idx_test)
         
-        print(f"Final test accuracy: {test_acc:.4f}")
         return test_acc
 
     # PI-GNN Training
     if supp_gnn in ['pi_gnn'] or method == 'pi_gnn':
-        print("Using PI-GNN")
+        print(f"Run {run_id}: Using PI-GNN")
         trainer_params = config.get('pi_gnn_params', {})
         trainer = InnerProductTrainer(
             device=device,
@@ -147,12 +144,11 @@ def run_experiment(config):
         }
         
         test_acc = trainer.fit(model, data, trainer_config, get_model)
-        print(f"PI-GNN Training completed with test accuracy: {test_acc:.4f}")
-        return
+        return test_acc
 
     # CR-GNN Training
     if supp_gnn in ['cr_gnn'] or method == 'cr_gnn':
-        print("Using CR-GNN")
+        print(f"Run {run_id}: Using CR-GNN")
         trainer_params = config.get('cr_gnn_params', {})
         trainer = CRGNNTrainer(
             device=device,
@@ -166,7 +162,7 @@ def run_experiment(config):
             p=float(trainer_params.get('p', 0.5)),
             alpha=float(trainer_params.get('alpha', 1.0)),
             beta=float(trainer_params.get('beta', 0.0)),
-            debug=bool(trainer_params.get('debug', True))
+            debug=False
         )
         
         model_params = {k: v for k, v in config['model'].items() if k not in ['name']}
@@ -192,10 +188,9 @@ def run_experiment(config):
         }
         
         test_acc = trainer.fit(base_model, data, trainer_config, get_model)
-        print(f"CR-GNN Training completed with test accuracy: {test_acc:.4f}")
-        return
+        return test_acc
 
-    # LafAK / GradientAttack Training
+# LafAK / GradientAttack Training
     if supp_gnn in ['lafak'] or method == 'lafak':
         print("Using LafAK / GradientAttack")
         
@@ -242,18 +237,18 @@ def run_experiment(config):
             gcnL2=config.get('gcn_l2', 5e-4)
         )
         
-        print("Calculating clean accuracy...")
+        print("Calculating clean accuracy")
         resetBinaryClass_init(data_dict, a=target_classes[0], b=target_classes[1])
         acc_clean_runs = []
         for run in range(3):
-            print(f"Clean run {run+1}/3...")
+            print(f"Clean run {run+1}/3")
             acc_clean, *_ = attack.GNN_test(gnn_model)
             acc_clean_runs.append(acc_clean)
         
         acc_clean_avg = sum(acc_clean_runs) / len(acc_clean_runs)
         print(f"Clean accuracy (average): {acc_clean_avg:.4f}")
         
-        print("Performing gradient attack...")
+        print("Performing gradient attack")
         results = attack.binaryAttack_multiclass_with_clean(
             c_max=config.get('c_max', 10),
             a=target_classes[0],
@@ -271,17 +266,11 @@ def run_experiment(config):
             print(f"GNN Attacked accuracy: {results['gnn_attacked_acc']:.4f}")
             print(f"GNN Attack success: {results['gnn_attack_success']:.4f}")
         
-        return {
-            "clean_acc": results.get('gnn_clean_acc', results['binary_clean_acc']),
-            "attacked_acc": results.get('gnn_attacked_acc', results['binary_attacked_acc']),
-            "attack_success": results.get('gnn_attack_success', results['attack_success']),
-            "target_classes": target_classes,
-            "final_acc": results.get('gnn_attacked_acc', results['binary_attacked_acc'])
-        }
+        return results.get('gnn_attacked_acc', results['binary_attacked_acc'])
 
     # RTGNN Training
     if supp_gnn in ['rtgnn'] or method == 'rtgnn':
-        print("Using RTGNN")
+        print(f"Run {run_id}: Using RTGNN")
         
         class RTGNNConfig:
             def __init__(self, config_dict):
@@ -327,11 +316,6 @@ def run_experiment(config):
             idx_val = list(range(len(idx_train), min(len(idx_train) + 500, num_nodes // 2)))
             idx_test = list(range(max(len(idx_train) + len(idx_val), num_nodes // 2), num_nodes))
         
-        print(f"RTGNN - Dataset: {features.shape[0]} nodes, {features.shape[1]} features, "
-              f"{len(np.unique(labels))} classes")
-        print(f"RTGNN - Splits: {len(idx_train)} train, {len(idx_val)} val, {len(idx_test)} test")
-        print(f"RTGNN - Noise rate: {config['noise']['rate']}")
-        
         nfeat, nclass = features.shape[1], len(np.unique(labels))
         rtgnn_backbone = config.get('rtgnn_params', {}).get('gnn_type', config['model']['name'].lower())
         rtgnn_model = RTGNN(nfeat, nclass, rtgnn_args, device, gnn_type=rtgnn_backbone).to(device)
@@ -341,12 +325,11 @@ def run_experiment(config):
         clean_labels = data.y_original.cpu().numpy()
         test_acc = rtgnn_model.test(features, clean_labels, idx_test)
         
-        print(f"RTGNN - Final test accuracy: {test_acc:.4f}")
-        return {"test_acc": test_acc}
+        return test_acc
     
     # GraphCleaner Training
     if supp_gnn in ['graphcleaner'] or method == 'graphcleaner':
-        print("Using GraphCleaner")
+        print(f"Run {run_id}: Using GraphCleaner")
         
         data_for_detection = data.clone()
         
@@ -360,7 +343,7 @@ def run_experiment(config):
             num_classes,
             noise_type=config['noise']['type'],
             noise_rate=config['noise']['rate'],
-            random_seed=config['noise'].get('seed', 42) + 1000,
+            random_seed=config['noise'].get('seed', 42) + 1000 + run_id * 10,
             idx_train=test_indices,
             debug=False
         )
@@ -371,8 +354,6 @@ def run_experiment(config):
         
         global_noisy_test_indices = test_indices[relative_noisy_test_indices]
         all_noisy_indices = torch.cat([global_noisy_indices, global_noisy_test_indices])
-        
-        print(f"Added noise to {len(relative_noisy_test_indices)} test samples for detection evaluation")
 
         base_model = get_model(
             model_name=config['model']['name'],
@@ -390,16 +371,11 @@ def run_experiment(config):
         test_ground_truth = get_noisy_ground_truth(data_for_detection, all_noisy_indices)[data.test_mask.cpu()].cpu().numpy()
         detection_results = detector.evaluate_detection(predictions, test_ground_truth, probs)
         
-        print(f"\nGraphCleaner Detection Summary:")
-        print(f"Detected {np.sum(predictions)} out of {len(predictions)} test samples as noisy")
-        print(f"Ground truth: {np.sum(test_ground_truth)} samples are actually noisy")
-        print(f"Test noise rate: {np.sum(test_ground_truth) / len(test_ground_truth):.4f}")
-        
-        return detection_results
+        return detection_results.get('accuracy', 0.0)
     
     # UnionNET Training
     if supp_gnn in ['unionnet'] or method == 'unionnet':
-        print("Using UnionNET")
+        print(f"Run {run_id}: Using UnionNET")
         
         gnn_model = get_model(
             model_name=config['model']['name'],
@@ -425,17 +401,13 @@ def run_experiment(config):
         }
         
         unionnet = UnionNET(gnn_model, data, num_classes, unionnet_config)
-        result = unionnet.train(debug=True)
+        result = unionnet.train(debug=False)
         
-        print("UnionNET Results:")
-        print(f"Train Acc: {result['train']:.4f}")
-        print(f"Valid Acc: {result['val']:.4f}")
-        print(f"Test Acc: {result['test']:.4f}")
-        return result
+        return result['test']
     
     # GNN Cleaner Training
     if supp_gnn in ['gnn_cleaner'] or method == 'gnn_cleaner':
-        print("Using GNN Cleaner")
+        print(f"Run {run_id}: Using GNN Cleaner")
 
         gnn_model = get_model(
             model_name=config['model']['name'],
@@ -462,21 +434,16 @@ def run_experiment(config):
         }
 
         trainer = GNNCleanerTrainer(gnn_cleaner_config, data, device, num_classes, gnn_model)
-        result = trainer.train(debug=True)
+        result = trainer.train(debug=False)
         
-        print("\nGNN Cleaner Results")
-        print(f"Train Acc: {result['train']:.4f}")
-        print(f"Valid Acc: {result['val']:.4f}")
-        print(f"Test Acc: {result['test']:.4f}")
-        
-        return result
+        return result['test']
     
     # ERASE Training
     if supp_gnn in ['erase'] or method == 'erase':
-        print("Using ERASE")
+        print(f"Run {run_id}: Using ERASE")
         
         erase_config = {
-            'seed': config.get('seed', 42),
+            'seed': seed,
             'erase_gnn_type': config['model']['name'],
             'hidden_channels': config['model'].get('hidden_channels', 128),
             'n_embedding': config['training'].get('erase_params', {}).get('n_embedding', 512),
@@ -501,17 +468,13 @@ def run_experiment(config):
         }
         
         trainer = ERASETrainer(erase_config, device, num_classes, get_model)
-        result = trainer.train(data, debug=True)
+        result = trainer.train(data, debug=False)
         
-        print("ERASE Results:")
-        print(f"Train Acc: {result['train']:.4f}")
-        print(f"Valid Acc: {result['val']:.4f}")
-        print(f"Test Acc: {result['test']:.4f}")
-        return result
+        return result['test']
     
     # GNNGuard Training
     if supp_gnn in ['gnnguard'] or method == 'gnnguard':
-        print("Using GNNGuard")
+        print(f"Run {run_id}: Using GNNGuard")
         
         gnnguard_args = {
             'dropout': config.get('dropout', 0.5),
@@ -535,7 +498,6 @@ def run_experiment(config):
             idx_val = data.val_mask.nonzero(as_tuple=True)[0].cpu().numpy()
             idx_test = data.test_mask.nonzero(as_tuple=True)[0].cpu().numpy()
         else:
-
             num_nodes = data.num_nodes
             idx_train = np.arange(min(140, num_nodes // 5))
             idx_val = np.arange(len(idx_train), min(len(idx_train) + 500, num_nodes // 2))
@@ -549,16 +511,15 @@ def run_experiment(config):
             idx_val=idx_val,
             idx_test=idx_test,
             train_iters=config.get('total_epochs', 200),
-            verbose=True,
+            verbose=False,
             patience=config.get('patience', 5)
         )
         
         test_acc, test_f1 = gnnguard_model.test(idx_test)
-        print(f"Final test accuracy and test F1 score: {test_acc:.4f}")
-        return {"test_acc": test_acc, "test_f1": test_f1}
+        return test_acc
 
     model_params = {k: v for k, v in config['model'].items() if k not in ['name']}
-    print(f"Using {config['model']['name']} with method {config['training']['method']}")
+    print(f"Run {run_id}: Using {config['model']['name']} with method {config['training']['method']}")
     model = get_model(
         model_name=config['model']['name'],
         in_channels=data.num_features,
@@ -566,11 +527,80 @@ def run_experiment(config):
         **model_params
     ).to(device)
     
-    train(model, data, global_noisy_indices, device, config)
+    result = train(model, data, global_noisy_indices, device, config)
+    return result
 
 if __name__ == "__main__":
     print("\n" + "-"*50)
+    print("Multi-run experiment - 10 runs")
+    print("-"*50)
+    
     with open("config.yaml", "r") as f:
         config = yaml.safe_load(f)
-    print("Loaded configuration file\n" + "-"*50)
-    run_experiment(config)
+    print("Loaded configuration file")
+
+    method_name = config['training'].get('supplementary_gnn', config['training']['method'])
+    dataset_name = config['dataset']['name']
+    noise_rate = config['noise']['rate']
+    
+    print(f"Dataset: {dataset_name}")
+    print(f"Method: {method_name}")
+    print(f"Noise Rate: {noise_rate}")
+    print(f"Running 10 experiments...")
+    print("-"*50)
+    
+    test_accuracies = []
+    
+    for run in range(1, 11):
+        try:
+            print(f"\nRun {run}/10:")
+            test_acc = run_experiment(config, run_id=run)
+            
+            if isinstance(test_acc, dict):
+                if 'test_acc' in test_acc:
+                    acc_value = test_acc['test_acc']
+                elif 'test' in test_acc:
+                    acc_value = test_acc['test']
+                else:
+                    acc_value = list(test_acc.values())[0]
+            else:
+                acc_value = test_acc
+            
+            test_accuracies.append(acc_value)
+            print(f"Run {run} completed - Test Accuracy: {acc_value:.4f}")
+            
+        except Exception as e:
+            print(f"Run {run} failed with error: {str(e)}")
+            print("Continuing with remaining runs")
+            continue
+    
+    if test_accuracies:
+        mean_acc = np.mean(test_accuracies)
+        std_acc = np.std(test_accuracies)
+        min_acc = np.min(test_accuracies)
+        max_acc = np.max(test_accuracies)
+        
+        print("\n" + "-"*50)
+        print("Final results")
+        print("-"*50)
+        print(f"Method: {method_name}")
+        print(f"Dataset: {dataset_name}")
+        print(f"Noise Rate: {noise_rate}")
+        print(f"Completed Runs: {len(test_accuracies)}/10")
+        print("-"*50)
+        print(f"Mean Test Accuracy:    {mean_acc:.4f}")
+        print(f"Std Test Accuracy:     {std_acc:.4f}")
+        print(f"Min Test Accuracy:     {min_acc:.4f}")
+        print(f"Max Test Accuracy:     {max_acc:.4f}")
+        print("-"*50)
+        print("Individual Run Results:")
+        for i, acc in enumerate(test_accuracies, 1):
+            print(f"  Run {i:2d}: {acc:.4f}")
+        
+        print(f"\nFormatted Result: {mean_acc:.4f} ± {std_acc:.4f}")
+        print("-"*50)
+        
+    else:
+        print("\n" + "-"*50)
+        print("ERROR: No successful runs completed!")
+        print("-"*50)
