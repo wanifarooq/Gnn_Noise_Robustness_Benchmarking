@@ -6,6 +6,7 @@ import numpy as np
 import scipy.sparse as sp
 import copy
 import time
+import scipy
 from sklearn.model_selection import train_test_split
 from torch_geometric.utils import from_scipy_sparse_matrix, subgraph
 from torch_geometric.data import Data as PyGData
@@ -17,26 +18,51 @@ def BinaryLabelToPosNeg(labels):
     else:
         return 2 * labels - 1
 
+def BinaryLabelTo01(labels):
+    if isinstance(labels, torch.Tensor):
+        return (labels + 1) / 2
+    else:
+        return (labels + 1) / 2
+    
+
+def accuracy_torch(preds, labels):
+    pred_labels = preds.argmax(dim=1)
+    correct = (pred_labels == labels).sum().item()
+    return correct / len(labels)
+
+def f1_torch(preds, labels):
+    pred_labels = preds.argmax(dim=1).cpu().numpy()
+    labels = labels.cpu().numpy()
+    return f1_score(labels, pred_labels, average="macro")
+
 def accuracy(preds, labels):
-    preds = preds.long() if isinstance(preds, torch.Tensor) else torch.tensor(preds).long()
-    labels = labels.long() if isinstance(labels, torch.Tensor) else torch.tensor(labels).long()
-    return (preds == labels).float().mean().item()
+    if isinstance(preds, torch.Tensor):
+        preds = preds.cpu().numpy()
+    if isinstance(labels, torch.Tensor):
+        labels = labels.cpu().numpy()
+    
+    if preds.dtype == np.float32 or preds.dtype == np.float64:
+        preds = np.sign(preds)
+    
+    return (preds == labels).mean()
 
-def preprocess_graph_torch(adj):
-    device = adj.device
-    adj = adj + torch.eye(adj.size(0), device=device)
-    rowsum = adj.sum(dim=1)
-    d_inv_sqrt = torch.pow(rowsum, -0.5)
-    d_inv_sqrt[torch.isinf(d_inv_sqrt)] = 0
-    D_inv_sqrt = torch.diag(d_inv_sqrt)
-    return D_inv_sqrt @ adj @ D_inv_sqrt
+def preprocess_graph_numpy(adj):
+    adj = adj + sp.eye(adj.shape[0])
+    adj = sp.coo_matrix(adj)
+    row_sum = np.array(adj.sum(1))
+    d_inv_sqrt = np.power(row_sum, -0.5).flatten()
+    d_inv_sqrt[np.isinf(d_inv_sqrt)] = 0.
+    d_mat_inv_sqrt = sp.diags(d_inv_sqrt)
+    return d_mat_inv_sqrt.dot(adj).dot(d_mat_inv_sqrt)
 
-def row_normalize_torch(mx):
-    rowsum = mx.sum(dim=1)
-    r_inv = torch.pow(rowsum, -1)
-    r_inv[torch.isinf(r_inv)] = 0
-    r_mat_inv = torch.diag(r_inv)
-    return r_mat_inv @ mx
+def row_normalize_numpy(mx):
+
+    rowsum = np.array(mx.sum(1))
+    r_inv = np.power(rowsum, -1).flatten()
+    r_inv[np.isinf(r_inv)] = 0.
+    r_mat_inv = sp.diags(r_inv)
+    mx = r_mat_inv.dot(mx)
+    return mx
 
 def debug_data_dict(data_dict):
     print("Data dict debug")
@@ -55,6 +81,7 @@ def debug_data_dict(data_dict):
     print("-"*50)
 
 def prepare_simpledata_attrs(pyg_data):
+
     row, col = pyg_data.edge_index.cpu().numpy()
     N = pyg_data.num_nodes
     A_obs = sp.coo_matrix((np.ones(row.shape[0]), (row, col)), shape=(N, N))
@@ -84,7 +111,8 @@ def prepare_simpledata_attrs(pyg_data):
     data_dict = {
         '_A_obs': A_obs,
         '_X_obs': X_obs,
-        '_z_obs': z_obs,
+        '_z_obs': z_obs.copy(),
+        '_z_obs_original': z_obs.copy(),
         'N': N,
         'K': K,
         'split_train': split_train,
@@ -93,7 +121,8 @@ def prepare_simpledata_attrs(pyg_data):
         'train_mask': train_mask,
         'val_mask': val_mask,
         'test_mask': test_mask,
-        '_Z_obs': Z_obs,
+        '_Z_obs': Z_obs.copy(),
+        '_Z_obs_original': Z_obs.copy(),
     }
     
     debug_data_dict(data_dict)
@@ -112,53 +141,50 @@ def resetBinaryClass_init(data_dict, a, b):
 
     nodes_AB_all = np.concatenate([
         nodes_AB_train,
-        np.setdiff1d(nodes_AB, nodes_AB_train)
+        nodes_AB_val,
+        nodes_AB_test
     ])
 
     mask_train_rel = np.isin(nodes_AB_all, nodes_AB_train)
+    split_train_AB = np.where(mask_train_rel)[0]
     split_unlabeled = np.where(~mask_train_rel)[0]
 
     labels_AB = data_dict['_z_obs'][nodes_AB_all].copy()
     labels_AB[labels_AB == a] = 0
     labels_AB[labels_AB == b] = 1
 
-    data_dict['nodes_AB_train'] = nodes_AB_train
-    data_dict['nodes_AB_val'] = nodes_AB_val
-    data_dict['nodes_AB_test'] = nodes_AB_test
-    data_dict['nodes_AB_all'] = nodes_AB_all
-    data_dict['split_unlabeled'] = split_unlabeled
-    data_dict['_z_obs_bin'] = labels_AB
+    data_dict.update({
+        'nodes_AB_train': nodes_AB_train,
+        'nodes_AB_val': nodes_AB_val,
+        'nodes_AB_test': nodes_AB_test,
+        'nodes_AB_all': nodes_AB_all,
+        'split_train_AB': split_train_AB,
+        'split_unlabeled': split_unlabeled,
+        '_z_obs_bin': labels_AB,
+        'binary_classes': (a, b)
+    })
+    
+    print(f"Binary setup: {len(nodes_AB_train)} train, {len(nodes_AB_val)} val, {len(nodes_AB_test)} test")
+    print(f"Total AB nodes: {len(nodes_AB_all)}, unlabeled: {len(split_unlabeled)}")
 
 def recover_data(data_dict):
-    data_dict['_z_obs'] = np.argmax(data_dict['_Z_obs'], axis=1)
+
+    data_dict['_z_obs'] = data_dict['_z_obs_original'].copy()
+    data_dict['_Z_obs'] = data_dict['_Z_obs_original'].copy()
 
 def resetz_by_Z(data_dict):
+
     data_dict['_z_obs'] = np.argmax(data_dict['_Z_obs'], axis=1)
 
-def preprocess_graph_numpy(adj):
-    adj = adj + sp.eye(adj.shape[0])
-    adj = sp.coo_matrix(adj)
-    row_sum = np.array(adj.sum(1))
-    d_inv_sqrt = np.power(row_sum, -0.5).flatten()
-    d_inv_sqrt[np.isinf(d_inv_sqrt)] = 0.
-    d_mat_inv_sqrt = sp.diags(d_inv_sqrt)
-    return d_mat_inv_sqrt.dot(adj).dot(d_mat_inv_sqrt)
-
-def row_normalize_numpy(mx):
-    rowsum = np.array(mx.sum(1))
-    r_inv = np.power(rowsum, -1).flatten()
-    r_inv[np.isinf(r_inv)] = 0.
-    r_mat_inv = sp.diags(r_inv)
-    mx = r_mat_inv.dot(mx)
-    return mx
-
 class Attack:
-    def __init__(self, data_dict, gpu_id, atkEpoch, gcnL2):
+    def __init__(self, data_dict, gpu_id, atkEpoch, gcnL2, smooth_coefficient, c_max):
         self.data = data_dict
         self.gpu_id = gpu_id
         self.atkEpoch = atkEpoch
         self.gcnL2 = gcnL2
         self.device = torch.device(f"cuda:{gpu_id}" if torch.cuda.is_available() else "cpu")
+        self.tau = smooth_coefficient
+        self.c_max = c_max
 
     def GNN_test(self, gnn_model, epochs=200, early_stopping=10):
         model = copy.deepcopy(gnn_model).to(self.device)
@@ -172,7 +198,9 @@ class Attack:
         val_mask = torch.tensor(np.isin(self.data['nodes_AB_all'], self.data['nodes_AB_val']), device=self.device)
         test_mask = torch.tensor(np.isin(self.data['nodes_AB_all'], self.data['nodes_AB_test']), device=self.device)
     
-        A = sp.coo_matrix(self.data['_A_obs'])
+        A = self.data['_A_obs']
+        if hasattr(A, 'tocoo'):
+            A = A.tocoo()
         edge_index, edge_weight = from_scipy_sparse_matrix(A)
         edge_index = edge_index.to(self.device)
     
@@ -183,7 +211,7 @@ class Attack:
         best_model_wts = copy.deepcopy(model.state_dict())
         epochs_no_improve = 0
     
-        for epoch in range(epochs):
+        for epoch in range(1, epochs+1):
             model.train()
             optimizer.zero_grad()
             
@@ -195,274 +223,299 @@ class Attack:
             optimizer.step()
 
             model.eval()
-            for epoch in range(epochs):
-                model.train()
-                optimizer.zero_grad()
-                
-                data_batch = PyGData(x=X, edge_index=edge_index_sub, y=y)
-                out = model(data_batch)
-                
-                loss = criterion(out[train_mask], y[train_mask])
-                loss.backward()
-                optimizer.step()
-
-                model.eval()
-                with torch.no_grad():
-                    pred_train = out[train_mask].argmax(dim=1)
-                    train_acc = (pred_train == y[train_mask]).float().mean().item()
-                    train_f1 = f1_score(y[train_mask].cpu(), pred_train.cpu(), average='macro')
-                    
-                    out_val = model(data_batch)
-                    val_loss = criterion(out_val[val_mask], y[val_mask]).item()
-                    pred_val = out_val[val_mask].argmax(dim=1)
-                    val_acc = (pred_val == y[val_mask]).float().mean().item()
-                    val_f1 = f1_score(y[val_mask].cpu(), pred_val.cpu(), average='macro')
-                    
-                    print(f"Epoch {epoch:03d} | Train Loss: {loss.item():.4f}, Val Loss: {val_loss:.4f} | "
-                          f"Train Acc: {train_acc:.4f}, Val Acc: {val_acc:.4f} | "
-                          f"Train F1: {train_f1:.4f}, Val F1: {val_f1:.4f}")
-
-                if val_loss < best_val_loss:
-                    best_val_loss = val_loss
-                    best_model_wts = copy.deepcopy(model.state_dict())
-                    epochs_no_improve = 0
-                else:
-                    epochs_no_improve += 1
-                    if epochs_no_improve >= early_stopping:
-                        break
-
-            model.load_state_dict(best_model_wts)
-            model.eval()
             with torch.no_grad():
-                data_batch = PyGData(x=X, edge_index=edge_index_sub, y=y)
-                out = model(data_batch)
-                
-                probs = torch.softmax(out, dim=1)
-                pred = out.argmax(dim=1)
+                out_val = model(data_batch)
 
-                correct = pred[test_mask] == y[test_mask]
-                acc = int(correct.sum()) / int(test_mask.sum())
+                train_loss = loss.item()
+                val_loss = criterion(out_val[val_mask], y[val_mask]).item()
 
-                eachAcc = []
-                for c in range(probs.shape[1]):
-                    mask_c = (y[test_mask] == c)
-                    if mask_c.sum() == 0:
-                        eachAcc.append(None)
-                    else:
-                        eachAcc.append(int((pred[test_mask][mask_c] == c).sum()) / int(mask_c.sum()))
+                train_acc = accuracy_torch(out_val[train_mask], y[train_mask])
+                val_acc = accuracy_torch(out_val[val_mask], y[val_mask])
+                train_f1 = f1_torch(out_val[train_mask], y[train_mask])
+                val_f1 = f1_torch(out_val[val_mask], y[val_mask])
 
-                loss = criterion(out[test_mask], y[test_mask]).item()
-                f1 = f1_score(y[test_mask].cpu(), pred[test_mask].cpu(), average='macro')
+            print(f"Epoch {epoch:03d} | Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f} | "
+                  f"Train Acc: {train_acc:.4f}, Val Acc: {val_acc:.4f} | "
+                  f"Train F1: {train_f1:.4f}, Val F1: {val_f1:.4f}")
 
-            print(f"Test Loss: {loss:.4f} | Test Acc: {acc:.4f} | Test F1: {f1:.4f}")
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                best_model_wts = copy.deepcopy(model.state_dict())
+                epochs_no_improve = 0
+            else:
+                epochs_no_improve += 1
+                if epochs_no_improve >= early_stopping:
+                    print(f"Early stopping at epoch {epoch}")
+                    break
 
-            return acc, loss, eachAcc
+        model.load_state_dict(best_model_wts)
+        model.eval()
+        with torch.no_grad():
+            data_batch = PyGData(x=X, edge_index=edge_index_sub, y=y)
+            out = model(data_batch)
+
+            test_loss = criterion(out[test_mask], y[test_mask]).item()
+            acc = accuracy_torch(out[test_mask], y[test_mask])
+            f1 = f1_torch(out[test_mask], y[test_mask])
+
+            print(f"Test Loss: {test_loss:.4f} | Test Acc: {acc:.4f} | Test F1: {f1:.4f}")
+
+        return acc, f1, out[test_mask].cpu().numpy()
 
     def getK_GCN(self):
-        A = self.data['_A_obs'][np.ix_(self.data['nodes_AB_all'], self.data['nodes_AB_all'])]
-        if hasattr(A, "toarray"):
-            A = A.toarray()
-        A = torch.tensor(A, dtype=torch.float32, device=self.device)
-        A = preprocess_graph_torch(A)
+
+        A_sub = self.data['_A_obs'][np.ix_(self.data['nodes_AB_all'], self.data['nodes_AB_all'])]
+        A_processed = preprocess_graph_numpy(A_sub).tocsr()
         
-        X = self.data['_X_obs'][self.data['nodes_AB_all']]
-        if hasattr(X, "toarray"):
-            X = X.toarray()
-        X = torch.tensor(X, dtype=torch.float32, device=self.device)
-        X = row_normalize_torch(X)
+        X_sub = self.data['_X_obs'][self.data['nodes_AB_all']]
+        if hasattr(X_sub, 'toarray'):
+            X_sub = X_sub.toarray()
+        X_normalized = row_normalize_numpy(sp.csr_matrix(X_sub)).tocsr()
         
-        X_bar = A @ A @ X
+        X_bar = A_processed.dot(A_processed).dot(X_normalized).tocsr()
         
-        train_indices_in_AB = np.where(np.isin(self.data['nodes_AB_all'], self.data['nodes_AB_train']))[0]
-        X_bar_l = X_bar[train_indices_in_AB, :]
+        X_bar_l = X_bar[self.data['split_train_AB'], :]
         
-        reg_identity = self.gcnL2 * torch.eye(X_bar_l.size(1), device=self.device)
-        tmp = X_bar_l.T @ X_bar_l + reg_identity
-        tmp = torch.linalg.pinv(tmp)
-        tmp = tmp @ X_bar_l.T
+        tmp = X_bar_l.T.dot(X_bar_l)
+        reg_matrix = self.gcnL2 * np.identity(tmp.shape[0])
+        tmp_reg = tmp.toarray() + reg_matrix
+        tmp_inv = sp.csr_matrix(scipy.linalg.pinv(tmp_reg))
+        tmp_final = tmp_inv.dot(X_bar_l.T)
         
-        K = X_bar @ tmp
-        K = K[self.data['split_unlabeled'], :]
+        K = X_bar.dot(tmp_final)[self.data['split_unlabeled'], :].toarray()
         
-        return K.cpu().numpy()
+        return K
+
+    def closedForm_bin(self, trainLabels):
+
+        if isinstance(trainLabels, torch.Tensor):
+            trainLabels = trainLabels.cpu().numpy()
+        
+        trainLabels = trainLabels.reshape(-1, 1)
+        y_pred = np.dot(self.K, trainLabels).flatten()
     
-    def gradient_attack_sgd_pytorch(self, c_max):
-        train_indices_in_AB = np.where(np.isin(self.data['nodes_AB_all'], self.data['nodes_AB_train']))[0]
-        unlabeled_indices_in_AB = self.data['split_unlabeled']
-
-        self.data['train_indices_in_AB'] = train_indices_in_AB
-        self.data['unlabeled_indices_in_AB'] = unlabeled_indices_in_AB
-
-        train_labels_binary = self.data['_z_obs_bin'][train_indices_in_AB]
-        unlabeled_labels_binary = self.data['_z_obs_bin'][unlabeled_indices_in_AB]
+        unlabeled_labels = self.data['_z_obs_bin'][self.data['split_unlabeled']]
+        true_labels = BinaryLabelToPosNeg(unlabeled_labels)
         
-        y_l = BinaryLabelToPosNeg(train_labels_binary).reshape(-1, 1)
-        y_u = BinaryLabelToPosNeg(unlabeled_labels_binary).reshape(-1, 1)
-    
-        device = self.device
-        y_l_tensor = torch.tensor(y_l, dtype=torch.float32, device=device)
-        y_u_tensor = torch.tensor(y_u, dtype=torch.float32, device=device)
-        K_tensor = torch.tensor(self.K, dtype=torch.float32, device=device)
+        mse_org = accuracy(np.sign(y_pred), true_labels)
+        
+        return mse_org, y_pred
 
-        alpha = torch.nn.Parameter(0.5 * torch.ones_like(y_l_tensor, device=device))
+    def gradient_attack_sgd(self):
+
+        train_labels_bin = self.data['_z_obs_bin'][self.data['split_train_AB']]
+        unlabeled_labels_bin = self.data['_z_obs_bin'][self.data['split_unlabeled']]
+        
+        y_l = BinaryLabelToPosNeg(train_labels_bin).reshape(-1, 1)
+        y_u = BinaryLabelToPosNeg(unlabeled_labels_bin).reshape(-1, 1)
+        
+        y_l_tensor = torch.tensor(y_l, dtype=torch.float32, device=self.device)
+        y_u_tensor = torch.tensor(y_u, dtype=torch.float32, device=self.device)
+        K_tensor = torch.tensor(self.K, dtype=torch.float32, device=self.device)
+
+        alpha = torch.nn.Parameter(0.5 * torch.ones_like(y_l_tensor, device=self.device))
         optimizer = optim.SGD([alpha], lr=1e-4)
-        tau = self.tau
-    
+        
         for step in range(self.atkEpoch):
             optimizer.zero_grad()
+            
             u1 = torch.rand_like(alpha)
             u2 = torch.rand_like(alpha)
             gumbel1 = -torch.log(-torch.log(u1 + 1e-20) + 1e-20)
             gumbel2 = -torch.log(-torch.log(u2 + 1e-20) + 1e-20)
             epsilon = gumbel1 - gumbel2
-    
-            logit = torch.log(alpha / (1 - alpha) + 1e-20)
+            
+            logit = torch.log(alpha / (1 - alpha + 1e-20) + 1e-20)
             tmp = torch.exp((logit + epsilon) / 0.5)
-            z = 2 / (1 + tmp) - 1
-    
+            z = 2.0 / (1.0 + tmp) - 1.0
+            
             y_l_tmp = y_l_tensor * z
-
-            y_u_preds = torch.tanh(tau * torch.matmul(K_tensor, y_l_tmp))
+            
+            y_u_preds = torch.tanh(self.tau * torch.matmul(K_tensor, y_l_tmp))
+            
             loss = torch.mean(y_u_preds * y_u_tensor)
+            
             loss.backward()
             optimizer.step()
+            
             with torch.no_grad():
                 alpha.clamp_(0, 1)
-    
-        alpha_np = alpha.detach().cpu().numpy().reshape(-1)
-        idx = np.argsort(alpha_np)[::-1]
-        d_y = np.ones(len(train_indices_in_AB))
+        
+        alpha_final = alpha.detach().cpu().numpy().flatten()
+        
+        idx = np.argsort(alpha_final)[::-1]
+        d_y = np.ones(len(self.data['split_train_AB']))
         count = 0
-        flip = {}
+        flip_info = {}
+        
+        max_flips = min(self.c_max, len(self.data['split_train_AB']))
         
         for i in idx:
-            if alpha_np[i] > 0.5 and count < c_max:
+            if alpha_final[i] > 0.5 and count < max_flips:
                 d_y[i] = -1
                 count += 1
-
-                original_node_idx = self.data['nodes_AB_all'][train_indices_in_AB[i]]
-                flip[original_node_idx] = alpha_np[i]
-                if count == c_max:
+                global_node_idx = self.data['nodes_AB_all'][self.data['split_train_AB'][i]]
+                flip_info[global_node_idx] = alpha_final[i]
+                if count == max_flips:
                     break
-    
-        trainLabels = y_l.reshape(-1)
-        acc_cln, pred_closed_cln = self.closedForm_bin(trainLabels)
         
-        trainLabels_atk = trainLabels * d_y
+        print(f"Flipped {count}/{max_flips} nodes (alpha > 0.5 constraint)")
+        
+        trainLabels_clean = y_l.flatten()
+        acc_cln, pred_closed_cln = self.closedForm_bin(trainLabels_clean)
+        
+        trainLabels_atk = trainLabels_clean * d_y
         acc_atk, pred_closed_atk = self.closedForm_bin(trainLabels_atk)
-    
-        _z_obs_bin_atk = self.data['_z_obs_bin'].copy()
-        for i in range(len(train_indices_in_AB)):
-            if d_y[i] == -1:
-                ab_idx = train_indices_in_AB[i]
-                _z_obs_bin_atk[ab_idx] = 1 - _z_obs_bin_atk[ab_idx]
-    
-        return d_y, _z_obs_bin_atk, acc_cln, acc_atk, pred_closed_cln, pred_closed_atk
-
-    def closedForm_bin(self, trainLabels):
-        trainLabels_tensor = torch.tensor(trainLabels, dtype=torch.float32, device=self.device)
-        K_tensor = torch.tensor(self.K, dtype=torch.float32, device=self.device)
-        y_pred = K_tensor @ trainLabels_tensor
-        y_pred_sign = torch.sign(y_pred)
         
-        unlabeled_labels_binary = self.data['_z_obs_bin'][self.data['unlabeled_indices_in_AB']]
-        true_labels_binary = BinaryLabelToPosNeg(unlabeled_labels_binary)
-        true_labels_tensor = torch.tensor(true_labels_binary, device=self.device, dtype=torch.float32)
+        _z_obs_bin_atk = self.data['_z_obs_bin'].copy()
+        for i, flip in enumerate(d_y):
+            if flip == -1:
+                ab_idx = self.data['split_train_AB'][i]
+                _z_obs_bin_atk[ab_idx] = 1 - _z_obs_bin_atk[ab_idx]
+        
+        return d_y, BinaryLabelTo01(BinaryLabelToPosNeg(_z_obs_bin_atk)), acc_cln, acc_atk, pred_closed_cln, pred_closed_atk
 
-        acc = accuracy(y_pred_sign.cpu(), true_labels_tensor.cpu())
-        return acc, y_pred.cpu().numpy()
-
-    def optimize_tau(self, c_max, tau_candidates=[0.1, 0.5, 1.0, 2.0, 5.0]):
-        best_tau = None
-        best_obj = -float('inf')
-        best_results = None
-        for tau in tau_candidates:
+    def get_tau(self):
+        tau_list = [1, 2, 4, 8, 16, 32, 64, 128]
+        maxTau = 0
+        maxAcc = 100000
+        maxOuts = None
+        
+        print(f"Optimizing tau with c_max = {self.c_max}")
+        
+        for tau in tau_list:
             self.tau = tau
-            d_y, _, acc_bin_cln, acc_bin_atk, preds_closed_cln, preds_closed_atk = self.gradient_attack_sgd_pytorch(c_max)
-            if acc_bin_cln - acc_bin_atk > best_obj:
-                best_obj = acc_bin_cln - acc_bin_atk
-                best_tau = tau
-                best_results = (d_y, _, acc_bin_cln, acc_bin_atk, preds_closed_cln, preds_closed_atk)
-        self.tau = best_tau
-        print(f"Best tau found: {best_tau}")
-        return best_results
+            print(f"Testing tau = {tau}")
+            outs = self.gradient_attack_sgd()
+            acc_atk = outs[3]
+            
+            print(f"  Tau {tau}: attacked accuracy = {acc_atk:.4f}")
+            
+            if acc_atk <= maxAcc:
+                maxAcc = acc_atk
+                maxTau = tau
+                maxOuts = outs
+                
+        self.tau = maxTau
+        print(f"Best tau found: {self.tau}, with attacked accuracy: {maxAcc:.4f}")
+        return maxOuts
 
-    def binaryAttack_multiclass_with_clean(self, c_max, a=2, b=3, gnn_model=None):
+    def binaryAttack_multiclass(self, a=2, b=3, gnn_model=None):
         time1 = time.time()
+        
+        print(f"Starting binary attack with c_max = {self.c_max}, classes {a} vs {b}")
+        
+        resetBinaryClass_init(self.data, a, b)
+        
+        self.K = self.getK_GCN()
+        time2 = time.time()
+
+        d_y, _, acc_bin_cln, acc_bin_atk, preds_closed_cln, preds_closed_atk = self.get_tau()
+        
+        flip_mask = (d_y != 1)
+        flipNodes = self.data['nodes_AB_all'][self.data['split_train_AB'][flip_mask]]
+        
+        time3 = time.time()
+        print(f"Timing - Overall: {time3-time1:.2f}s, Preprocess: {time2-time1:.2f}s, Optimize: {time3-time2:.2f}s")
+        print(f"Binary attack - Clean: {acc_bin_cln:.4f}, Attacked: {acc_bin_atk:.4f}")
+        print(f"Flipped {len(flipNodes)} nodes: {flipNodes}")
+        
+        recover_data(self.data)
+        
+        _Z_obs_atk = self.data['_Z_obs'].copy()
+        
+        for node_idx in flipNodes:
+            current_class = self.data['_z_obs'][node_idx]
+            if current_class == a:
+                _Z_obs_atk[node_idx] = np.zeros(self.data['K'])
+                _Z_obs_atk[node_idx][b] = 1
+            elif current_class == b:
+                _Z_obs_atk[node_idx] = np.zeros(self.data['K'])
+                _Z_obs_atk[node_idx][a] = 1
+            else:
+                print(f"Warning: Node {node_idx} has class {current_class}, not in target classes {a},{b}")
+        
+        self.data['_Z_obs'] = _Z_obs_atk
+        resetz_by_Z(self.data)
+        
+        if gnn_model is not None:
+            resetBinaryClass_init(self.data, a=a, b=b)
+            
+            acc_test_runs = []
+            for run in range(5):
+                print(f"Test run {run+1}/5...")
+                acc, _, _ = self.GNN_test(gnn_model)
+                acc_test_runs.append(acc)
+            
+            avg_acc = sum(acc_test_runs) / len(acc_test_runs)
+            print(f"Test accuracies: {acc_test_runs}")
+            print(f"Average attacked accuracy: {avg_acc:.4f}")
+            
+            recover_data(self.data)
+            
+            return avg_acc
+        else:
+            recover_data(self.data)
+            return acc_bin_atk
+
+    def binaryAttack_multiclass_with_clean(self, a=2, b=3, gnn_model=None):
+        time1 = time.time()
+        
+        print(f"Starting comprehensive binary attack with c_max = {self.c_max}, classes {a} vs {b}")
+        
         resetBinaryClass_init(self.data, a, b)
         
         self.K = self.getK_GCN()
         time2 = time.time()
         
-        best_results = self.optimize_tau(c_max)
+        d_y, _, acc_bin_cln, acc_bin_atk, preds_closed_cln, preds_closed_atk = self.get_tau()
         
-        if best_results:
-            d_y, _, acc_bin_cln, acc_bin_atk, preds_closed_cln, preds_closed_atk = best_results
-            print(f"Binary Clean accuracy: {acc_bin_cln:.4f}")
-            print(f"Binary Attacked accuracy: {acc_bin_atk:.4f}")
-            print(f"Binary Attack success: {acc_bin_cln - acc_bin_atk:.4f}")
-        else:
-            acc_bin_cln = acc_bin_atk = 0
-            d_y = np.ones(len(np.where(np.isin(self.data['nodes_AB_all'], self.data['nodes_AB_train']))[0]))
-    
-        train_indices_in_AB = np.where(np.isin(self.data['nodes_AB_all'], self.data['nodes_AB_train']))[0]
-        train_indices_in_AB = np.where(np.isin(self.data['nodes_AB_all'], self.data['nodes_AB_train']))[0]
-        flip_mask_in_train = (d_y == -1)
-        flipNodes = self.data['nodes_AB_all'][train_indices_in_AB[flip_mask_in_train]]
-
-    
+        flip_mask = (d_y != 1)
+        flipNodes = self.data['nodes_AB_all'][self.data['split_train_AB'][flip_mask]]
+        
         time3 = time.time()
-        print(f"overall: {time3 - time1}, pre-process: {time2 - time1}, optimize: {time3 - time2}")
-    
-        recover_data(self.data)
-    
-        print(f"Debug info:")
-        print(f"Classes a={a}, b={b}")
-        print(f"_Z_obs shape: {self.data['_Z_obs'].shape}")
-        print(f"Number of classes K: {self.data['K']}")
-        print(f"Flip nodes: {flipNodes}")
+        print(f"Timing - Overall: {time3-time1:.2f}s, Preprocess: {time2-time1:.2f}s, Optimize: {time3-time2:.2f}s")
+        print(f"Binary attack - Clean: {acc_bin_cln:.4f}, Attacked: {acc_bin_atk:.4f}")
+        print(f"Flipped {len(flipNodes)} nodes: {flipNodes}")
         
-        if a >= self.data['K'] or b >= self.data['K']:
-            raise ValueError(f"Class indices a={a} or b={b} are out of bounds. Dataset has {self.data['K']} classes (0 to {self.data['K']-1})")
-    
         acc_clean_gnn = None
         if gnn_model is not None:
-            print("Testing GNN with clean data...")
+            print("Testing clean GNN accuracy...")
             acc_clean_gnn, _, _ = self.GNN_test(gnn_model)
-            print(f"GNN Clean accuracy: {acc_clean_gnn:.4f}")
-    
-        _Z_obs_atk = np.array(self.data['_Z_obs'])
+            print(f"Clean GNN accuracy: {acc_clean_gnn:.4f}")
         
-        if _Z_obs_atk.shape[1] != self.data['K']:
-            print(f"Warning: _Z_obs shape {_Z_obs_atk.shape} doesn't match K={self.data['K']}")
-            _Z_obs_atk = np.eye(self.data['K'])[self.data['_z_obs']]
+        recover_data(self.data)
+
+        _Z_obs_atk = self.data['_Z_obs'].copy()
         
-        for i in flipNodes:
-            if self.data['_z_obs'][i] == a:
-                _Z_obs_atk[i] = np.zeros(self.data['K'])
-                _Z_obs_atk[i][b] = 1
-            elif self.data['_z_obs'][i] == b:
-                _Z_obs_atk[i] = np.zeros(self.data['K'])
-                _Z_obs_atk[i][a] = 1
+        for node_idx in flipNodes:
+            current_class = self.data['_z_obs'][node_idx]
+            if current_class == a:
+                _Z_obs_atk[node_idx] = np.zeros(self.data['K'])
+                _Z_obs_atk[node_idx][b] = 1
+            elif current_class == b:
+                _Z_obs_atk[node_idx] = np.zeros(self.data['K'])
+                _Z_obs_atk[node_idx][a] = 1
             else:
-                print(f"no change (not in target classes)")
+                print(f"Warning: Node {node_idx} has class {current_class}, not in target classes {a},{b}")
         
         self.data['_Z_obs'] = _Z_obs_atk
         resetz_by_Z(self.data)
-        resetBinaryClass_init(self.data, a=a, b=b)
 
         acc_attacked_gnn = None
         if gnn_model is not None:
-            acc_test_mul_atk = []
-            for run in range(5):
-                print(f"Running attacked GNN test {run+1}/5...")
-                acc, _, _ = self.GNN_test(gnn_model)
-                acc_test_mul_atk.append(acc)
+            resetBinaryClass_init(self.data, a=a, b=b)
             
-            acc_attacked_gnn = sum(acc_test_mul_atk) / len(acc_test_mul_atk)
-            print(f"Test accuracies after attack: {acc_test_mul_atk}")
-            print(f"Average test accuracy after attack: {acc_attacked_gnn:.4f}")
-    
+            acc_test_runs = []
+            for run in range(5):
+                print(f"Test run {run+1}/5...")
+                acc, _, _ = self.GNN_test(gnn_model)
+                acc_test_runs.append(acc)
+            
+            acc_attacked_gnn = sum(acc_test_runs) / len(acc_test_runs)
+            print(f"Test accuracies: {acc_test_runs}")
+            print(f"Average attacked GNN accuracy: {acc_attacked_gnn:.4f}")
+        
         recover_data(self.data)
         
         return {
@@ -470,74 +523,7 @@ class Attack:
             'binary_attacked_acc': acc_bin_atk,
             'gnn_clean_acc': acc_clean_gnn,
             'gnn_attacked_acc': acc_attacked_gnn,
-            'attack_success': acc_bin_cln - acc_bin_atk if best_results else 0,
+            'attack_success': acc_bin_cln - acc_bin_atk,
             'gnn_attack_success': acc_clean_gnn - acc_attacked_gnn if (acc_clean_gnn and acc_attacked_gnn) else 0,
             'flipped_nodes': flipNodes
         }
-    
-    def binaryAttack_multiclass(self, c_max, a=2, b=3, gnn_model=None):
-        time1 = time.time()
-        resetBinaryClass_init(self.data, a, b)
-        
-        self.K = self.getK_GCN()
-        time2 = time.time()
-        d_y, _, acc_bin_cln, acc_bin_atk, preds_closed_cln, preds_closed_atk = self.optimize_tau(c_max)
-
-        train_indices_in_AB = np.where(np.isin(self.data['nodes_AB_all'], self.data['nodes_AB_train']))[0]
-        train_indices_in_AB = np.where(np.isin(self.data['nodes_AB_all'], self.data['nodes_AB_train']))[0]
-        flip_mask_in_train = (d_y == -1)
-        flipNodes = self.data['nodes_AB_all'][train_indices_in_AB[flip_mask_in_train]]
-
-    
-        time3 = time.time()
-        print(f"overall: {time3 - time1}, pre-process: {time2 - time1}, optimize: {time3 - time2}")
-    
-        recover_data(self.data)
-    
-        print(f"Debug info:")
-        print(f"Classes a={a}, b={b}")
-        print(f"_Z_obs shape: {self.data['_Z_obs'].shape}")
-        print(f"Number of classes K: {self.data['K']}")
-        print(f"Flip nodes: {flipNodes}")
-        
-        if a >= self.data['K'] or b >= self.data['K']:
-            raise ValueError(f"Class indices a={a} or b={b} are out of bounds. Dataset has {self.data['K']} classes (0 to {self.data['K']-1})")
-    
-        _Z_obs_atk = np.array(self.data['_Z_obs'])
-        
-        if _Z_obs_atk.shape[1] != self.data['K']:
-            print(f"Warning: _Z_obs shape {_Z_obs_atk.shape} doesn't match K={self.data['K']}")
-            _Z_obs_atk = np.eye(self.data['K'])[self.data['_z_obs']]
-        
-        for i in flipNodes:
-
-            if self.data['_z_obs'][i] == a:
-                _Z_obs_atk[i] = np.zeros(self.data['K'])
-                _Z_obs_atk[i][b] = 1
-                print(f"class {b}")
-            elif self.data['_z_obs'][i] == b:
-                _Z_obs_atk[i] = np.zeros(self.data['K'])
-                _Z_obs_atk[i][a] = 1
-                print(f"class {a}")
-            else:
-                print(f"no change (not in target classes)")
-        
-        self.data['_Z_obs'] = _Z_obs_atk
-        resetz_by_Z(self.data)
-        resetBinaryClass_init(self.data, a=a, b=b)
-
-        if gnn_model is not None:
-            acc_test_mul_atk = []
-            for run in range(5):
-                print(f"Running GNN test {run+1}/5...")
-                acc, _, _ = self.GNN_test(gnn_model)
-                acc_test_mul_atk.append(acc)
-            
-            recover_data(self.data)
-            print(f"Test accuracies: {acc_test_mul_atk}")
-            acc_mul = sum(acc_test_mul_atk) / len(acc_test_mul_atk)
-            print(f"Average test accuracy after attack: {acc_mul:.4f}")
-            return acc_mul
-        else:
-            recover_data(self.data)
-            return acc_bin_atk

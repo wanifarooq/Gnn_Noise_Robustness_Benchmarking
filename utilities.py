@@ -295,14 +295,14 @@ def train(model, data, noisy_indices, device, config):
         raise ValueError(f"Training method '{method}' not recognized.")
 
     if method == "standard":
-        method_registry[method](model, data, noisy_indices, device,
+        return method_registry[method](model, data, noisy_indices, device,
                                 total_epochs=config['training']['total_epochs'])
     elif method == "dirichlet":
-        method_registry[method](model, data, noisy_indices, device,
+        return method_registry[method](model, data, noisy_indices, device,
                                 lambda_dir=config['training'].get('lambda_dir', 0.1),
                                 epochs=config['training']['total_epochs'])
     elif method == "ncod":
-        method_registry[method](model, data, noisy_indices, device,
+        return method_registry[method](model, data, noisy_indices, device,
                                 total_epochs=config['training']['total_epochs'],
                                 lambda_dir=config['training'].get('lambda_dir', 0.1),
                                 num_classes=config['dataset']['num_classes'])

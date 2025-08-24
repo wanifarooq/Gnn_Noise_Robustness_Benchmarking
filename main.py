@@ -190,10 +190,9 @@ def run_experiment(config, run_id=1):
         test_acc = trainer.fit(base_model, data, trainer_config, get_model)
         return test_acc
 
-# LafAK / GradientAttack Training
+    # LafAK / GradientAttack Training
     if supp_gnn in ['lafak'] or method == 'lafak':
         print("Using LafAK / GradientAttack")
-        
         data_for_lafak = data.clone()
         data_for_lafak.y = data.y_original
         data_dict = prepare_simpledata_attrs(data_for_lafak.cpu())
@@ -211,7 +210,7 @@ def run_experiment(config, run_id=1):
         valid_targets = [tc for tc in target_classes if tc in actual_classes]
         if len(valid_targets) < 2:
             valid_targets = actual_classes[:2].tolist()
-        target_classes = valid_targets[:2]
+            target_classes = valid_targets[:2]
         
         print(f"Using target classes for attack: {target_classes}")
         
@@ -234,25 +233,16 @@ def run_experiment(config, run_id=1):
             data_dict=data_dict,
             gpu_id=int(device.split(':')[-1]) if ':' in str(device) else 0,
             atkEpoch=config.get('attack_epochs', 500),
-            gcnL2=config.get('gcn_l2', 5e-4)
+            gcnL2=config.get('gcn_l2', 5e-4),
+            smooth_coefficient=config.get('smooth_coefficient', 1.0),
+            c_max=config.get('c_max', 10),
         )
         
-        print("Calculating clean accuracy")
-        resetBinaryClass_init(data_dict, a=target_classes[0], b=target_classes[1])
-        acc_clean_runs = []
-        for run in range(3):
-            print(f"Clean run {run+1}/3")
-            acc_clean, *_ = attack.GNN_test(gnn_model)
-            acc_clean_runs.append(acc_clean)
-        
-        acc_clean_avg = sum(acc_clean_runs) / len(acc_clean_runs)
-        print(f"Clean accuracy (average): {acc_clean_avg:.4f}")
-        
-        print("Performing gradient attack")
+        print("Performing gradient attack with comprehensive evaluation")
+
         results = attack.binaryAttack_multiclass_with_clean(
-            c_max=config.get('c_max', 10),
-            a=target_classes[0],
-            b=target_classes[1],
+            a=target_classes[0], 
+            b=target_classes[1], 
             gnn_model=gnn_model
         )
         
@@ -267,7 +257,7 @@ def run_experiment(config, run_id=1):
             print(f"GNN Attack success: {results['gnn_attack_success']:.4f}")
         
         return results.get('gnn_attacked_acc', results['binary_attacked_acc'])
-
+    
     # RTGNN Training
     if supp_gnn in ['rtgnn'] or method == 'rtgnn':
         print(f"Run {run_id}: Using RTGNN")
@@ -551,7 +541,7 @@ if __name__ == "__main__":
     
     test_accuracies = []
     
-    for run in range(1, 11):
+    for run in range(1, 3):
         try:
             print(f"\nRun {run}/10:")
             test_acc = run_experiment(config, run_id=run)
