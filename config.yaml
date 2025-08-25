@@ -8,7 +8,7 @@ dataset:
 
 noise:
   type: uniform # clean, uniform, uniform_simple, random, pair, random_pair, flip, uniform_mix, instance, deterministic
-  rate: 0.6
+  rate: 0.1
   seed: 42
 
 model:
@@ -101,7 +101,11 @@ lafak_params:
   attack_epochs: 200
   gcn_l2: 5e-4
   smooth_coefficient: 1.0
-  c_max: 10 
+
+lafak_defense_params:
+  community_method: "louvain"
+  lambda_comm: 1.0
+  epochs: 250  
 
 # RTGNN parameters
 rtgnn_params:

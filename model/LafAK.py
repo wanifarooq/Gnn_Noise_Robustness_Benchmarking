@@ -7,9 +7,12 @@ import scipy.sparse as sp
 import copy
 import time
 import scipy
-from sklearn.model_selection import train_test_split
 from torch_geometric.utils import from_scipy_sparse_matrix, subgraph
 from torch_geometric.data import Data as PyGData
+try:
+    import networkx as nx
+except ImportError:
+    nx = None
 from sklearn.metrics import f1_score
 
 def BinaryLabelToPosNeg(labels):
@@ -527,3 +530,290 @@ class Attack:
             'gnn_attack_success': acc_clean_gnn - acc_attacked_gnn if (acc_clean_gnn and acc_attacked_gnn) else 0,
             'flipped_nodes': flipNodes
         }
+    
+class CommunityDefense:
+    def __init__(self, 
+                 pyg_data: PyGData,
+                 community_method: str = "louvain",
+                 num_communities: int = None,
+                 lambda_comm: float = 2.0,
+                 pos_weight: float = 1.0,
+                 neg_weight: float = 2.0,
+                 margin: float = 1.5,
+                 num_neg_samples: int = 3,
+                 device: torch.device = None,
+                 verbose: bool = True):
+        
+        self.data = pyg_data
+        self.community_method = community_method
+        self.num_communities = num_communities
+        self.lambda_comm = float(lambda_comm)
+        self.pos_weight = float(pos_weight)
+        self.neg_weight = float(neg_weight)
+        self.margin = float(margin)
+        self.num_neg_samples = int(num_neg_samples)
+        self.verbose = verbose
+        self.device = device or (torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu"))
+        
+        self._prepare_graph()
+        self.comm_labels = self._compute_communities()
+        
+        if self.verbose:
+            print(f"[Defense Init] Nodi: {self.N}, Comunità: {len(np.unique(self.comm_labels))}")
+            print(f"[Defense Init] Train mask sum: {self.data.train_mask.sum()}")
+            print(f"[Defense Init] Val mask sum: {self.data.val_mask.sum()}")
+            print(f"[Defense Init] Test mask sum: {self.data.test_mask.sum()}")
+
+    def _prepare_graph(self):
+        row, col = self.data.edge_index.cpu().numpy()
+        N = self.data.num_nodes
+        A = sp.coo_matrix((np.ones_like(row, dtype=np.float32), (row, col)), shape=(N, N))
+        A = A + A.T
+        A.data = np.ones_like(A.data, dtype=np.float32)
+        A.eliminate_zeros()
+        self.A = A.tocsr()
+        self.N = N
+
+        assert len(self.data.train_mask) == N, f"Train mask dim {len(self.data.train_mask)} != N {N}"
+        assert len(self.data.val_mask) == N, f"Val mask dim {len(self.data.val_mask)} != N {N}"
+        assert len(self.data.test_mask) == N, f"Test mask dim {len(self.data.test_mask)} != N {N}"
+        
+        self.train_mask = torch.as_tensor(self.data.train_mask, dtype=torch.bool, device=self.device)
+        self.val_mask = torch.as_tensor(self.data.val_mask, dtype=torch.bool, device=self.device)
+        self.test_mask = torch.as_tensor(self.data.test_mask, dtype=torch.bool, device=self.device)
+
+    def _compute_communities(self):
+
+        if self.community_method.lower() == "louvain":
+            if nx is None:
+                raise ImportError("For 'louvain' you need networkx: pip install networkx python-louvain")
+            try:
+                import community as community_louvain
+            except ImportError:
+                raise ImportError("For Louvain you need the 'python-louvain' package: pip install python-louvain")
+
+            G = nx.Graph()
+
+            G.add_nodes_from(range(self.N))
+            r, c = self.A.nonzero()
+            edges = list(zip(r.tolist(), c.tolist()))
+            G.add_edges_from(edges)
+
+            partition = community_louvain.best_partition(G, random_state=0)
+            labels = np.array([partition[i] for i in range(self.N)], dtype=np.int64)
+            if self.verbose:
+                k = len(set(labels.tolist()))
+                print(f"Defense: Louvain: trovate {k} comunità")
+            return labels
+
+        elif self.community_method.lower() == "spectral":
+
+            from sklearn.cluster import KMeans
+            from scipy.sparse import csgraph
+
+            deg = np.array(self.A.sum(1)).flatten()
+            d_inv_sqrt = np.power(np.maximum(deg, 1e-12), -0.5)
+            D_inv_sqrt = sp.diags(d_inv_sqrt)
+            L = sp.eye(self.N) - D_inv_sqrt @ self.A @ D_inv_sqrt
+
+            if self.num_communities is None:
+                if hasattr(self.data, "y") and self.data.y.dim() == 1:
+                    self.num_communities = int(self.data.y.max().item()) + 1
+                else:
+                    self.num_communities = 8
+
+            from scipy.sparse.linalg import eigsh
+            vals, vecs = eigsh(L.asfptype(), k=self.num_communities, which="SM")
+            X = vecs / (np.linalg.norm(vecs, axis=1, keepdims=True) + 1e-12)
+            km = KMeans(n_clusters=self.num_communities, n_init=10, random_state=0)
+            labels = km.fit_predict(X).astype(np.int64)
+            if self.verbose:
+                print(f"Defense: Spectral: k={self.num_communities} community")
+            return labels
+        else:
+            raise ValueError("community_method: 'louvain' o 'spectral'")
+
+    def _build_pos_neg_pairs(self, labels_np):
+
+        r, c = self.A.nonzero()
+
+        mask_upper = r < c
+        r = r[mask_upper]; c = c[mask_upper]
+
+        same = labels_np[r] == labels_np[c]
+        pos_pairs = np.stack([r[same], c[same]], axis=1) if np.any(same) else np.zeros((0,2), dtype=np.int64)
+
+        neg_pairs = []
+        rng = np.random.default_rng(0)
+        for i in range(self.N):
+
+            diff_idx = np.where(labels_np != labels_np[i])[0]
+            if diff_idx.size == 0:
+                continue
+            if diff_idx.size <= self.num_neg_samples:
+                chosen = diff_idx
+            else:
+                chosen = rng.choice(diff_idx, size=self.num_neg_samples, replace=False)
+            for j in chosen:
+                if i < j:
+                    neg_pairs.append((i, j))
+                elif j < i:
+                    neg_pairs.append((j, i))
+        if neg_pairs:
+            neg_pairs = np.unique(np.array(neg_pairs, dtype=np.int64), axis=0)
+        else:
+            neg_pairs = np.zeros((0,2), dtype=np.int64)
+
+        return pos_pairs, neg_pairs
+
+    def community_loss(self, z: torch.Tensor, labels_np: np.ndarray) -> torch.Tensor:
+
+        pos_pairs, neg_pairs = self._build_pos_neg_pairs(labels_np)
+        
+        if pos_pairs.shape[0] == 0 and neg_pairs.shape[0] == 0:
+            return torch.zeros([], device=z.device)
+
+        z_norm = F.normalize(z, p=2, dim=1, eps=1e-8)
+        loss = 0.0
+        cnt = 0
+
+        if pos_pairs.shape[0] > 0:
+            i = torch.as_tensor(pos_pairs[:,0], dtype=torch.long, device=z.device)
+            j = torch.as_tensor(pos_pairs[:,1], dtype=torch.long, device=z.device)
+            
+            cos_sim = torch.clamp((z_norm[i] * z_norm[j]).sum(dim=1), -1.0 + 1e-7, 1.0 - 1e-7)
+            pos_term = (1.0 - cos_sim).mean()
+            loss = loss + self.pos_weight * pos_term
+            cnt += 1
+
+        if neg_pairs.shape[0] > 0:
+            i = torch.as_tensor(neg_pairs[:,0], dtype=torch.long, device=z.device)
+            j = torch.as_tensor(neg_pairs[:,1], dtype=torch.long, device=z.device)
+            
+            cos_sim = torch.clamp((z_norm[i] * z_norm[j]).sum(dim=1), -1.0 + 1e-7, 1.0 - 1e-7)
+            adaptive_margin = max(0.1, 1.0 - self.margin/len(np.unique(labels_np)))
+            neg_term = F.relu(cos_sim - adaptive_margin).mean()
+            loss = loss + self.neg_weight * neg_term
+            cnt += 1
+
+        return loss / max(cnt, 1)
+
+    def train_with_defense(self,
+                        gnn_model,
+                        epochs: int = 200,
+                        early_stopping: int = 20,
+                        lr: float = 0.005,
+                        weight_decay: float = 1e-3,
+                        debug: bool = False):
+        
+        model = gnn_model.to(self.device)
+        optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+        
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode='min', factor=0.5, patience=10
+        )
+        
+        ce = torch.nn.CrossEntropyLoss()
+
+        A = self.A
+        if hasattr(A, "tocoo"):
+            A = A.tocoo()
+        edge_index, _ = from_scipy_sparse_matrix(A)
+        edge_index = edge_index.to(self.device)
+
+        X = self.data.x.to(self.device, dtype=torch.float32)
+        y = self.data.y.to(self.device, dtype=torch.long)
+
+        best_val = float("inf")
+        best_state = None
+        no_improve = 0
+        comm_np = self.comm_labels.copy()
+
+        for epoch in range(1, epochs + 1):
+            model.train()
+            optimizer.zero_grad()
+            
+            batch = PyGData(x=X, edge_index=edge_index, y=y)
+            out = model(batch)
+
+            if isinstance(out, tuple) and len(out) == 2:
+                logits, z = out
+            else:
+                logits = out
+                if hasattr(model, 'last_hidden'):
+                    z = model.last_hidden
+                else:
+                    z = F.dropout(logits, p=0.3, training=True)
+
+            loss_sup = ce(logits[self.train_mask], y[self.train_mask])
+            
+            adaptive_lambda = self.lambda_comm * min(1.0, epoch / 50.0)
+            loss_comm = self.community_loss(z, comm_np) if adaptive_lambda > 0 else torch.zeros([], device=self.device)
+            
+            loss = loss_sup + adaptive_lambda * loss_comm
+            train_loss = loss.item()
+            
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+
+            model.eval()
+            with torch.no_grad():
+                out_eval = model(batch)
+                logits_eval = out_eval[0] if (isinstance(out_eval, tuple) and len(out_eval) == 2) else out_eval
+                
+                val_loss = ce(logits_eval[self.val_mask], y[self.val_mask]).item()
+                pred = logits_eval.argmax(dim=1).cpu().numpy()
+                y_true = y.cpu().numpy()
+
+                train_acc = (pred[self.train_mask.cpu().numpy()] == y_true[self.train_mask.cpu().numpy()]).mean()
+                val_acc = (pred[self.val_mask.cpu().numpy()] == y_true[self.val_mask.cpu().numpy()]).mean()
+
+                train_f1 = f1_score(y_true[self.train_mask.cpu().numpy()],
+                                    pred[self.train_mask.cpu().numpy()],
+                                    average="macro")
+                val_f1 = f1_score(y_true[self.val_mask.cpu().numpy()],
+                                pred[self.val_mask.cpu().numpy()],
+                                average="macro")
+
+            scheduler.step(val_loss)
+
+            if debug:
+                print(f"Epoch {epoch:03d} | "
+                    f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f} | "
+                    f"Train Acc: {train_acc:.4f}, Val Acc: {val_acc:.4f} | "
+                    f"Train F1: {train_f1:.4f}, Val F1: {val_f1:.4f}")
+
+            if val_loss < best_val - 1e-4:
+                best_val = val_loss
+                best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+                no_improve = 0
+            else:
+                no_improve += 1
+                
+            if no_improve >= early_stopping:
+                if self.verbose:
+                    print(f"Defense: Early stopping at epoch {epoch}")
+                break
+
+        if best_state is not None:
+            model.load_state_dict(best_state)
+
+        model.eval()
+        with torch.no_grad():
+            batch = PyGData(x=X, edge_index=edge_index, y=y)
+            out = model(batch)
+            logits = out[0] if (isinstance(out, tuple) and len(out) == 2) else out
+            pred = logits.argmax(dim=1).cpu().numpy()
+            y_true = y.cpu().numpy()
+
+            test_loss = ce(logits[self.test_mask], y[self.test_mask]).item()
+            test_acc = (pred[self.test_mask.cpu().numpy()] == y_true[self.test_mask.cpu().numpy()]).mean()
+            test_f1 = f1_score(y_true[self.test_mask.cpu().numpy()],
+                            pred[self.test_mask.cpu().numpy()],
+                            average="macro")
+
+        if debug:
+            print(f"Test Loss: {test_loss:.4f} | Test Acc: {test_acc:.4f} | Test F1: {test_f1:.4f}")
+
+        return test_acc
