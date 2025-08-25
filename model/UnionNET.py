@@ -56,6 +56,12 @@ def create_adjacency_matrix(edge_index, n_nodes, device):
     eye = torch.eye(n_nodes, device=device).to_sparse()
     return (adj + eye).coalesce()
 
+def kl_divergence_loss(logits, labels_one_hot):
+    log_probs = F.log_softmax(logits, dim=1)
+    probs = F.softmax(logits, dim=1)
+    kl_loss = F.kl_div(log_probs, labels_one_hot.float(), reduction='batchmean')
+    return kl_loss
+
 class UnionNET:
     
     def __init__(self, model, data, dataset, config):
@@ -70,6 +76,7 @@ class UnionNET:
         
         self.k = config.get('k', 5)
         self.alpha = config.get('alpha', 0.5)
+        self.beta = config.get('beta', 1.0)
         
         self.n_nodes = data.x.shape[0]
         self.n_features = data.x.shape[1]
@@ -133,6 +140,7 @@ class UnionNET:
                 return output, loss, acc
         
         return output
+
     
     def _compute_unionnet_loss(self, output):
         support_features, support_labels = construct_support_set(
@@ -142,7 +150,6 @@ class UnionNET:
 
         train_features = self.features[self.train_mask]
         train_noisy_labels = self.noisy_labels[self.train_mask]
-        
 
         class_probs = label_aggregation(
             support_features[self.train_mask], support_labels[self.train_mask], 
@@ -150,14 +157,15 @@ class UnionNET:
         )
 
         weights = class_probs[range(len(train_noisy_labels)), train_noisy_labels]
-        reweight_loss = F.cross_entropy(
-            output[self.train_mask], train_noisy_labels, reduction='none'
-        )
+        reweight_loss = F.cross_entropy(output[self.train_mask], train_noisy_labels, reduction='none')
         reweight_loss = torch.mean(weights * reweight_loss)
 
         correction_loss = F.cross_entropy(output[self.train_mask], train_noisy_labels)
-        
-        return self.alpha * reweight_loss + (1 - self.alpha) * correction_loss
+
+        one_hot_labels = F.one_hot(train_noisy_labels, num_classes=self.n_classes).to(self.device)
+        kl_loss = kl_divergence_loss(output[self.train_mask], one_hot_labels)
+
+        return self.alpha * reweight_loss + (1 - self.alpha) * correction_loss + self.beta * kl_loss
 
     def train(self, debug=True):
         start_time = time.time()

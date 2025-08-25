@@ -477,6 +477,7 @@ def run_experiment(config, run_id=1):
             'patience': config.get('patience', 10),
             'k': config.get('k', 5),
             'alpha': config.get('alpha', 0.5),
+            'beta': config.get('alpha', 1),
             'feat_norm': config.get('feat_norm', True)
         }
         
