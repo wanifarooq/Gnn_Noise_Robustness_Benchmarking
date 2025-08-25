@@ -1,8 +1,6 @@
 import numpy as np
 import torch
 from torch_geometric.utils import to_scipy_sparse_matrix
-from torch_geometric.utils import from_scipy_sparse_matrix
-from torch_geometric.data import Data as PyGData
 import scipy.sparse as sp
 import yaml
 import statistics
@@ -19,6 +17,9 @@ from model.UnionNET import UnionNET
 from model.GNN_Cleaner import GNNCleanerTrainer
 from model.ERASE import ERASETrainer
 from model.GNNGuard import GNNGuard
+
+from torch_geometric.utils import from_scipy_sparse_matrix
+from torch_geometric.data import Data as PyGData
 
 def run_experiment(config, run_id=1):
     seed = config['seed'] + run_id * 100
@@ -252,97 +253,102 @@ def run_experiment(config, run_id=1):
         print(f"Binary Attacked accuracy: {results['binary_attacked_acc']:.4f}")
         print(f"Binary Attack success: {results['attack_success']:.4f}")
 
-    if results.get('gnn_clean_acc') and results.get('gnn_attacked_acc'):
-        print(f"GNN Clean accuracy: {results['gnn_clean_acc']:.4f}")
-        print(f"GNN Attacked accuracy: {results['gnn_attacked_acc']:.4f}")
-        print(f"GNN Attack success: {results['gnn_attack_success']:.4f}")
+        if results.get('gnn_clean_acc') and results.get('gnn_attacked_acc'):
+            print(f"GNN Clean accuracy: {results['gnn_clean_acc']:.4f}")
+            print(f"GNN Attacked accuracy: {results['gnn_attacked_acc']:.4f}")
+            print(f"GNN Attack success: {results['gnn_attack_success']:.4f}")
 
-        x = torch.tensor(data_dict["_X_obs"], dtype=torch.float)
-        num_nodes = x.size(0)
-        y_original = torch.tensor(data_dict["_z_obs_original"], dtype=torch.long)
 
-        y_attacked = y_original.clone()
-        if 'flipped_nodes' in results:
-            flipped_nodes = results['flipped_nodes']
-            print(f"Applying flips to {len(flipped_nodes)} nodes in multiclass labels")
+            x = torch.tensor(data_dict["_X_obs"], dtype=torch.float)
+            num_nodes = x.size(0)
+
+            y_original = torch.tensor(data_dict["_z_obs_original"], dtype=torch.long)
+
+            y_attacked = y_original.clone()
+            if 'flipped_nodes' in results:
+                flipped_nodes = results['flipped_nodes']
+                print(f"Applying flips to {len(flipped_nodes)} nodes in multiclass labels")
+                
+                binary_classes = data_dict.get('binary_classes', (target_classes[0], target_classes[1]))
+                a, b = binary_classes
+                
+                for node_idx in flipped_nodes:
+                    current_class = y_original[node_idx].item()
+                    if current_class == a:
+                        y_attacked[node_idx] = b
+                    elif current_class == b:
+                        y_attacked[node_idx] = a
+
+            y = y_attacked
+
+            edge_index, edge_weight = from_scipy_sparse_matrix(data_dict["_A_obs"])
+
+            pyg_data = PyGData(x=x, edge_index=edge_index, y=y)
+            if edge_weight is not None:
+                pyg_data.edge_weight = edge_weight
+
+            train_mask = torch.zeros(num_nodes, dtype=torch.bool)
+            train_mask[data_dict['split_train']] = True
+            pyg_data.train_mask = train_mask
             
-            binary_classes = data_dict.get('binary_classes', (target_classes[0], target_classes[1]))
-            a, b = binary_classes
+            val_mask = torch.zeros(num_nodes, dtype=torch.bool)
+            val_mask[data_dict['split_val']] = True
+            pyg_data.val_mask = val_mask
             
-            for node_idx in flipped_nodes:
-                current_class = y_original[node_idx].item()
-                if current_class == a:
-                    y_attacked[node_idx] = b
-                elif current_class == b:
-                    y_attacked[node_idx] = a
+            test_mask = torch.zeros(num_nodes, dtype=torch.bool) 
+            test_mask[data_dict['split_test']] = True
+            pyg_data.test_mask = test_mask
 
-        y = y_attacked
+            print(f"[Debug] Nodi totali: {num_nodes}")
+            print(f"[Debug] Train: {train_mask.sum().item()}, Val: {val_mask.sum().item()}, Test: {test_mask.sum().item()}")
+            print(f"[Debug] Classi nel dataset: {torch.unique(y)}")
 
-        edge_index, edge_weight = from_scipy_sparse_matrix(data_dict["_A_obs"])
+            defense_cfg = config.get('lafak_defense_params', {})
+            
+            num_classes_full = int(y.max().item()) + 1
+            print(f"[Debug] Numero classi per il modello di difesa: {num_classes_full}")
+            print(f"[Debug] Min/Max labels: {y.min().item()}/{y.max().item()}")
 
-        pyg_data = PyGData(x=x, edge_index=edge_index, y=y)
-        if edge_weight is not None:
-            pyg_data.edge_weight = edge_weight
+            gnn_model_defense = get_model(
+                model_name=config['model']['name'],
+                in_channels=pyg_data.num_node_features,
+                hidden_channels=config['model'].get('hidden_channels', 64),
+                out_channels=num_classes_full,
+                n_layers=config['model'].get('n_layers', 2),
+                dropout=config['model'].get('dropout', 0.5),
+                self_loop=config['model'].get('self_loop', True)
+            )
+            
+            print(f"[Debug] Modello creato con {gnn_model_defense.out_channels if hasattr(gnn_model_defense, 'out_channels') else 'unknown'} output channels")
 
-        train_mask = torch.zeros(num_nodes, dtype=torch.bool)
-        train_mask[data_dict['split_train']] = True
-        pyg_data.train_mask = train_mask
-         
-        val_mask = torch.zeros(num_nodes, dtype=torch.bool)
-        val_mask[data_dict['split_val']] = True
-        pyg_data.val_mask = val_mask
+            defense = CommunityDefense(
+                pyg_data,
+                community_method=defense_cfg.get("community_method", "louvain"),
+                lambda_comm=defense_cfg.get("lambda_comm", 2.0),
+                pos_weight=1.0,
+                neg_weight=2.0,
+                margin=1.5,
+                num_neg_samples=3,
+                verbose=True
+            )
 
-        test_mask = torch.zeros(num_nodes, dtype=torch.bool) 
-        test_mask[data_dict['split_test']] = True
-        pyg_data.test_mask = test_mask
+            test_acc_def = defense.train_with_defense(
+                gnn_model_defense,
+                epochs=defense_cfg.get("epochs", 250),
+                early_stopping=20,
+                lr=0.005,
+                weight_decay=1e-3
+            )
 
-        print(f"[Debug] Nodi totali: {num_nodes}")
-        print(f"[Debug] Train: {train_mask.sum().item()}, Val: {val_mask.sum().item()}, Test: {test_mask.sum().item()}")
-        print(f"[Debug] Classi nel dataset: {torch.unique(y)}")
+            print(f"Accuracy with defense (all nodes): {test_acc_def:.4f}")
 
-        defense_cfg = config.get('lafak_defense_params', {})
-        
-        num_classes_full = int(y.max().item()) + 1
-        print(f"[Debug] Numero classi per il modello di difesa: {num_classes_full}")
-        print(f"[Debug] Min/Max labels: {y.min().item()}/{y.max().item()}")
-        
-        gnn_model_defense = get_model(
-            model_name=config['model']['name'],
-            in_channels=pyg_data.num_node_features,
-            hidden_channels=config['model'].get('hidden_channels', 64),
-            out_channels=num_classes_full,
-            n_layers=config['model'].get('n_layers', 2),
-            dropout=config['model'].get('dropout', 0.5),
-            self_loop=config['model'].get('self_loop', True)
-        )
+            return {
+                "binary_attacked_acc": results['binary_attacked_acc'],
+                "gnn_attacked_acc": results.get('gnn_attacked_acc'),
+                "defense_acc": test_acc_def
+            }
 
-        defense = CommunityDefense(
-            pyg_data,
-            community_method=defense_cfg.get("community_method", "louvain"),
-            lambda_comm=defense_cfg.get("lambda_comm", 2.0),
-            pos_weight=1.0,
-            neg_weight=2.0,
-            margin=1.5,
-            num_neg_samples=3,
-            verbose=True
-        )
-
-        test_acc_def = defense.train_with_defense(
-            gnn_model_defense,
-            epochs=defense_cfg.get("epochs", 250),
-            early_stopping=20,
-            lr=0.005,
-            weight_decay=1e-3
-        )
-
-        print(f"Accuracy with defense (all nodes): {test_acc_def:.4f}")
-
-        return {
-            "binary_attacked_acc": results['binary_attacked_acc'],
-            "gnn_attacked_acc": results.get('gnn_attacked_acc'),
-            "defense_acc": test_acc_def
-        }
-
+    # RTGNN Training
     if supp_gnn in ['rtgnn'] or method == 'rtgnn':
         print(f"Run {run_id}: Using RTGNN")
         
@@ -625,7 +631,7 @@ if __name__ == "__main__":
     
     test_accuracies = []
     
-    for run in range(1, 2):
+    for run in range(1, 11):
         try:
             print(f"\nRun {run}/10:")
             test_acc = run_experiment(config, run_id=run)

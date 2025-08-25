@@ -4,9 +4,11 @@ import torch.nn.functional as F
 import torch.optim as optim
 from copy import deepcopy
 from torch_geometric.nn import GCNConv
-from torch_geometric.utils import from_scipy_sparse_matrix, negative_sampling
+from torch_geometric.utils import from_scipy_sparse_matrix, to_scipy_sparse_matrix, negative_sampling
 from sklearn.metrics import accuracy_score
 from torch_geometric.data import Data
+import numpy as np
+import scipy.sparse as sp
 from sklearn.metrics import f1_score
 
 from model.GNNs import GCN, GIN, GAT, GAT2
@@ -62,10 +64,11 @@ class DualGNN(nn.Module):
 
 class AdaptiveLoss(nn.Module):
     def __init__(self, args):
-        super(AdaptiveLoss, self).__init__()
+        super().__init__()
         self.args = args
         self.epochs = args.epochs
         self.increment = 0.5 / self.epochs
+        self.decay_w = getattr(args, "decay_w", 1.0)
 
     def forward(self, y1, y2, targets, epoch=0):
         loss1 = F.cross_entropy(y1, targets, reduction='none')
@@ -74,44 +77,81 @@ class AdaptiveLoss(nn.Module):
         
         if epoch == 0:
             return total_loss.mean()
-        
-        sorted_indices = torch.argsort(total_loss)
-        forget_rate = min(0.5, self.increment * epoch)
+
+        sorted_idx = torch.argsort(total_loss)
+        forget_rate = self.increment * epoch
         remember_rate = max(0.5, 1 - forget_rate)
-        
         num_remember = int(remember_rate * len(total_loss))
-        clean_indices = sorted_indices[:num_remember]
+        clean_idx = sorted_idx[:num_remember]
+        noisy_idx = sorted_idx[num_remember:]
 
-        clean_loss = total_loss[clean_indices].mean()
-        kl_loss = self._kl_divergence(y1, y2) + self._kl_divergence(y2, y1)
+        clean_loss = total_loss[clean_idx].mean()
 
-        noisy_indices = sorted_indices[num_remember:]
-        if len(noisy_indices) > 0:
+        correction_loss = torch.tensor(0.0, device=y1.device)
+        if len(noisy_idx) > 0:
             p1, p2 = F.softmax(y1, dim=1), F.softmax(y2, dim=1)
             pred1, pred2 = y1.max(1)[1], y2.max(1)[1]
             conf1, conf2 = p1.max(1)[0], p2.max(1)[0]
-            
-            agree_mask = (pred1[noisy_indices] == pred2[noisy_indices])
-            high_conf_mask = (conf1[noisy_indices] * conf2[noisy_indices] > 0.5)
-            correction_mask = agree_mask & high_conf_mask
-            
-            if correction_mask.sum() > 0:
-                correct_indices = noisy_indices[correction_mask]
-                weights = (conf1[correct_indices] * conf2[correct_indices]).sqrt()
-                correction_loss = weights * (
-                    F.cross_entropy(y1[correct_indices], pred1[correct_indices], reduction='none') +
-                    F.cross_entropy(y2[correct_indices], pred1[correct_indices], reduction='none')
-                )
-                clean_loss = clean_loss + correction_loss.mean()
+
+            agree = pred1[noisy_idx] == pred2[noisy_idx]
+            high_conf = (conf1[noisy_idx] * conf2[noisy_idx] >
+                         (1 - (1 - min(0.5, 1/y1.size(0))) * epoch/self.epochs))
+            mask = agree & high_conf
+            if mask.sum() > 0:
+                idx = noisy_idx[mask]
+                weights = (conf1[idx] * conf2[idx])**(0.5 - 0.5*epoch/self.epochs)
+                correction_loss = (weights * (
+                    F.cross_entropy(y1[idx], pred1[idx], reduction='none') +
+                    F.cross_entropy(y2[idx], pred1[idx], reduction='none')
+                )).mean()
+
+        residual_loss = self.decay_w * total_loss[noisy_idx].mean() if len(noisy_idx) > 0 else 0.0
+
+        kl_loss = self._kl(y1, y2) + self._kl(y2, y1)
+
+        return clean_loss + correction_loss + residual_loss + self.args.co_lambda * kl_loss
+
+    def _kl(self, p, q):
+        return F.kl_div(F.log_softmax(p, dim=1),
+                        F.softmax(q.detach(), dim=1),
+                        reduction='batchmean')
+class IntraviewReg(nn.Module):
+    def __init__(self, device='cuda'):
+        super().__init__()
+        self.device = device
+
+    def forward(self, y1, y2, edge_index, edge_weight, idx_label):
+        if isinstance(idx_label, list):
+            idx_label = torch.tensor(idx_label, device=self.device)
         
-        return clean_loss + self.args.co_lambda * kl_loss
-    
-    def _kl_divergence(self, pred, target):
-        return F.kl_div(
-            F.log_softmax(pred, dim=1),
-            F.softmax(target.detach(), dim=1),
-            reduction='batchmean'
-        )
+        if idx_label.numel() == 0:
+            return torch.tensor(0.0, device=self.device)
+
+        weighted_adj = to_scipy_sparse_matrix(edge_index, edge_weight.detach().cpu())
+        colsum = np.array(weighted_adj.sum(0))
+        r_inv = np.power(colsum, -1).flatten()
+        r_inv[np.isinf(r_inv)] = 0
+        norm_adj = weighted_adj.dot(sp.diags(r_inv))
+
+        norm_idx, norm_w = from_scipy_sparse_matrix(norm_adj)
+        norm_idx, norm_w = norm_idx.to(self.device), norm_w.to(self.device)
+
+        mask_edges = (torch.isin(norm_idx[1], idx_label))
+        edge_index_f = norm_idx[:, mask_edges]
+        edge_weight_f = norm_w[mask_edges]
+
+        if edge_index_f.size(1) == 0:
+            return torch.tensor(0.0, device=self.device)
+
+        loss = (edge_weight_f * self._kl(y1[edge_index_f[1]], y1[edge_index_f[0]].detach())).sum()
+        loss += (edge_weight_f * self._kl(y2[edge_index_f[1]], y2[edge_index_f[0]].detach())).sum()
+        loss = loss / idx_label.size(0)
+        return loss
+
+    def _kl(self, p, q):
+        return F.kl_div(F.log_softmax(p, dim=1),
+                        F.softmax(q, dim=1),
+                        reduction='batchmean')
 
 
 class GraphAdjEstimator(nn.Module):
@@ -176,6 +216,8 @@ class RTGNN(nn.Module):
         
         self.adj_estimator = GraphAdjEstimator(nfeat, args.edge_hidden, args, device)
         self.adaptive_loss = AdaptiveLoss(args)
+        self.intra_reg = IntraviewReg(device=device)
+
         
         self.best_val_acc = 0
         self.best_state = None
@@ -210,7 +252,7 @@ class RTGNN(nn.Module):
         optimizer = optim.Adam(self.parameters(), lr=self.args.lr, 
                              weight_decay=self.args.weight_decay)
 
-        patience = getattr(self.args, 'patience', 20)
+        patience = getattr(self.args, 'patience', 8)
         counter = 0
         best_val_acc = 0
         
@@ -249,8 +291,13 @@ class RTGNN(nn.Module):
 
             pseudo_loss = self._compute_pseudo_loss(output1, output2, idx_train)
 
-            total_loss = (pred_loss + self.args.alpha * rec_loss + 
-                          self.args.co_lambda * pseudo_loss)
+            neighbor_kl_loss = self.intra_reg(output1, output2, final_edges, final_weights, idx_train)
+
+            total_loss = (pred_loss +
+                          self.args.alpha * rec_loss +
+                          pseudo_loss +
+                          self.args.co_lambda * neighbor_kl_loss)
+
             
             total_loss.backward()
             optimizer.step()
@@ -268,28 +315,29 @@ class RTGNN(nn.Module):
                 train_f1 = f1_score(labels[idx_train].cpu(), train_pred.argmax(dim=1).cpu(), average='macro')
 
                 output1_val, output2_val = self.predictor(features, final_edges, final_weights)
-                val_loss1 = F.cross_entropy(output1_val[idx_val], labels[idx_val])
-                val_loss2 = F.cross_entropy(output2_val[idx_val], labels[idx_val])
-                val_loss = (val_loss1 + val_loss2) / 2
+
+                val_ce_loss1 = F.cross_entropy(output1_val[idx_val], labels[idx_val])
+                val_ce_loss2 = F.cross_entropy(output2_val[idx_val], labels[idx_val])
+                val_ce_loss = (val_ce_loss1 + val_ce_loss2) / 2
 
                 val_pred = (output1_val[idx_val] + output2_val[idx_val]) / 2
                 val_acc = (val_pred.argmax(dim=1) == labels[idx_val]).float().mean().item()
                 val_f1 = f1_score(labels[idx_val].cpu(), val_pred.argmax(dim=1).cpu(), average='macro')
 
-            print(f"Epoch {epoch:03d} | Train Loss: {loss_train:.4f}, Val Loss: {val_loss:.4f} | "
+            print(f"Epoch {epoch:03d} | Train Loss: {loss_train:.4f}, Val CE Loss: {val_ce_loss:.4f} | "
                   f"Train Acc: {train_acc:.4f}, Val Acc: {val_acc:.4f} | "
                   f"Train F1: {train_f1:.4f}, Val F1: {val_f1:.4f}")
 
             if epoch == 0:
-                best_val_loss = val_loss
+                best_val_f1 = val_f1
                 counter = 0
                 self.best_state = {
                     'model': deepcopy(self.state_dict()),
                     'edges': final_edges.clone(),
                     'weights': final_weights.clone()
                 }
-            elif val_loss < best_val_loss:
-                best_val_loss = val_loss
+            elif val_f1 > best_val_f1:
+                best_val_f1 = val_f1
                 counter = 0
                 self.best_state = {
                     'model': deepcopy(self.state_dict()),
@@ -304,7 +352,7 @@ class RTGNN(nn.Module):
 
         if self.best_state is not None:
             self.load_state_dict(self.best_state['model'])
-            print(f"Training completed! Best validation loss: {best_val_loss:.4f}")
+            print(f"Training completed! Best validation F1: {best_val_f1:.4f}")
 
     def test(self, features, labels, idx_test):
         if self.best_state is None:
@@ -373,31 +421,36 @@ class RTGNN(nn.Module):
     def _compute_pseudo_loss(self, output1, output2, idx_train):
         all_nodes = torch.arange(output1.size(0), device=self.device)
         unlabeled = all_nodes[~torch.isin(all_nodes, torch.tensor(idx_train, device=self.device))]
-        
         if len(unlabeled) == 0:
             return torch.tensor(0.0, device=self.device)
-        
+
         with torch.no_grad():
             pred1 = F.softmax(output1[unlabeled], dim=1)
             pred2 = F.softmax(output2[unlabeled], dim=1)
-            
             conf1, class1 = pred1.max(dim=1)
             conf2, class2 = pred2.max(dim=1)
-            
             consistent = (class1 == class2)
             confident = (conf1 * conf2) > (self.args.th ** 2)
-            reliable = consistent & confident
-            
-            if reliable.sum() == 0:
+            mask = consistent & confident
+            if mask.sum() == 0:
                 return torch.tensor(0.0, device=self.device)
-            
-            pseudo_nodes = unlabeled[reliable]
-            pseudo_labels = class1[reliable]
-        
-        loss1 = F.cross_entropy(output1[pseudo_nodes], pseudo_labels)
-        loss2 = F.cross_entropy(output2[pseudo_nodes], pseudo_labels)
-        
-        return (loss1 + loss2) / 2
+            pseudo_nodes = unlabeled[mask]
+            pseudo_labels = class1[mask]
+
+        loss_ce = (
+            F.cross_entropy(output1[pseudo_nodes], pseudo_labels) +
+            F.cross_entropy(output2[pseudo_nodes], pseudo_labels)
+        ) / 2
+
+        loss_kl = (
+            F.kl_div(F.log_softmax(output1[pseudo_nodes], dim=1),
+                    F.softmax(output2[pseudo_nodes], dim=1), reduction='batchmean') +
+            F.kl_div(F.log_softmax(output2[pseudo_nodes], dim=1),
+                    F.softmax(output1[pseudo_nodes], dim=1), reduction='batchmean')
+        )
+
+        return loss_ce + self.args.co_lambda * loss_kl
+
     
     def _evaluate(self, features, edge_index, edge_weight, labels, idx_val):
         self.eval()
