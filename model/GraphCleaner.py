@@ -30,11 +30,13 @@ class GraphCleanerDetector:
         
     def to_softmax(self, log_probs):
         if isinstance(log_probs, np.ndarray):
-            return np.exp(log_probs)
+            e = np.exp(log_probs - np.max(log_probs, axis=1, keepdims=True))
+            return e / e.sum(axis=1, keepdims=True)
         elif isinstance(log_probs, torch.Tensor):
             return F.softmax(log_probs, dim=1).cpu().numpy()
         else:
             return F.softmax(torch.tensor(log_probs), dim=1).cpu().numpy()
+
     
     def train_base_gnn(self, data, model, n_epochs=200):
         print("Training base GNN for GraphCleaner...")
@@ -131,75 +133,94 @@ class GraphCleanerDetector:
         return py, noise_matrix, inv_noise_matrix
 
     
-    def negative_sampling(self, data, noise_matrix, num_classes):
-        data_copy = copy.deepcopy(data)
-        
-        val_idx = data.val_mask.nonzero(as_tuple=True)[0].cpu().numpy()
-        val_y = data.y_noisy[data.val_mask].cpu().numpy()
+    def negative_sampling(self, data_orig, noise_matrix, n_classes, sample_rate=None):
+        if sample_rate is None:
+            sample_rate = self.sample_rate
+        import random
 
-        valid_idx = set(range(len(val_y)))
-        for c in range(num_classes):
+        data = copy.deepcopy(data_orig)
+        train_idx = np.argwhere(data.held_mask == True).flatten()
+        train_y = data.y[data.held_mask].cpu().numpy()
+
+        valid_subidx = set(range(len(train_y)))
+        for c in range(n_classes):
             if c >= noise_matrix.shape[1] or np.isnan(noise_matrix[0, c]) or np.max(noise_matrix[:, c]) == 1:
                 print(f"Class {c} is invalid!")
-                valid_idx &= set(np.where(val_y != c)[0])
-        
-        valid_idx = np.array(list(valid_idx))
-        val_idx = val_idx[valid_idx]
+                valid = set(np.where(train_y != c)[0])
+                valid_subidx = valid_subidx & valid
+        train_idx = train_idx[list(valid_subidx)]
 
-        sample_count = int(np.round(self.sample_rate * len(val_idx)))
-        sample_idx = np.random.choice(val_idx, sample_count, replace=False)
+        tr_sample_idx = random.sample(list(train_idx), int(np.round(sample_rate * len(train_idx))))
+        for idx in tr_sample_idx:
+            y = int(data.y[idx])
+            while y == int(data.y[idx]):
+                y = np.random.choice(range(n_classes), p=noise_matrix[:, y])
+            data.y[idx] = y
 
-        for idx in sample_idx:
-            current_label = int(data_copy.y_noisy[idx])
-            if current_label < noise_matrix.shape[1]:
-                new_label = current_label
-                while new_label == current_label:
-                    new_label = np.random.choice(range(noise_matrix.shape[1]), 
-                                               p=noise_matrix[:, current_label])
-                data_copy.y_noisy[idx] = new_label
-        
-        return data_copy, sample_idx
+        return data, tr_sample_idx
+
     
-    def generate_features(self, data, noisy_data, sample_idx, all_sm_vectors, num_classes):
-        print("Generating features for noise detection...")
-        
+    def generate_features(self, k, data, noisy_data, sample_idx, all_sm_vectors, n_classes):
+        print("Generating new features")
+
         y = np.zeros(data.num_nodes)
         y[sample_idx] = 1
 
         A = to_scipy_sparse_matrix(data.edge_index, num_nodes=data.num_nodes)
         n = A.shape[0]
 
-        D_inv_sqrt = spdiags(np.power(np.array(A.sum(1)) + 1e-10, -0.5).flatten(), 0, n, n)
-        S = D_inv_sqrt @ A @ D_inv_sqrt
+        S = spdiags(np.squeeze((1e-10 + np.array(A.sum(1)))**-0.5), 0, n, n) @ A @ spdiags(np.squeeze((1e-10 + np.array(A.sum(0)))**-0.5), 0, n, n)
         S2 = S @ S
         S3 = S @ S2
         S2.setdiag(np.zeros(n))
         S3.setdiag(np.zeros(n))
-        print("Adjacency matrices calculated!")
-        
-        ymat = y[:, None]
-        L0 = np.eye(num_classes)[data.y.cpu().numpy()]
-        L_corr = ymat * np.eye(num_classes)[noisy_data.y_noisy.cpu().numpy()] + (1 - ymat) * L0
+        print("S matrices calculated!")
+
+        ymat = y[:, np.newaxis]
+        L0 = np.eye(n_classes)[data.y.cpu().numpy()]
+        L_corr = ymat * np.eye(n_classes)[noisy_data.y.cpu().numpy()] + (1 - ymat) * L0
         L1, L2, L3 = S @ L0, S2 @ L0, S3 @ L0
-        print("Label matrices calculated!")
-        
+
         P0 = self.to_softmax(torch.tensor(all_sm_vectors[-1]))
         P1, P2, P3 = S @ P0, S2 @ P0, S3 @ P0
-        print("Prediction matrices calculated!")
 
-        if self.k == 3:
-            features = np.hstack([
-                np.sum(L_corr * P, axis=1, keepdims=True) for P in [P0, P1, P2, P3]
-            ] + [
-                np.sum(L_corr * L, axis=1, keepdims=True) for L in [L1, L2, L3]
-            ])
-        else:
-            raise NotImplementedError(f"Feature generation only implemented for k=3, got k={self.k}")
-        
-        return features, y
+        features_list = [np.sum(L_corr * P0, axis=1, keepdims=True),
+                        np.sum(L_corr * P1, axis=1, keepdims=True),
+                        np.sum(L_corr * P2, axis=1, keepdims=True),
+                        np.sum(L_corr * L1, axis=1, keepdims=True),
+                        np.sum(L_corr * L2, axis=1, keepdims=True),
+                        np.sum(L_corr * L3, axis=1, keepdims=True)]
+
+        if k >= 4:
+            S4 = S @ S3
+            S4.setdiag(np.zeros(n))
+            L4 = S4 @ L0
+            P4 = S4 @ P0
+            features_list += [np.sum(L_corr * P4, axis=1, keepdims=True),
+                              np.sum(L_corr * L4, axis=1, keepdims=True)]
+
+        if k >= 5:
+            S5 = S @ S4
+            S5.setdiag(np.zeros(n))
+            L5 = S5 @ L0
+            P5 = S5 @ P0
+            features_list += [np.sum(L_corr * P5, axis=1, keepdims=True),
+                              np.sum(L_corr * L5, axis=1, keepdims=True)]
+
+        feat = np.hstack(features_list)
+        return feat, y
+
     
     def detect_noise(self, data, model, num_classes):
         print("Starting GraphCleaner Detection")
+
+        held_split = self.config.get('held_split', 'valid')
+        if held_split == 'train':
+            data.held_mask = data.train_mask
+        elif held_split == 'valid':
+            data.held_mask = data.val_mask
+        else:
+            data.held_mask = data.test_mask
 
         all_sm_vectors, best_sm_vectors, trained_model = self.train_base_gnn(
             data, model, self.config.get('total_epochs', 200)
@@ -218,10 +239,10 @@ class GraphCleanerDetector:
         print(f"{len(sample_idx)} negative samples generated")
 
         features, binary_labels = self.generate_features(
-            data, noisy_data, sample_idx, all_sm_vectors, num_classes
+            self.k, data, noisy_data, sample_idx, all_sm_vectors, num_classes
         )
-        
-        print("Training binary noise detector...")
+
+        print("Training binary noise detector")
 
         val_mask_cpu = data.val_mask.cpu().numpy()
         test_mask_cpu = data.test_mask.cpu().numpy()
@@ -238,7 +259,7 @@ class GraphCleanerDetector:
         test_predictions = test_probs > 0.5
         
         return test_predictions, test_probs, classifier
-    
+
     def visualize_noise_matrix(self, noise_matrix, num_classes, title_prefix=""):
 
         plt.figure(figsize=(8, 6))

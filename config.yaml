@@ -3,7 +3,7 @@ seed: 42
 device: cuda
 
 dataset:
-  name: cora # cora, citeseer, pubmed, corafull, computers, photo, coauthorcs, coauthorphysics, wikics, reddit
+  name: pubmed # cora, citeseer, pubmed, corafull, computers, photo, coauthorcs, coauthorphysics, wikics, reddit
   root: /data
 
 noise:
@@ -13,7 +13,7 @@ noise:
 
 model:
   name: gcn # gcn, gin, gat, gat2
-  hidden_channels: 64
+  hidden_channels: 256
   n_layers: 2
   dropout: 0.5
   # GCN specific parameters
@@ -37,7 +37,7 @@ training:
   # - rtgnn: use RTGNN as main method
   # - gnn_cleaner: use GNN Cleaner as main method
   # - gnnguard: use GNNGuard as main method
-  method: rtgnn # standard, dirichlet, ncod, nrgnn, pi_gnn, cr_gnn, lafak, rtgnn, graphcleaner, unionnet, gnn_cleaner, erase, gnnguard
+  method: graphcleaner # standard, dirichlet, ncod, nrgnn, pi_gnn, cr_gnn, lafak, rtgnn, graphcleaner, unionnet, gnn_cleaner, erase, gnnguard
   total_epochs: 1000
   
   # Supplementary GNN options
@@ -52,7 +52,7 @@ training:
   # - gnn_cleaner: use GNN Cleaner
   # - erase: use ERASE
   # - gnnguard: use GNNGuard
-  supplementary_gnn: rtgnn # None, nrgnn, pi_gnn, cr_gnn, lafak, rtgnn, graphcleaner, unionnet, gnn_cleaner, erase, gnnguard
+  supplementary_gnn: graphcleaner # None, nrgnn, pi_gnn, cr_gnn, lafak, rtgnn, graphcleaner, unionnet, gnn_cleaner, erase, gnnguard
 
 # NRGNN parameters
 nrgnn_params:
@@ -124,9 +124,9 @@ rtgnn_params:
 
 # GraphCleaner parameters
 graphcleaner_params:
-  k: 3
+  k: 5
   sample_rate: 0.5
-  max_iter_classifier: 3000
+  max_iter_classifier: 5000
 
 # UnionNET parameters
 unionnet_params:
