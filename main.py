@@ -165,7 +165,7 @@ def run_experiment(config, run_id=1):
             p=float(trainer_params.get('p', 0.5)),
             alpha=float(trainer_params.get('alpha', 1.0)),
             beta=float(trainer_params.get('beta', 0.0)),
-            debug=False
+            debug=True
         )
         
         model_params = {k: v for k, v in config['model'].items() if k not in ['name']}
@@ -515,7 +515,7 @@ def run_experiment(config, run_id=1):
         }
 
         trainer = GNNCleanerTrainer(gnn_cleaner_config, data, device, num_classes, gnn_model)
-        result = trainer.train(debug=False)
+        result = trainer.train(debug=True)
         
         return result['test']
     
@@ -549,7 +549,7 @@ def run_experiment(config, run_id=1):
         }
         
         trainer = ERASETrainer(erase_config, device, num_classes, get_model)
-        result = trainer.train(data, debug=False)
+        result = trainer.train(data, debug=True)
         
         return result['test']
     
@@ -595,7 +595,7 @@ def run_experiment(config, run_id=1):
             idx_val=idx_val,
             idx_test=idx_test,
             train_iters=config.get('total_epochs', 200),
-            verbose=False,
+            verbose=True,
             patience=config.get('patience', 5)
         )
         

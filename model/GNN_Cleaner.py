@@ -6,6 +6,46 @@ import torch.nn.functional as F
 from scipy import sparse
 from sklearn.metrics import f1_score
 
+def dirichlet_energy(x, edge_index):
+    row, col = edge_index
+    diff = x[row] - x[col]
+    return (diff ** 2).sum(dim=1).mean()
+
+def compute_dirichlet_energy_splits(features, edge_index, train_mask, val_mask, test_mask):
+
+    train_features = features[train_mask]
+    val_features = features[val_mask] 
+    test_features = features[test_mask]
+    
+    train_nodes = torch.where(train_mask)[0]
+    val_nodes = torch.where(val_mask)[0] 
+    test_nodes = torch.where(test_mask)[0]
+    
+    def filter_edges_for_nodes(edge_index, node_set):
+        node_mapping = {node.item(): i for i, node in enumerate(node_set)}
+        
+        mask = torch.isin(edge_index[0], node_set) & torch.isin(edge_index[1], node_set)
+        filtered_edges = edge_index[:, mask]
+        
+        if filtered_edges.size(1) > 0:
+            remapped_edges = torch.zeros_like(filtered_edges)
+            for i in range(filtered_edges.size(1)):
+                remapped_edges[0, i] = node_mapping[filtered_edges[0, i].item()]
+                remapped_edges[1, i] = node_mapping[filtered_edges[1, i].item()]
+            return remapped_edges
+        else:
+            return torch.empty((2, 0), dtype=torch.long, device=edge_index.device)
+    
+    train_edges = filter_edges_for_nodes(edge_index, train_nodes)
+    val_edges = filter_edges_for_nodes(edge_index, val_nodes)
+    test_edges = filter_edges_for_nodes(edge_index, test_nodes)
+
+    train_de = dirichlet_energy(train_features, train_edges) if train_edges.size(1) > 0 else torch.tensor(0.0)
+    val_de = dirichlet_energy(val_features, val_edges) if val_edges.size(1) > 0 else torch.tensor(0.0)
+    test_de = dirichlet_energy(test_features, test_edges) if test_edges.size(1) > 0 else torch.tensor(0.0)
+    
+    return train_de.item(), val_de.item(), test_de.item()
+
 class Net(nn.Module):
     def __init__(self, input_dim=2, hidden_dim=32):
         super().__init__()
@@ -19,7 +59,6 @@ class Net(nn.Module):
         )
     
     def forward(self, l1, l2):
-
         losses = torch.stack([l1, l2], dim=1)
         return self.net(losses).squeeze(-1)
 
@@ -77,6 +116,39 @@ class GNNCleanerTrainer:
             if train_noise > 0:
                 actual_rate = train_noise / self.data.train_mask.sum().item()
                 print(f"Label noise rate: {actual_rate:.3f} ({train_noise} labels changed)")
+
+    @torch.no_grad()
+    def _compute_dirichlet_energy_train_val(self):
+        self.model.eval()
+        
+        x, edge_index = self.data.x.to(self.device), self.data.edge_index.to(self.device)
+        
+        try:
+            logits = self.model(self.data)
+        except:
+            logits = self.model(x, edge_index)
+        
+        test_mask = torch.zeros_like(self.data.train_mask)
+        
+        train_de, val_de, _ = compute_dirichlet_energy_splits(
+            logits, edge_index, self.data.train_mask, self.data.val_mask, test_mask
+        )
+        return train_de, val_de
+
+    @torch.no_grad()
+    def _compute_dirichlet_energy_all(self):
+        self.model.eval()
+        
+        x, edge_index = self.data.x.to(self.device), self.data.edge_index.to(self.device)
+        
+        try:
+            logits = self.model(self.data)
+        except:
+            logits = self.model(x, edge_index)
+        
+        return compute_dirichlet_energy_splits(
+            logits, edge_index, self.data.train_mask, self.data.val_mask, self.data.test_mask
+        )
 
     def compute_similarity_matrix(self, edge_index, node_features):
         num_nodes = node_features.size(0)
@@ -150,7 +222,6 @@ class GNNCleanerTrainer:
         return selected_mask, left_mask
 
     def train_step(self, epoch):
-
         self.model.train()
         self.net.train()
         
@@ -220,10 +291,8 @@ class GNNCleanerTrainer:
             self.model_optimizer.step()
             
             if left_mask.sum() > 0:
-
                 clean_indices = self.clean_mask.nonzero(as_tuple=True)[0]
                 if len(clean_indices) > 0:
-
                     try:
                         updated_logits = self.model(self.data)
                     except:
@@ -302,6 +371,8 @@ class GNNCleanerTrainer:
             
             metrics = self.evaluate(include_test=False)
             
+            train_de, val_de = self._compute_dirichlet_energy_train_val()
+            
             if metrics['val_loss'] < best_val_loss:
                 best_val_loss = metrics['val_loss']
                 best_state = {
@@ -330,6 +401,7 @@ class GNNCleanerTrainer:
                 print(f"Epoch {epoch:03d} | Train Loss: {train_loss:.4f}, Val Loss: {metrics['val_loss']:.4f} | "
                       f"Train Acc: {metrics['train_acc']:.4f}, Val Acc: {metrics['val_acc']:.4f} | "
                       f"Train F1: {metrics['train_f1']:.4f}, Val F1: {metrics['val_f1']:.4f} | "
+                      f"Train DE: {train_de:.4f}, Val DE: {val_de:.4f} | "
                       f"Selected: {selected_count}")
         
         if best_state is not None:
@@ -338,15 +410,23 @@ class GNNCleanerTrainer:
         
         final_metrics = self.evaluate(include_test=True)
         
+        final_train_de, final_val_de, final_test_de = self._compute_dirichlet_energy_all()
+        
         self.results = {
             'train': best_train_metrics['train_acc'],
             'val': best_val_metrics['val_acc'], 
-            'test': final_metrics['test_acc']
+            'test': final_metrics['test_acc'],
+            'dirichlet_energy': {
+                'train': final_train_de,
+                'val': final_val_de,
+                'test': final_test_de
+            }
         }
         
         if debug:
             total_time = time.time() - start_time
             print(f"\nTraining completed in {total_time:.2f}s")
             print(f"Test Loss: {final_metrics['test_loss']:.4f} | Test Acc: {final_metrics['test_acc']:.4f} | Test F1: {final_metrics['test_f1']:.4f}")
+            print(f"Final Dirichlet Energy - Train: {final_train_de:.4f}, Val: {final_val_de:.4f}, Test: {final_test_de:.4f}")
         
         return self.results

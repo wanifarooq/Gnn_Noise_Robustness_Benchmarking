@@ -15,6 +15,33 @@ except ImportError:
     nx = None
 from sklearn.metrics import f1_score
 
+def compute_dirichlet_energy(predictions, edge_index, mask=None):
+
+    if predictions.dim() > 1:
+        probs = F.softmax(predictions, dim=1)
+    else:
+        probs = predictions
+    
+    if mask is not None:
+
+        valid_edges = mask[edge_index[0]] & mask[edge_index[1]]
+        edge_index_filtered = edge_index[:, valid_edges]
+    else:
+        edge_index_filtered = edge_index
+    
+    if edge_index_filtered.shape[1] == 0:
+        return 0.0
+
+    node_i = edge_index_filtered[0]
+    node_j = edge_index_filtered[1]
+    
+    diff = probs[node_i] - probs[node_j]
+    squared_diff = (diff ** 2).sum(dim=1)
+    
+    dirichlet_energy = 0.5 * squared_diff.mean().item()
+    
+    return dirichlet_energy
+
 def BinaryLabelToPosNeg(labels):
     if isinstance(labels, torch.Tensor):
         return 2 * labels - 1
@@ -190,30 +217,33 @@ class Attack:
         self.c_max = c_max
 
     def GNN_test(self, gnn_model, epochs=200, early_stopping=10):
+        import time
+        start_time = time.time()
+        
         model = copy.deepcopy(gnn_model).to(self.device)
         optimizer = torch.optim.Adam(model.parameters(), lr=0.01, weight_decay=5e-4)
         criterion = torch.nn.CrossEntropyLoss()
-    
+
         X = torch.tensor(self.data['_X_obs'][self.data['nodes_AB_all']], dtype=torch.float32, device=self.device)
         y = torch.tensor(self.data['_z_obs_bin'], dtype=torch.long, device=self.device)
-    
+
         train_mask = torch.tensor(np.isin(self.data['nodes_AB_all'], self.data['nodes_AB_train']), device=self.device)
         val_mask = torch.tensor(np.isin(self.data['nodes_AB_all'], self.data['nodes_AB_val']), device=self.device)
         test_mask = torch.tensor(np.isin(self.data['nodes_AB_all'], self.data['nodes_AB_test']), device=self.device)
-    
+
         A = self.data['_A_obs']
         if hasattr(A, 'tocoo'):
             A = A.tocoo()
         edge_index, edge_weight = from_scipy_sparse_matrix(A)
         edge_index = edge_index.to(self.device)
-    
+
         nodes = torch.tensor(self.data['nodes_AB_all'], dtype=torch.long, device=self.device)
         edge_index_sub, _ = subgraph(nodes, edge_index, relabel_nodes=True, num_nodes=A.shape[0])
-    
+
         best_val_loss = float('inf')
         best_model_wts = copy.deepcopy(model.state_dict())
         epochs_no_improve = 0
-    
+
         for epoch in range(1, epochs+1):
             model.train()
             optimizer.zero_grad()
@@ -230,19 +260,23 @@ class Attack:
                 out_val = model(data_batch)
 
                 train_loss = loss.item()
-                val_loss = criterion(out_val[val_mask], y[val_mask]).item()
+                metrics = {}
+                metrics['val_loss'] = criterion(out_val[val_mask], y[val_mask]).item()
+                metrics['train_acc'] = accuracy_torch(out_val[train_mask], y[train_mask])
+                metrics['val_acc'] = accuracy_torch(out_val[val_mask], y[val_mask])
+                metrics['train_f1'] = f1_torch(out_val[train_mask], y[train_mask])
+                metrics['val_f1'] = f1_torch(out_val[val_mask], y[val_mask])
+                
+                train_de = compute_dirichlet_energy(out_val, edge_index_sub, train_mask)
+                val_de = compute_dirichlet_energy(out_val, edge_index_sub, val_mask)
 
-                train_acc = accuracy_torch(out_val[train_mask], y[train_mask])
-                val_acc = accuracy_torch(out_val[val_mask], y[val_mask])
-                train_f1 = f1_torch(out_val[train_mask], y[train_mask])
-                val_f1 = f1_torch(out_val[val_mask], y[val_mask])
+            print(f"Epoch {epoch:03d} | Train Loss: {train_loss:.4f}, Val Loss: {metrics['val_loss']:.4f} | "
+                  f"Train Acc: {metrics['train_acc']:.4f}, Val Acc: {metrics['val_acc']:.4f} | "
+                  f"Train F1: {metrics['train_f1']:.4f}, Val F1: {metrics['val_f1']:.4f} | "
+                  f"Train DE: {train_de:.4f}, Val DE: {val_de:.4f}")
 
-            print(f"Epoch {epoch:03d} | Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f} | "
-                  f"Train Acc: {train_acc:.4f}, Val Acc: {val_acc:.4f} | "
-                  f"Train F1: {train_f1:.4f}, Val F1: {val_f1:.4f}")
-
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
+            if metrics['val_loss'] < best_val_loss:
+                best_val_loss = metrics['val_loss']
                 best_model_wts = copy.deepcopy(model.state_dict())
                 epochs_no_improve = 0
             else:
@@ -257,13 +291,21 @@ class Attack:
             data_batch = PyGData(x=X, edge_index=edge_index_sub, y=y)
             out = model(data_batch)
 
-            test_loss = criterion(out[test_mask], y[test_mask]).item()
-            acc = accuracy_torch(out[test_mask], y[test_mask])
-            f1 = f1_torch(out[test_mask], y[test_mask])
+            final_metrics = {}
+            final_metrics['test_loss'] = criterion(out[test_mask], y[test_mask]).item()
+            final_metrics['test_acc'] = accuracy_torch(out[test_mask], y[test_mask])
+            final_metrics['test_f1'] = f1_torch(out[test_mask], y[test_mask])
+            
+            final_train_de = compute_dirichlet_energy(out, edge_index_sub, train_mask)
+            final_val_de = compute_dirichlet_energy(out, edge_index_sub, val_mask)
+            final_test_de = compute_dirichlet_energy(out, edge_index_sub, test_mask)
 
-            print(f"Test Loss: {test_loss:.4f} | Test Acc: {acc:.4f} | Test F1: {f1:.4f}")
+        total_time = time.time() - start_time
+        print(f"\nTraining completed in {total_time:.2f}s")
+        print(f"Test Loss: {final_metrics['test_loss']:.4f} | Test Acc: {final_metrics['test_acc']:.4f} | Test F1: {final_metrics['test_f1']:.4f}")
+        print(f"Final Dirichlet Energy - Train: {final_train_de:.4f}, Val: {final_val_de:.4f}, Test: {final_test_de:.4f}")
 
-        return acc, f1, out[test_mask].cpu().numpy()
+        return final_metrics['test_acc'], final_metrics['test_f1'], out[test_mask].cpu().numpy()
 
     def getK_GCN(self):
 
@@ -705,6 +747,8 @@ class CommunityDefense:
                         lr: float = 0.005,
                         weight_decay: float = 1e-3,
                         debug: bool = False):
+        import time
+        start_time = time.time()
         
         model = gnn_model.to(self.device)
         optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
@@ -762,30 +806,34 @@ class CommunityDefense:
                 out_eval = model(batch)
                 logits_eval = out_eval[0] if (isinstance(out_eval, tuple) and len(out_eval) == 2) else out_eval
                 
-                val_loss = ce(logits_eval[self.val_mask], y[self.val_mask]).item()
+                metrics = {}
+                metrics['val_loss'] = ce(logits_eval[self.val_mask], y[self.val_mask]).item()
                 pred = logits_eval.argmax(dim=1).cpu().numpy()
                 y_true = y.cpu().numpy()
 
-                train_acc = (pred[self.train_mask.cpu().numpy()] == y_true[self.train_mask.cpu().numpy()]).mean()
-                val_acc = (pred[self.val_mask.cpu().numpy()] == y_true[self.val_mask.cpu().numpy()]).mean()
+                metrics['train_acc'] = (pred[self.train_mask.cpu().numpy()] == y_true[self.train_mask.cpu().numpy()]).mean()
+                metrics['val_acc'] = (pred[self.val_mask.cpu().numpy()] == y_true[self.val_mask.cpu().numpy()]).mean()
 
-                train_f1 = f1_score(y_true[self.train_mask.cpu().numpy()],
+                metrics['train_f1'] = f1_score(y_true[self.train_mask.cpu().numpy()],
                                     pred[self.train_mask.cpu().numpy()],
                                     average="macro")
-                val_f1 = f1_score(y_true[self.val_mask.cpu().numpy()],
+                metrics['val_f1'] = f1_score(y_true[self.val_mask.cpu().numpy()],
                                 pred[self.val_mask.cpu().numpy()],
                                 average="macro")
+                
+                train_de = compute_dirichlet_energy(logits_eval, edge_index, self.train_mask)
+                val_de = compute_dirichlet_energy(logits_eval, edge_index, self.val_mask)
 
-            scheduler.step(val_loss)
+            scheduler.step(metrics['val_loss'])
 
             if debug:
-                print(f"Epoch {epoch:03d} | "
-                    f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f} | "
-                    f"Train Acc: {train_acc:.4f}, Val Acc: {val_acc:.4f} | "
-                    f"Train F1: {train_f1:.4f}, Val F1: {val_f1:.4f}")
+                print(f"Epoch {epoch:03d} | Train Loss: {train_loss:.4f}, Val Loss: {metrics['val_loss']:.4f} | "
+                      f"Train Acc: {metrics['train_acc']:.4f}, Val Acc: {metrics['val_acc']:.4f} | "
+                      f"Train F1: {metrics['train_f1']:.4f}, Val F1: {metrics['val_f1']:.4f} | "
+                      f"Train DE: {train_de:.4f}, Val DE: {val_de:.4f}")
 
-            if val_loss < best_val - 1e-4:
-                best_val = val_loss
+            if metrics['val_loss'] < best_val - 1e-4:
+                best_val = metrics['val_loss']
                 best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
                 no_improve = 0
             else:
@@ -807,13 +855,20 @@ class CommunityDefense:
             pred = logits.argmax(dim=1).cpu().numpy()
             y_true = y.cpu().numpy()
 
-            test_loss = ce(logits[self.test_mask], y[self.test_mask]).item()
-            test_acc = (pred[self.test_mask.cpu().numpy()] == y_true[self.test_mask.cpu().numpy()]).mean()
-            test_f1 = f1_score(y_true[self.test_mask.cpu().numpy()],
+            final_metrics = {}
+            final_metrics['test_loss'] = ce(logits[self.test_mask], y[self.test_mask]).item()
+            final_metrics['test_acc'] = (pred[self.test_mask.cpu().numpy()] == y_true[self.test_mask.cpu().numpy()]).mean()
+            final_metrics['test_f1'] = f1_score(y_true[self.test_mask.cpu().numpy()],
                             pred[self.test_mask.cpu().numpy()],
                             average="macro")
+            
+            final_train_de = compute_dirichlet_energy(logits, edge_index, self.train_mask)
+            final_val_de = compute_dirichlet_energy(logits, edge_index, self.val_mask)
+            final_test_de = compute_dirichlet_energy(logits, edge_index, self.test_mask)
 
-        if debug:
-            print(f"Test Loss: {test_loss:.4f} | Test Acc: {test_acc:.4f} | Test F1: {test_f1:.4f}")
+        total_time = time.time() - start_time
+        print(f"\nTraining completed in {total_time:.2f}s")
+        print(f"Test Loss: {final_metrics['test_loss']:.4f} | Test Acc: {final_metrics['test_acc']:.4f} | Test F1: {final_metrics['test_f1']:.4f}")
+        print(f"Final Dirichlet Energy - Train: {final_train_de:.4f}, Val: {final_val_de:.4f}, Test: {final_test_de:.4f}")
 
-        return test_acc
+        return final_metrics['test_acc']

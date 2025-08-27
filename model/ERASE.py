@@ -9,6 +9,45 @@ from sklearn.metrics import accuracy_score, f1_score
 from typing import Tuple
 import copy
 
+def dirichlet_energy(x, edge_index):
+    row, col = edge_index
+    diff = x[row] - x[col]
+    return (diff ** 2).sum(dim=1).mean()
+
+def compute_dirichlet_energy_splits(features, data):
+    train_features = features[data.train_mask]
+    val_features = features[data.val_mask] 
+    test_features = features[data.test_mask]
+    
+    train_nodes = torch.where(data.train_mask)[0]
+    val_nodes = torch.where(data.val_mask)[0] 
+    test_nodes = torch.where(data.test_mask)[0]
+    
+    def filter_edges_for_nodes(edge_index, node_set):
+        node_mapping = {node.item(): i for i, node in enumerate(node_set)}
+        
+        mask = torch.isin(edge_index[0], node_set) & torch.isin(edge_index[1], node_set)
+        filtered_edges = edge_index[:, mask]
+
+        if filtered_edges.size(1) > 0:
+            remapped_edges = torch.zeros_like(filtered_edges)
+            for i in range(filtered_edges.size(1)):
+                remapped_edges[0, i] = node_mapping[filtered_edges[0, i].item()]
+                remapped_edges[1, i] = node_mapping[filtered_edges[1, i].item()]
+            return remapped_edges
+        else:
+            return torch.empty((2, 0), dtype=torch.long, device=edge_index.device)
+    
+    train_edges = filter_edges_for_nodes(data.edge_index, train_nodes)
+    val_edges = filter_edges_for_nodes(data.edge_index, val_nodes)
+    test_edges = filter_edges_for_nodes(data.edge_index, test_nodes)
+    
+    train_de = dirichlet_energy(train_features, train_edges) if train_edges.size(1) > 0 else torch.tensor(0.0)
+    val_de = dirichlet_energy(val_features, val_edges) if val_edges.size(1) > 0 else torch.tensor(0.0)
+    test_de = dirichlet_energy(test_features, test_edges) if test_edges.size(1) > 0 else torch.tensor(0.0)
+    
+    return train_de.item(), val_de.item(), test_de.item()
+
 class MaximalCodingRateReduction(nn.Module):
     def __init__(self, gam1: float = 1.0, gam2: float = 1.0, eps: float = 0.01, corafull: bool = False):
         super().__init__()
@@ -378,6 +417,8 @@ class ERASETrainer:
             train_acc, val_acc, val_loss = self._evaluate_train_val(model, data, L_all)
 
             train_f1, val_f1 = self._compute_f1_scores(model, data, L_all)
+            
+            train_de, val_de = self._compute_dirichlet_energy_train_val(model, data)
                     
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
@@ -391,7 +432,8 @@ class ERASETrainer:
             if debug:
                 print(f"Epoch {epoch:03d} | Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f} | "
                       f"Train Acc: {train_acc:.4f}, Val Acc: {val_acc:.4f} | "
-                      f"Train F1: {train_f1:.4f}, Val F1: {val_f1:.4f}")
+                      f"Train F1: {train_f1:.4f}, Val F1: {val_f1:.4f} | "
+                      f"Train DE: {train_de:.4f}, Val DE: {val_de:.4f}")
 
             if patience_counter >= patience:
                 if debug:
@@ -401,14 +443,35 @@ class ERASETrainer:
         model.load_state_dict(best_model_state)
         
         test_acc, test_f1, test_loss = self._evaluate_test_final(model, data, L_all)
+        
+        final_train_de, final_val_de, final_test_de = self._compute_dirichlet_energy(model, data)
 
         print(f"Test Loss: {test_loss:.4f} | Test Acc: {test_acc:.4f} | Test F1: {test_f1:.4f}")
+        print(f"Final Dirichlet Energy - Train: {final_train_de:.4f}, Val: {final_val_de:.4f}, Test: {final_test_de:.4f}")
 
         return {
             'train': best_train_acc,
             'val': best_val_acc,
-            'test': test_acc
+            'test': test_acc,
+            'dirichlet_energy': {
+                'train': final_train_de,
+                'val': final_val_de,
+                'test': final_test_de
+            }
         }
+
+    @torch.no_grad()
+    def _compute_dirichlet_energy_train_val(self, model, data):
+        model.eval()
+        features = model(data)
+        train_de, val_de, _ = compute_dirichlet_energy_splits(features, data)
+        return train_de, val_de
+
+    @torch.no_grad()
+    def _compute_dirichlet_energy(self, model, data):
+        model.eval()
+        features = model(data)
+        return compute_dirichlet_energy_splits(features, data)
 
     @torch.no_grad()
     def _compute_f1_scores(self, model, data, L_all):

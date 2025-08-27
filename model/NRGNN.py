@@ -10,6 +10,11 @@ from torch_geometric.utils import from_scipy_sparse_matrix, to_undirected, negat
 from torch_geometric.nn import GCNConv
 from sklearn.metrics import f1_score
 
+def dirichlet_energy(x, edge_index):
+    row, col = edge_index
+    diff = x[row] - x[col]
+    return (diff ** 2).sum(dim=1).mean()
+
 def accuracy(output, labels):
 
     if not isinstance(labels, torch.Tensor):
@@ -161,7 +166,6 @@ class NRGNN:
         self.idx_unlabel = None
 
     def fit(self, features, adj, labels, idx_train, idx_val):
-
         args = self.args
         
         self._prepare_data(features, adj, labels, idx_train)
@@ -176,7 +180,35 @@ class NRGNN:
             if args.debug:
                 print(f"Early stopping at epoch {epoch+1}")
 
-        print(f"Total time elapsed: {time.time() - t_total:.4f}s")
+        total_time = time.time() - t_total
+        print(f"\nTraining completed in {total_time:.2f}s")
+        
+        self.model.eval()
+        with torch.no_grad():
+            if self.best_graph is not None and self.best_model_index is not None:
+                final_output = self.model(self.features, self.best_model_index, self.best_graph)
+                
+                idx_train_tensor = torch.tensor(idx_train, device=self.device) if isinstance(idx_train, np.ndarray) else idx_train
+                idx_val_tensor = torch.tensor(idx_val, device=self.device) if isinstance(idx_val, np.ndarray) else idx_val
+                
+                train_mask = ((self.best_model_index[0].unsqueeze(1) == idx_train_tensor.unsqueeze(0)).any(1) | 
+                            (self.best_model_index[1].unsqueeze(1) == idx_train_tensor.unsqueeze(0)).any(1))
+                
+                if train_mask.sum() > 0:
+                    final_train_de = dirichlet_energy(final_output, self.best_model_index[:, train_mask]).item()
+                else:
+                    final_train_de = 0.0
+                
+                val_mask = ((self.best_model_index[0].unsqueeze(1) == idx_val_tensor.unsqueeze(0)).any(1) | 
+                          (self.best_model_index[1].unsqueeze(1) == idx_val_tensor.unsqueeze(0)).any(1))
+                
+                if val_mask.sum() > 0:
+                    final_val_de = dirichlet_energy(final_output, self.best_model_index[:, val_mask]).item()
+                else:
+                    final_val_de = 0.0
+                
+                self.final_train_de = final_train_de
+                self.final_val_de = final_val_de
         
         self._load_best_models()
 
@@ -356,7 +388,6 @@ class NRGNN:
         self.estimator.eval()
         
         with torch.no_grad():
-
             pred_output = self.predictor(self.features, pred_edge_index, all_pred_weights)
             pred_probs = F.softmax(pred_output, dim=1)
 
@@ -372,10 +403,39 @@ class NRGNN:
             train_f1 = f1_score(self.labels[idx_train].cpu(), model_output[idx_train].argmax(dim=1).cpu(), average='macro')
             val_f1 = f1_score(self.labels[idx_val].cpu(), model_output[idx_val].argmax(dim=1).cpu(), average='macro')
 
+            idx_train_tensor = torch.tensor(idx_train, device=self.device) if isinstance(idx_train, np.ndarray) else idx_train
+            idx_val_tensor = torch.tensor(idx_val, device=self.device) if isinstance(idx_val, np.ndarray) else idx_val
+            
+            train_mask = ((model_edge_index[0].unsqueeze(1) == idx_train_tensor.unsqueeze(0)).any(1) | 
+                        (model_edge_index[1].unsqueeze(1) == idx_train_tensor.unsqueeze(0)).any(1))
+            
+            if train_mask.sum() > 0:
+                train_de = dirichlet_energy(model_output, model_edge_index[:, train_mask]).item()
+            else:
+                train_de = 0.0
+            
+            val_mask = ((model_edge_index[0].unsqueeze(1) == idx_val_tensor.unsqueeze(0)).any(1) | 
+                      (model_edge_index[1].unsqueeze(1) == idx_val_tensor.unsqueeze(0)).any(1))
+            
+            if val_mask.sum() > 0:
+                val_de = dirichlet_energy(model_output, model_edge_index[:, val_mask]).item()
+            else:
+                val_de = 0.0
+
+            metrics = {
+                'train_acc': train_acc,
+                'val_acc': val_acc,
+                'train_f1': train_f1,
+                'val_f1': val_f1,
+                'val_loss': val_loss
+            }
+
             if self.args.debug:
-                print(f"Epoch {epoch:03d} | Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f} | "
-                    f"Train Acc: {train_acc:.4f}, Val Acc: {val_acc:.4f} | "
-                    f"Train F1: {train_f1:.4f}, Val F1: {val_f1:.4f} | Time: {time.time() - start_time:.2f}s")
+                print(f"Epoch {epoch:03d} | Train Loss: {train_loss:.4f}, Val Loss: {metrics['val_loss']:.4f} | "
+                      f"Train Acc: {metrics['train_acc']:.4f}, Val Acc: {metrics['val_acc']:.4f} | "
+                      f"Train F1: {metrics['train_f1']:.4f}, Val F1: {metrics['val_f1']:.4f} | "
+                      f"Train DE: {train_de:.4f}, Val DE: {val_de:.4f} | "
+                      f"Time: {time.time() - start_time:.2f}s")
                 
                 print(f"  Pred Val Acc: {acc_pred_val:.4f} | Add Nodes: {len(self.idx_add)}")
 
@@ -435,7 +495,25 @@ class NRGNN:
                 y_pred = model_output[idx_test].argmax(dim=1).cpu().numpy()
                 f1_test = f1_score(y_true, y_pred, average='macro')
                 
-                print(f"Test Loss: {model_loss:.4f} | Test Acc: {model_acc:.4f} | Test F1: {f1_test:.4f}")
+                idx_test_tensor = torch.tensor(idx_test, device=self.device) if isinstance(idx_test, np.ndarray) else idx_test
+                
+                test_mask = ((self.best_model_index[0].unsqueeze(1) == idx_test_tensor.unsqueeze(0)).any(1) | 
+                            (self.best_model_index[1].unsqueeze(1) == idx_test_tensor.unsqueeze(0)).any(1))
+                
+                if test_mask.sum() > 0:
+                    final_test_de = dirichlet_energy(model_output, self.best_model_index[:, test_mask]).item()
+                else:
+                    final_test_de = 0.0
+                
+                final_metrics = {
+                    'test_loss': model_loss,
+                    'test_acc': model_acc,
+                    'test_f1': f1_test
+                }
+                
+                print(f"Test Loss: {final_metrics['test_loss']:.4f} | Test Acc: {final_metrics['test_acc']:.4f} | Test F1: {final_metrics['test_f1']:.4f}")
+                print(f"Final Dirichlet Energy - Train: {self.final_train_de:.4f}, Val: {self.final_val_de:.4f}, Test: {final_test_de:.4f}")
+                
                 return float(model_acc)
         
         return 0.0

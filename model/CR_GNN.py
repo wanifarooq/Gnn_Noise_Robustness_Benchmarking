@@ -72,11 +72,11 @@ class CRGNNTrainer:
         self.best_weights = None
     
     def get_prediction(self, encoder, projection_adapter, projection_head, classifier, 
-                   features, edge_index, labels=None, mask=None):
+                  features, edge_index, labels=None, mask=None):
         h = encoder(Data(x=features, edge_index=edge_index))
         h = projection_adapter(h)
         output = h
-        loss, acc, f1 = None, None, None
+        loss, acc, f1, de = None, None, None, None
 
         if labels is not None and mask is not None:
             edge_index1, _ = dropout_adj(edge_index, p=0.3)
@@ -114,8 +114,27 @@ class CRGNNTrainer:
                 pred_labels = pred_output[mask].argmax(dim=1)
                 acc = accuracy_score(labels[mask].cpu().numpy(), pred_labels.cpu().numpy())
                 f1 = f1_score(labels[mask].cpu().numpy(), pred_labels.cpu().numpy(), average='macro')
+                
+                mask_indices = torch.where(mask)[0]
+                mask_set = set(mask_indices.cpu().numpy())
 
-        return output, loss, acc, f1
+                edge_mask = torch.tensor([src.item() in mask_set and tgt.item() in mask_set 
+                                        for src, tgt in edge_index.t()], device=edge_index.device)
+                
+                if edge_mask.any():
+                    masked_edges = edge_index[:, edge_mask]
+
+                    node_mapping = {orig_idx.item(): local_idx for local_idx, orig_idx in enumerate(mask_indices)}
+
+                    remapped_edges = torch.stack([
+                        torch.tensor([node_mapping[src.item()] for src in masked_edges[0]], device=edge_index.device),
+                        torch.tensor([node_mapping[tgt.item()] for tgt in masked_edges[1]], device=edge_index.device)
+                    ])
+                    de = dirichlet_energy(output[mask], remapped_edges)
+                else:
+                    de = torch.tensor(0.0, device=output.device)
+
+        return output, loss, acc, f1, de
 
     def evaluate(self, encoder, projection_adapter, classifier, features, edge_index, labels, mask):
         encoder.eval()
@@ -127,14 +146,33 @@ class CRGNNTrainer:
             h = projection_adapter(h)
             output = classifier(h)
             
-            dir_energy = dirichlet_energy(h, edge_index)
-        
         loss = F.cross_entropy(output[mask], labels[mask])
         pred_labels = output[mask].argmax(dim=1)
         acc = accuracy_score(labels[mask].cpu().numpy(), pred_labels.cpu().numpy())
         f1 = f1_score(labels[mask].cpu().numpy(), pred_labels.cpu().numpy(), average='macro')
-        return loss, acc, f1, dir_energy
-    
+        
+        with torch.no_grad():
+            mask_indices = torch.where(mask)[0]
+            mask_set = set(mask_indices.cpu().numpy())
+
+            edge_mask = torch.tensor([src.item() in mask_set and tgt.item() in mask_set 
+                                    for src, tgt in edge_index.t()], device=edge_index.device)
+            
+            if edge_mask.any():
+                masked_edges = edge_index[:, edge_mask]
+
+                node_mapping = {orig_idx.item(): local_idx for local_idx, orig_idx in enumerate(mask_indices)}
+
+                remapped_edges = torch.stack([
+                    torch.tensor([node_mapping[src.item()] for src in masked_edges[0]], device=edge_index.device),
+                    torch.tensor([node_mapping[tgt.item()] for tgt in masked_edges[1]], device=edge_index.device)
+                ])
+                de = dirichlet_energy(h[mask], remapped_edges)
+            else:
+                de = torch.tensor(0.0, device=h.device)
+        
+        return loss, acc, f1, de
+
     def fit(self, base_model, data, config, get_model_func):
         print(f"Training CR-GNN with {config['model_name'].upper()} backbone...")
 
@@ -205,13 +243,13 @@ class CRGNNTrainer:
             classifier.train()
             optimizer.zero_grad()
 
-            output, loss_train, acc_train, f1_train = self.get_prediction(
+            output, train_loss, train_acc, train_f1, train_de = self.get_prediction(
                 encoder, projection_adapter, projection_head, classifier,
                 data.x, data.edge_index, noisy_labels, train_mask
             )
-
-            if loss_train is not None and torch.isfinite(loss_train):
-                loss_train.backward()
+            
+            if train_loss is not None and torch.isfinite(train_loss):
+                train_loss.backward()
                 torch.nn.utils.clip_grad_norm_(
                     list(encoder.parameters()) + 
                     list(projection_adapter.parameters()) +
@@ -223,30 +261,29 @@ class CRGNNTrainer:
 
             torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
-            with torch.no_grad():
-                h_train = encoder(Data(x=data.x, edge_index=data.edge_index))
-                h_train = projection_adapter(h_train)
-                dir_energy_train = dirichlet_energy(h_train, data.edge_index)
-
-                h_val = encoder(Data(x=data.x, edge_index=data.edge_index))
-                h_val = projection_adapter(h_val)
-                dir_energy_val = dirichlet_energy(h_val, data.edge_index)
-
-            loss_val, acc_val, f1_val, _ = self.evaluate(
+            val_loss, val_acc, val_f1, val_de = self.evaluate(
                 encoder, projection_adapter, classifier,
                 data.x, data.edge_index, noisy_labels, val_mask
             )
 
+            metrics = {
+                'val_loss': val_loss,
+                'train_acc': train_acc,
+                'val_acc': val_acc,
+                'train_f1': train_f1,
+                'val_f1': val_f1
+            }
+
             if self.config['debug']:
-                print(f"Epoch {epoch+1:03d} | Train Loss: {loss_train:.4f}, Val Loss: {loss_val:.4f} | "
-                    f"Train Acc: {acc_train:.4f}, Val Acc: {acc_val:.4f} | "
-                    f"Train F1: {f1_train:.4f}, Val F1: {f1_val:.4f} | "
-                    f"Dirichlet Energy - Train: {dir_energy_train:.4f}, Val: {dir_energy_val:.4f}")
+                print(f"Epoch {epoch:03d} | Train Loss: {train_loss:.4f}, Val Loss: {metrics['val_loss']:.4f} | "
+                      f"Train Acc: {metrics['train_acc']:.4f}, Val Acc: {metrics['val_acc']:.4f} | "
+                      f"Train F1: {metrics['train_f1']:.4f}, Val F1: {metrics['val_f1']:.4f} | "
+                      f"Train DE: {train_de:.4f}, Val DE: {val_de:.4f}")
 
             flag_earlystop = False
             
-            if loss_val < self.best_val_loss:
-                self.best_val_loss = loss_val
+            if val_loss < self.best_val_loss:
+                self.best_val_loss = val_loss
                 self.patience_counter = 0
                 total_time = time.time() - start_time
                 
@@ -270,15 +307,30 @@ class CRGNNTrainer:
             projection_head.load_state_dict(self.best_weights['projection_head'])
             classifier.load_state_dict(self.best_weights['classifier'])
 
-        loss_test, test_acc, test_f1, dir_energy_test = self.evaluate(
+        final_train_loss, final_train_acc, final_train_f1, final_train_de = self.evaluate(
+            encoder, projection_adapter, classifier,
+            data.x, data.edge_index, clean_labels, train_mask
+        )
+        
+        final_val_loss, final_val_acc, final_val_f1, final_val_de = self.evaluate(
+            encoder, projection_adapter, classifier,
+            data.x, data.edge_index, clean_labels, val_mask
+        )
+        
+        test_loss, test_acc, test_f1, test_de = self.evaluate(
             encoder, projection_adapter, classifier,
             data.x, data.edge_index, clean_labels, test_mask
         )
 
+        final_metrics = {
+            'test_loss': test_loss,
+            'test_acc': test_acc,
+            'test_f1': test_f1
+        }
+
         if self.config['debug']:
-            print(f"Dirichlet Energy Test: {dir_energy_test:.4f}")
-            print('Optimization Finished!')
-            print(f'Time(s): {total_time:.4f}')
-            print(f"Test Loss: {loss_test:.4f} | Test Acc: {test_acc:.4f} | Test F1: {test_f1:.4f}")
+            print(f"\nTraining completed in {total_time:.2f}s")
+            print(f"Test Loss: {final_metrics['test_loss']:.4f} | Test Acc: {final_metrics['test_acc']:.4f} | Test F1: {final_metrics['test_f1']:.4f}")
+            print(f"Final Dirichlet Energy - Train: {final_train_de:.4f}, Val: {final_val_de:.4f}, Test: {test_de:.4f}")
 
         return test_acc

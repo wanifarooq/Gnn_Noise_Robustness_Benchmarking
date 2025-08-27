@@ -1,6 +1,7 @@
 import os
 import os
 import copy
+import time
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -37,9 +38,50 @@ class GraphCleanerDetector:
         else:
             return F.softmax(torch.tensor(log_probs), dim=1).cpu().numpy()
 
-    
+    def compute_dirichlet_energy(self, data, predictions, mask):
+
+        if predictions.dim() > 1 and predictions.size(1) > 1:
+            probs = F.softmax(predictions, dim=1)
+        else:
+            probs = predictions
+            
+        edge_index = data.edge_index
+        num_nodes = data.num_nodes
+
+        energy = 0.0
+        edge_count = 0
+
+        for i in range(edge_index.size(1)):
+            src, dst = edge_index[0, i].item(), edge_index[1, i].item()
+            
+            if mask[src] or mask[dst]:
+                diff = torch.norm(probs[src] - probs[dst], p=2) ** 2
+                energy += diff.item()
+                edge_count += 1
+        
+        return energy / edge_count if edge_count > 0 else 0.0
+
+    def compute_metrics(self, data, model, out):
+
+        metrics = {}
+
+        train_pred = out[data.train_mask].argmax(dim=-1).cpu()
+        train_true = data.y[data.train_mask].cpu()
+        metrics['train_loss'] = F.cross_entropy(out[data.train_mask], data.y_noisy[data.train_mask]).item()
+        metrics['train_acc'] = accuracy_score(train_true, train_pred)
+        metrics['train_f1'] = f1_score(train_true, train_pred, average='micro')
+
+        val_pred = out[data.val_mask].argmax(dim=-1).cpu()
+        val_true = data.y[data.val_mask].cpu()
+        metrics['val_loss'] = F.cross_entropy(out[data.val_mask], data.y_noisy[data.val_mask]).item()
+        metrics['val_acc'] = accuracy_score(val_true, val_pred)
+        metrics['val_f1'] = f1_score(val_true, val_pred, average='micro')
+        
+        return metrics
+
     def train_base_gnn(self, data, model, n_epochs=200):
         print("Training base GNN for GraphCleaner...")
+        start_time = time.time()
         
         optimizer = torch.optim.Adam(model.parameters(), 
                                    lr=self.config.get('lr', 0.001),
@@ -71,27 +113,21 @@ class GraphCleanerDetector:
             with torch.no_grad():
                 out = model(data)
 
-                train_pred = out[data.train_mask].argmax(dim=-1).cpu()
-                train_true = data.y[data.train_mask].cpu()
-                loss_train = F.cross_entropy(out[data.train_mask], data.y_noisy[data.train_mask]).item()
-                train_acc = accuracy_score(train_true, train_pred)
-                train_f1 = f1_score(train_true, train_pred, average='micro')
+                metrics = self.compute_metrics(data, model, out)
+                
+                train_de = self.compute_dirichlet_energy(data, out, data.train_mask.cpu())
+                val_de = self.compute_dirichlet_energy(data, out, data.val_mask.cpu())
 
-                val_pred = out[data.val_mask].argmax(dim=-1).cpu()
-                val_true = data.y[data.val_mask].cpu()
-                val_loss = F.cross_entropy(out[data.val_mask], data.y_noisy[data.val_mask]).item()
-                val_acc = accuracy_score(val_true, val_pred)
-                val_f1 = f1_score(val_true, val_pred, average='micro')
+                print(f"Epoch {epoch:03d} | Train Loss: {metrics['train_loss']:.4f}, Val Loss: {metrics['val_loss']:.4f} | "
+                      f"Train Acc: {metrics['train_acc']:.4f}, Val Acc: {metrics['val_acc']:.4f} | "
+                      f"Train F1: {metrics['train_f1']:.4f}, Val F1: {metrics['val_f1']:.4f} | "
+                      f"Train DE: {train_de:.4f}, Val DE: {val_de:.4f}")
 
-                print(f"Epoch {epoch:03d} | Train Loss: {loss_train:.4f}, Val Loss: {val_loss:.4f} | "
-                    f"Train Acc: {train_acc:.4f}, Val Acc: {val_acc:.4f} | "
-                    f"Train F1: {train_f1:.4f}, Val F1: {val_f1:.4f}")
-
-                if val_loss < best_val_loss:
-                    best_val_loss = val_loss
+                if metrics['val_loss'] < best_val_loss:
+                    best_val_loss = metrics['val_loss']
                     best_model_state = copy.deepcopy(model.state_dict())
                     best_sm_vectors = out.cpu().detach().numpy()
-                    best_f1 = val_f1
+                    best_f1 = metrics['val_f1']
                     patience_counter = 0
                 else:
                     patience_counter += 1
@@ -109,13 +145,22 @@ class GraphCleanerDetector:
         with torch.no_grad():
             out = model(data)
 
+            final_metrics = {}
             test_pred = out[data.test_mask].argmax(dim=-1).cpu()
             test_true = data.y[data.test_mask].cpu()
-            test_loss = F.cross_entropy(out[data.test_mask], data.y_noisy[data.test_mask]).item()
-            test_acc = accuracy_score(test_true, test_pred)
-            test_f1 = f1_score(test_true, test_pred, average='micro')
+            final_metrics['test_loss'] = F.cross_entropy(out[data.test_mask], data.y_noisy[data.test_mask]).item()
+            final_metrics['test_acc'] = accuracy_score(test_true, test_pred)
+            final_metrics['test_f1'] = f1_score(test_true, test_pred, average='micro')
 
-            print(f"Test Loss: {test_loss:.4f} | Test Acc: {test_acc:.4f} | Test F1: {test_f1:.4f}")
+            final_train_de = self.compute_dirichlet_energy(data, out, data.train_mask.cpu())
+            final_val_de = self.compute_dirichlet_energy(data, out, data.val_mask.cpu())
+            final_test_de = self.compute_dirichlet_energy(data, out, data.test_mask.cpu())
+
+        total_time = time.time() - start_time
+        
+        print(f"\nTraining completed in {total_time:.2f}s")
+        print(f"Test Loss: {final_metrics['test_loss']:.4f} | Test Acc: {final_metrics['test_acc']:.4f} | Test F1: {final_metrics['test_f1']:.4f}")
+        print(f"Final Dirichlet Energy - Train: {final_train_de:.4f}, Val: {final_val_de:.4f}, Test: {final_test_de:.4f}")
 
         return np.array(all_sm_vectors), best_sm_vectors, model
     
@@ -139,7 +184,7 @@ class GraphCleanerDetector:
         import random
 
         data = copy.deepcopy(data_orig)
-        train_idx = np.argwhere(data.held_mask == True).flatten()
+        train_idx = np.argwhere(data.held_mask.cpu().numpy() == True).flatten()
         train_y = data.y[data.held_mask].cpu().numpy()
 
         valid_subidx = set(range(len(train_y)))

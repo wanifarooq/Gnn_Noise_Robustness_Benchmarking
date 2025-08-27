@@ -5,6 +5,37 @@ import scipy.sparse as sp
 import numpy as np
 from sklearn.metrics import f1_score
 from copy import deepcopy
+import time
+
+def dirichlet_energy(x, edge_index):
+    row, col = edge_index
+    diff = x[row] - x[col]
+    return (diff ** 2).sum(dim=1).mean()
+
+def compute_dirichlet_energy_for_nodes(predictions, edge_index, node_mask):
+
+    if predictions.dim() > 1 and predictions.size(1) > 1:
+        probs = F.softmax(predictions, dim=1)
+    else:
+        probs = predictions
+
+    device = predictions.device
+    node_mask = node_mask.to(device)
+
+    row, col = edge_index
+    
+    mask_edges = node_mask[row] | node_mask[col]
+    
+    if mask_edges.sum() == 0:
+        return 0.0
+    
+    filtered_row = row[mask_edges]
+    filtered_col = col[mask_edges]
+    
+    diff = probs[filtered_row] - probs[filtered_col]
+    energy = (diff ** 2).sum(dim=1).mean()
+    
+    return energy.item()
 
 class InnerProductDecoder(nn.Module):
     def __init__(self, act=lambda x: x):
@@ -48,7 +79,57 @@ class InnerProductTrainer:
         else:
             return config.get('lr', 0.01)
 
+    def compute_metrics_and_de(self, model, data):
+        model.eval()
+        with torch.no_grad():
+            out_train, _ = model(data)
+            pred_train = out_train.argmax(dim=1)
+            
+            metrics = {}
+
+            metrics['train_loss'] = F.nll_loss(out_train[data.train_mask], data.y[data.train_mask]).item()
+            metrics['train_acc'] = pred_train[data.train_mask].eq(data.y[data.train_mask]).sum().item() / data.train_mask.sum().item()
+            metrics['train_f1'] = f1_score(data.y[data.train_mask].cpu(), pred_train[data.train_mask].cpu(), average='micro')
+            
+            metrics['val_loss'] = F.nll_loss(out_train[data.val_mask], data.y[data.val_mask]).item()
+            metrics['val_acc'] = pred_train[data.val_mask].eq(data.y[data.val_mask]).sum().item() / data.val_mask.sum().item()
+            metrics['val_f1'] = f1_score(data.y[data.val_mask].cpu(), pred_train[data.val_mask].cpu(), average='micro')
+            
+            train_de = compute_dirichlet_energy_for_nodes(out_train, data.edge_index, data.train_mask)
+            val_de = compute_dirichlet_energy_for_nodes(out_train, data.edge_index, data.val_mask)
+            
+            return metrics, train_de, val_de
+
+    def compute_final_test_metrics(self, model, data):
+
+        model.eval()
+        with torch.no_grad():
+            out_test, _ = model(data)
+            pred_test = out_test.argmax(dim=1)
+            
+            final_metrics = {}
+            
+            final_metrics['train_loss'] = F.nll_loss(out_test[data.train_mask], data.y[data.train_mask]).item()
+            final_metrics['train_acc'] = pred_test[data.train_mask].eq(data.y[data.train_mask]).sum().item() / data.train_mask.sum().item()
+            final_metrics['train_f1'] = f1_score(data.y[data.train_mask].cpu(), pred_test[data.train_mask].cpu(), average='micro')
+            
+            final_metrics['val_loss'] = F.nll_loss(out_test[data.val_mask], data.y[data.val_mask]).item()
+            final_metrics['val_acc'] = pred_test[data.val_mask].eq(data.y[data.val_mask]).sum().item() / data.val_mask.sum().item()
+            final_metrics['val_f1'] = f1_score(data.y[data.val_mask].cpu(), pred_test[data.val_mask].cpu(), average='micro')
+            
+            final_metrics['test_loss'] = F.nll_loss(out_test[data.test_mask], data.y[data.test_mask]).item()
+            final_metrics['test_acc'] = pred_test[data.test_mask].eq(data.y[data.test_mask]).sum().item() / data.test_mask.sum().item()
+            final_metrics['test_f1'] = f1_score(data.y[data.test_mask].cpu(), pred_test[data.test_mask].cpu(), average='micro')
+            
+            final_train_de = compute_dirichlet_energy_for_nodes(out_test, data.edge_index, data.train_mask)
+            final_val_de = compute_dirichlet_energy_for_nodes(out_test, data.edge_index, data.val_mask)
+            final_test_de = compute_dirichlet_energy_for_nodes(out_test, data.edge_index, data.test_mask)
+            
+            return final_metrics, final_train_de, final_val_de, final_test_de
+
     def fit(self, model, data, config=None, get_model_func=None):
+        start_time = time.time()
+        
         data = data.to(self.device)
         model = model.to(self.device)
         num_classes = data.y.max().item() + 1
@@ -107,6 +188,7 @@ class InnerProductTrainer:
         best_val_loss = float('inf')
         best_epoch = 0
         patience_counter = 0
+        best_model_state = None
 
         for epoch in range(self.epochs):
             model.train()
@@ -144,25 +226,15 @@ class InnerProductTrainer:
             total_loss.backward()
             optimizer.step()
 
-            model.eval()
-            with torch.no_grad():
-                out_train, _ = model(data)
-                pred_train = out_train.argmax(dim=1)
+            metrics, train_de, val_de = self.compute_metrics_and_de(model, data)
 
-                train_acc = pred_train[data.train_mask].eq(data.y[data.train_mask]).sum().item() / data.train_mask.sum().item()
-                train_f1 = f1_score(data.y[data.train_mask].cpu(), pred_train[data.train_mask].cpu(), average='micro')
+            print(f"Epoch {epoch:03d} | Train Loss: {metrics['train_loss']:.4f}, Val Loss: {metrics['val_loss']:.4f} | "
+                  f"Train Acc: {metrics['train_acc']:.4f}, Val Acc: {metrics['val_acc']:.4f} | "
+                  f"Train F1: {metrics['train_f1']:.4f}, Val F1: {metrics['val_f1']:.4f} | "
+                  f"Train DE: {train_de:.4f}, Val DE: {val_de:.4f}")
 
-                pred_val = pred_train[data.val_mask]
-                val_acc = pred_val.eq(data.y[data.val_mask]).sum().item() / data.val_mask.sum().item()
-                val_f1 = f1_score(data.y[data.val_mask].cpu(), pred_val.cpu(), average='micro')
-                val_loss = F.nll_loss(out_train[data.val_mask], data.y[data.val_mask])
-
-            print(f"Epoch {epoch:03d} | Train Loss: {loss_train:.4f}, Val Loss: {val_loss:.4f} | "
-                f"Train Acc: {train_acc:.4f}, Val Acc: {val_acc:.4f} | "
-                f"Train F1: {train_f1:.4f}, Val F1: {val_f1:.4f}")
-
-            if val_loss < best_val_loss - self.delta:
-                best_val_loss = val_loss
+            if metrics['val_loss'] < best_val_loss - self.delta:
+                best_val_loss = metrics['val_loss']
                 best_epoch = epoch
                 patience_counter = 0
                 best_model_state = deepcopy(model.state_dict())
@@ -171,17 +243,17 @@ class InnerProductTrainer:
 
             if patience_counter >= self.patience:
                 print(f"Early stopping at epoch {epoch}, best epoch {best_epoch}")
-                model.load_state_dict(best_model_state)
                 break
 
-        model.eval()
-        with torch.no_grad():
-            out_test, _ = model(data)
-            pred_test = out_test.argmax(dim=1)
-            test_loss = F.nll_loss(out_test[data.test_mask], data.y[data.test_mask]).item()
-            test_acc = pred_test[data.test_mask].eq(data.y[data.test_mask]).sum().item() / data.test_mask.sum().item()
-            test_f1 = f1_score(data.y[data.test_mask].cpu(), pred_test[data.test_mask].cpu(), average='micro')
+        if best_model_state is not None:
+            model.load_state_dict(best_model_state)
 
-        print(f"Test Loss: {test_loss:.4f} | Test Acc: {test_acc:.4f} | Test F1: {test_f1:.4f}")
-        return test_acc
+        final_metrics, final_train_de, final_val_de, final_test_de = self.compute_final_test_metrics(model, data)
+        
+        total_time = time.time() - start_time
+        
+        print(f"\nTraining completed in {total_time:.2f}s")
+        print(f"Test Loss: {final_metrics['test_loss']:.4f} | Test Acc: {final_metrics['test_acc']:.4f} | Test F1: {final_metrics['test_f1']:.4f}")
+        print(f"Final Dirichlet Energy - Train: {final_train_de:.4f}, Val: {final_val_de:.4f}, Test: {final_test_de:.4f}")
 
+        return final_metrics['test_acc']

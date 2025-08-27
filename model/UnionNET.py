@@ -4,6 +4,11 @@ import torch
 import torch.nn.functional as F
 from sklearn.metrics import accuracy_score, f1_score
 
+def dirichlet_energy(x, edge_index):
+    row, col = edge_index
+    diff = x[row] - x[col]
+    return (diff ** 2).sum(dim=1).mean()
+
 def normalize_features(features):
     row_sum = torch.sum(features, dim=1, keepdim=True)
     row_sum = torch.where(row_sum == 0, torch.ones_like(row_sum), row_sum)
@@ -184,11 +189,23 @@ class UnionNET:
             train_acc = accuracy_score(train_labels, train_preds)
             train_f1 = f1_score(train_labels, train_preds, average='macro')
             
+            train_de = dirichlet_energy(output, self.edge_index).item()
+            
             _, val_loss, _ = self._forward('val')
             val_labels = self.noisy_labels[self.val_mask].cpu().numpy()
             val_preds = output[self.val_mask].detach().cpu().numpy().argmax(1)
             val_acc = accuracy_score(val_labels, val_preds)
             val_f1 = f1_score(val_labels, val_preds, average='macro')
+            
+            val_de = dirichlet_energy(output, self.edge_index).item()
+            
+            metrics = {
+                'train_acc': train_acc,
+                'val_acc': val_acc,
+                'train_f1': train_f1,
+                'val_f1': val_f1,
+                'val_loss': val_loss.item()
+            }
             
             if val_loss.item() < self.best_loss:
                 self.best_loss = val_loss.item()
@@ -200,9 +217,10 @@ class UnionNET:
                 self.wait += 1
 
             if debug:
-                print(f"Epoch {epoch:03d} | Train Loss: {loss_train:.4f}, Val Loss: {val_loss:.4f} | "
-                      f"Train Acc: {train_acc:.4f}, Val Acc: {val_acc:.4f} | "
-                      f"Train F1: {train_f1:.4f}, Val F1: {val_f1:.4f}")
+                print(f"Epoch {epoch:03d} | Train Loss: {loss_train:.4f}, Val Loss: {metrics['val_loss']:.4f} | "
+                      f"Train Acc: {metrics['train_acc']:.4f}, Val Acc: {metrics['val_acc']:.4f} | "
+                      f"Train F1: {metrics['train_f1']:.4f}, Val F1: {metrics['val_f1']:.4f} | "
+                      f"Train DE: {train_de:.4f}, Val DE: {val_de:.4f}")
             
             if self.patience and self.wait >= self.patience:
                 if debug:
@@ -215,21 +233,23 @@ class UnionNET:
         self.model.eval()
         with torch.no_grad():
             output = self.model(self.data)
+
             test_labels = self.clean_labels[self.test_mask].cpu().numpy()
             test_preds = output[self.test_mask].cpu().numpy().argmax(1)
             test_acc = accuracy_score(test_labels, test_preds)
             test_f1 = f1_score(test_labels, test_preds, average='macro')
-            
             test_loss = F.cross_entropy(output[self.test_mask], self.clean_labels[self.test_mask])
+            test_de = dirichlet_energy(output, self.edge_index).item()
 
-        self.results['test'] = test_acc
-
+            final_train_de = dirichlet_energy(output, self.edge_index).item()
+            final_val_de = dirichlet_energy(output, self.edge_index).item()
+        
+        total_time = time.time() - start_time
+        
         if debug:
+            print(f"\nTraining completed in {total_time:.2f}s")
             print(f"Test Loss: {test_loss:.4f} | Test Acc: {test_acc:.4f} | Test F1: {test_f1:.4f}")
-            total_time = time.time() - start_time
-            print(f"\nUnionNET Training completed in {total_time:.2f}s")
-            print(f"Final Results - Train: {self.results['train']:.4f}, "
-                  f"Val: {self.results['val']:.4f}, Test: {self.results['test']:.4f}")
-
+            print(f"Final Dirichlet Energy - Train: {final_train_de:.4f}, Val: {final_val_de:.4f}, Test: {test_de:.4f}")
+        
+        self.results['test'] = test_acc
         return self.results
-    

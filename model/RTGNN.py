@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+import time
 from copy import deepcopy
 from torch_geometric.nn import GCNConv
 from torch_geometric.utils import from_scipy_sparse_matrix, to_scipy_sparse_matrix, negative_sampling
@@ -12,6 +13,33 @@ import scipy.sparse as sp
 from sklearn.metrics import f1_score
 
 from model.GNNs import GCN, GIN, GAT, GAT2
+
+def dirichlet_energy(x, edge_index):
+    row, col = edge_index
+    diff = x[row] - x[col]
+    return (diff ** 2).sum(dim=1).mean()
+
+def compute_dirichlet_energy_for_nodes(predictions, edge_index, node_mask):
+
+    if predictions.dim() > 1 and predictions.size(1) > 1:
+        probs = F.softmax(predictions, dim=1)
+    else:
+        probs = predictions
+    
+    row, col = edge_index
+    
+    mask_edges = node_mask[row] | node_mask[col]
+    
+    if mask_edges.sum() == 0:
+        return 0.0
+    
+    filtered_row = row[mask_edges]
+    filtered_col = col[mask_edges]
+    
+    diff = probs[filtered_row] - probs[filtered_col]
+    energy = (diff ** 2).sum(dim=1).mean()
+    
+    return energy.item()
 
 class DualGNN(nn.Module):
     def __init__(self, gnn_type: str, nfeat: int, nhid: int, nclass: int,
@@ -239,9 +267,62 @@ class RTGNN(nn.Module):
     def forward(self, x, edge_index, edge_weight=None):
         return self.predictor(x, edge_index, edge_weight)
     
+    def compute_metrics_and_de(self, features, final_edges, final_weights, labels, 
+                              idx_train, idx_val, idx_test=None):
+        self.eval()
+        with torch.no_grad():
+            output1, output2 = self.predictor(features, final_edges, final_weights)
+            
+            output_avg = (output1 + output2) / 2
+            
+            metrics = {}
+            
+            loss_train1 = F.cross_entropy(output1[idx_train], labels[idx_train])
+            loss_train2 = F.cross_entropy(output2[idx_train], labels[idx_train])
+            metrics['train_loss'] = (loss_train1 + loss_train2) / 2
+            
+            train_pred = output_avg[idx_train].argmax(dim=1)
+            metrics['train_acc'] = (train_pred == labels[idx_train]).float().mean().item()
+            metrics['train_f1'] = f1_score(labels[idx_train].cpu(), train_pred.cpu(), average='macro')
+            
+            val_ce_loss1 = F.cross_entropy(output1[idx_val], labels[idx_val])
+            val_ce_loss2 = F.cross_entropy(output2[idx_val], labels[idx_val])
+            metrics['val_loss'] = (val_ce_loss1 + val_ce_loss2) / 2
+            
+            val_pred = output_avg[idx_val].argmax(dim=1)
+            metrics['val_acc'] = (val_pred == labels[idx_val]).float().mean().item()
+            metrics['val_f1'] = f1_score(labels[idx_val].cpu(), val_pred.cpu(), average='macro')
+            
+            train_mask = torch.zeros(features.size(0), dtype=torch.bool, device=self.device)
+            train_mask[idx_train] = True
+            val_mask = torch.zeros(features.size(0), dtype=torch.bool, device=self.device)
+            val_mask[idx_val] = True
+            
+            train_de = compute_dirichlet_energy_for_nodes(output_avg, final_edges, train_mask)
+            val_de = compute_dirichlet_energy_for_nodes(output_avg, final_edges, val_mask)
+
+            if idx_test is not None:
+                test_loss1 = F.cross_entropy(output1[idx_test], labels[idx_test])
+                test_loss2 = F.cross_entropy(output2[idx_test], labels[idx_test])
+                metrics['test_loss'] = (test_loss1 + test_loss2) / 2
+                
+                test_pred = output_avg[idx_test].argmax(dim=1)
+                metrics['test_acc'] = (test_pred == labels[idx_test]).float().mean().item()
+                metrics['test_f1'] = f1_score(labels[idx_test].cpu(), test_pred.cpu(), average='macro')
+                
+                test_mask = torch.zeros(features.size(0), dtype=torch.bool, device=self.device)
+                test_mask[idx_test] = True
+                test_de = compute_dirichlet_energy_for_nodes(output_avg, final_edges, test_mask)
+                
+                return metrics, train_de, val_de, test_de
+            
+            return metrics, train_de, val_de
+
     def fit(self, features, adj, labels, idx_train, idx_val, idx_test=None, 
             noise_idx=None, clean_idx=None):
 
+        start_time = time.time()
+        
         edge_index, _ = from_scipy_sparse_matrix(adj)
         edge_index = edge_index.to(self.device)
         features = features.to(self.device)
@@ -254,7 +335,7 @@ class RTGNN(nn.Module):
 
         patience = getattr(self.args, 'patience', 8)
         counter = 0
-        best_val_acc = 0
+        best_val_f1 = 0
         
         print(f"Starting RTGNN training with {self.gnn_type.upper()}...")
         
@@ -298,46 +379,28 @@ class RTGNN(nn.Module):
                           pseudo_loss +
                           self.args.co_lambda * neighbor_kl_loss)
 
-            
             total_loss.backward()
             optimizer.step()
 
-            self.eval()
-            with torch.no_grad():
+            metrics, train_de, val_de = self.compute_metrics_and_de(
+                features, final_edges, final_weights, labels, idx_train, idx_val
+            )
 
-                output1_train, output2_train = self.predictor(features, final_edges, final_weights)
-                loss_train1 = F.cross_entropy(output1_train[idx_train], labels[idx_train])
-                loss_train2 = F.cross_entropy(output2_train[idx_train], labels[idx_train])
-                loss_train = (loss_train1 + loss_train2) / 2
-
-                train_pred = (output1_train[idx_train] + output2_train[idx_train]) / 2
-                train_acc = (train_pred.argmax(dim=1) == labels[idx_train]).float().mean().item()
-                train_f1 = f1_score(labels[idx_train].cpu(), train_pred.argmax(dim=1).cpu(), average='macro')
-
-                output1_val, output2_val = self.predictor(features, final_edges, final_weights)
-
-                val_ce_loss1 = F.cross_entropy(output1_val[idx_val], labels[idx_val])
-                val_ce_loss2 = F.cross_entropy(output2_val[idx_val], labels[idx_val])
-                val_ce_loss = (val_ce_loss1 + val_ce_loss2) / 2
-
-                val_pred = (output1_val[idx_val] + output2_val[idx_val]) / 2
-                val_acc = (val_pred.argmax(dim=1) == labels[idx_val]).float().mean().item()
-                val_f1 = f1_score(labels[idx_val].cpu(), val_pred.argmax(dim=1).cpu(), average='macro')
-
-            print(f"Epoch {epoch:03d} | Train Loss: {loss_train:.4f}, Val CE Loss: {val_ce_loss:.4f} | "
-                  f"Train Acc: {train_acc:.4f}, Val Acc: {val_acc:.4f} | "
-                  f"Train F1: {train_f1:.4f}, Val F1: {val_f1:.4f}")
+            print(f"Epoch {epoch:03d} | Train Loss: {metrics['train_loss']:.4f}, Val Loss: {metrics['val_loss']:.4f} | "
+                  f"Train Acc: {metrics['train_acc']:.4f}, Val Acc: {metrics['val_acc']:.4f} | "
+                  f"Train F1: {metrics['train_f1']:.4f}, Val F1: {metrics['val_f1']:.4f} | "
+                  f"Train DE: {train_de:.4f}, Val DE: {val_de:.4f}")
 
             if epoch == 0:
-                best_val_f1 = val_f1
+                best_val_f1 = metrics['val_f1']
                 counter = 0
                 self.best_state = {
                     'model': deepcopy(self.state_dict()),
                     'edges': final_edges.clone(),
                     'weights': final_weights.clone()
                 }
-            elif val_f1 > best_val_f1:
-                best_val_f1 = val_f1
+            elif metrics['val_f1'] > best_val_f1:
+                best_val_f1 = metrics['val_f1']
                 counter = 0
                 self.best_state = {
                     'model': deepcopy(self.state_dict()),
@@ -352,7 +415,28 @@ class RTGNN(nn.Module):
 
         if self.best_state is not None:
             self.load_state_dict(self.best_state['model'])
-            print(f"Training completed! Best validation F1: {best_val_f1:.4f}")
+            
+        total_time = time.time() - start_time
+        
+        if idx_test is not None:
+            final_metrics, final_train_de, final_val_de, final_test_de = self.compute_metrics_and_de(
+                features, self.best_state['edges'], self.best_state['weights'], 
+                labels, idx_train, idx_val, idx_test
+            )
+            
+            print(f"\nTraining completed in {total_time:.2f}s")
+            print(f"Test Loss: {final_metrics['test_loss']:.4f} | Test Acc: {final_metrics['test_acc']:.4f} | Test F1: {final_metrics['test_f1']:.4f}")
+            print(f"Final Dirichlet Energy - Train: {final_train_de:.4f}, Val: {final_val_de:.4f}, Test: {final_test_de:.4f}")
+        else:
+            final_metrics, final_train_de, final_val_de = self.compute_metrics_and_de(
+                features, self.best_state['edges'], self.best_state['weights'], 
+                labels, idx_train, idx_val
+            )
+            
+            print(f"\nTraining completed in {total_time:.2f}s")
+            print(f"Final Dirichlet Energy - Train: {final_train_de:.4f}, Val: {final_val_de:.4f}")
+            
+        print(f"Training completed! Best validation F1: {best_val_f1:.4f}")
 
     def test(self, features, labels, idx_test):
         if self.best_state is None:
