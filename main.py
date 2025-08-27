@@ -544,7 +544,7 @@ def run_experiment(config, run_id=1):
             'corafull': config['training'].get('erase_params', {}).get('corafull', False),
             'alpha': config['training'].get('erase_params', {}).get('alpha', 0.6),
             'beta': config['training'].get('erase_params', {}).get('beta', 0.6),
-            'T': config['training'].get('erase_params', {}).get('T', 5),
+            'T': config['training'].get('erase_params', {}).get('T', 3),
             'noise_rate': config.get('noise', {}).get('rate', 0.3),
         }
         
