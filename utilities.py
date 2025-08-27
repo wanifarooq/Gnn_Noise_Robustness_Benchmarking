@@ -9,7 +9,7 @@ from scipy import stats
 from numpy.testing import assert_array_almost_equal
 
 from model.GNNs import GCN, GIN, GAT, GAT2
-from loss.GNNs_loss import train_with_standard_loss, train_with_dirichlet, train_with_ncod
+from loss.GNNs_loss import train_with_standard_loss, train_with_dirichlet, train_with_ncod, train_with_positive_eigenvalues, train_with_gcod
 
 # Noises
 def simple_uniform_noise(labels, n_classes, noise_rate, random_seed):
@@ -289,6 +289,8 @@ def train(model, data, noisy_indices, device, config):
         "standard": train_with_standard_loss,
         "dirichlet": train_with_dirichlet,
         "ncod": train_with_ncod,
+        "positive_eigenvalues": train_with_positive_eigenvalues,
+        "gcod": train_with_gcod,
     }
 
     if method not in method_registry:
@@ -299,10 +301,22 @@ def train(model, data, noisy_indices, device, config):
                                 total_epochs=config['training']['total_epochs'])
     elif method == "dirichlet":
         return method_registry[method](model, data, noisy_indices, device,
-                                lambda_dir=config['training'].get('lambda_dir', 0.1),
-                                epochs=config['training']['total_epochs'])
+                                      epochs=config['training']['total_epochs'],
+                                      config=config)
     elif method == "ncod":
         return method_registry[method](model, data, noisy_indices, device,
-                                total_epochs=config['training']['total_epochs'],
-                                lambda_dir=config['training'].get('lambda_dir', 0.1),
-                                num_classes=config['dataset']['num_classes'])
+                                      total_epochs=config['training']['total_epochs'],
+                                      lambda_dir=config['training'].get('lambda_dir', 0.1))
+
+    elif method == "positive_eigenvalues":
+        return method_registry[method](model, data, noisy_indices, device,
+                                      epochs=config['training']['total_epochs'],
+                                      lambda_dir=config['training'].get('lambda_dir', 0.1))
+
+    elif method == "gcod":
+        return method_registry[method](model, data, noisy_indices, device,
+                                      epochs=config['training']['total_epochs'],
+                                      lambda_dir=config['training'].get('lambda_dir', 0.1))
+
+    else:
+        raise ValueError("Error in utilities file: train function")

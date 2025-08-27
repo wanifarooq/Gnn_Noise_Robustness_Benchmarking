@@ -373,3 +373,296 @@ def train_with_ncod(model, data, noisy_indices, device, total_epochs=200, lambda
 
     print(f"Test Loss: {test_loss:.4f} | Test Acc: {test_acc:.4f} | Test F1: {test_f1:.4f}")
     return test_acc
+
+def enforce_positive_eigenvalues(weight_matrix):
+
+    with torch.no_grad():
+
+        eigenvalues, eigenvectors = torch.linalg.eigh(weight_matrix)
+        
+        positive_mask = eigenvalues > 0
+        if positive_mask.sum() == 0:
+            return torch.eye(weight_matrix.size(0), device=weight_matrix.device) * 0.01
+        
+        positive_eigenvalues = eigenvalues[positive_mask]
+        positive_eigenvectors = eigenvectors[:, positive_mask]
+        
+        reconstructed = positive_eigenvectors @ torch.diag(positive_eigenvalues) @ positive_eigenvectors.T
+        return reconstructed
+
+def train_with_positive_eigenvalues(model, data, noisy_indices=None, device='cuda', epochs=200, 
+                                  patience=20, lambda_dir=0.1, config=None):
+
+    model.to(device)
+    data = data.to(device)
+    
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.01, weight_decay=5e-4)
+    
+    best_val_loss = float('inf')
+    best_model_state = None
+    epochs_no_improve = 0
+    
+    def apply_eigenvalue_constraint():
+        with torch.no_grad():
+            for name, module in model.named_modules():
+                if hasattr(module, 'weight') and 'proj' in name.lower():
+                    if module.weight.dim() == 2 and module.weight.size(0) == module.weight.size(1):
+                        module.weight.data = enforce_positive_eigenvalues(module.weight.data)
+    
+    for epoch in range(1, epochs + 1):
+        model.train()
+        optimizer.zero_grad()
+        
+        out = model(data)
+        embeddings = out
+        
+        train_idx = data.train_mask.nonzero(as_tuple=True)[0]
+        loss_ce = F.cross_entropy(out[train_idx], data.y[train_idx])
+
+        loss_dir = dirichlet_energy(embeddings, data.edge_index)
+        
+        loss_train = loss_ce + lambda_dir * loss_dir
+        
+        loss_train.backward()
+        optimizer.step()
+
+        apply_eigenvalue_constraint()
+
+        pred_train = out[train_idx].argmax(dim=1)
+        train_acc = (pred_train == data.y[train_idx]).sum().item() / len(train_idx)
+        train_f1 = f1_score(data.y[train_idx].cpu(), pred_train.cpu(), average='macro')
+
+        model.eval()
+        with torch.no_grad():
+            out_val = model(data)
+            embeddings_val = out_val
+            val_idx = data.val_mask.nonzero(as_tuple=True)[0]
+            
+            val_loss_ce = F.cross_entropy(out_val[val_idx], data.y[val_idx])
+            val_loss_dir = dirichlet_energy(embeddings_val, data.edge_index)
+            val_loss = val_loss_ce + lambda_dir * val_loss_dir
+            
+            pred_val = out_val[val_idx].argmax(dim=1)
+            val_acc = (pred_val == data.y[val_idx]).sum().item() / len(val_idx)
+            val_f1 = f1_score(data.y[val_idx].cpu(), pred_val.cpu(), average='macro')
+        
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_model_state = deepcopy(model.state_dict())
+            epochs_no_improve = 0
+        else:
+            epochs_no_improve += 1
+            
+        if epochs_no_improve >= patience:
+            print(f"Early stopping at epoch {epoch}")
+            model.load_state_dict(best_model_state)
+            break
+        
+        print(f"Epoch {epoch:03d} | Train Loss: {loss_train:.4f}, Val Loss: {val_loss:.4f} | "
+              f"Train Acc: {train_acc:.4f}, Val Acc: {val_acc:.4f} | "
+              f"Train F1: {train_f1:.4f}, Val F1: {val_f1:.4f} | "
+              f"Dirichlet Energy - Train: {loss_dir:.4f}, Val: {val_loss_dir:.4f}")
+    
+    model.eval()
+    with torch.no_grad():
+        out_test = model(data)
+        embeddings_test = out_test
+        test_idx = data.test_mask.nonzero(as_tuple=True)[0]
+        
+        test_loss_ce = F.cross_entropy(out_test[test_idx], data.y[test_idx])
+        test_loss_dir = dirichlet_energy(embeddings_test, data.edge_index)
+        test_loss = test_loss_ce + lambda_dir * test_loss_dir
+        
+        pred_test = out_test[test_idx].argmax(dim=1)
+        test_acc = (pred_test == data.y[test_idx]).sum().item() / len(test_idx)
+        test_f1 = f1_score(data.y[test_idx].cpu(), pred_test.cpu(), average='macro')
+    
+    print(f"Test Loss: {test_loss:.4f} | Test Acc: {test_acc:.4f} | Test F1: {test_f1:.4f} | "
+          f"Dirichlet Energy: {test_loss_dir:.4f}")
+    return test_acc
+
+class GCODLoss(nn.Module):
+
+    def __init__(self, num_classes, device, num_samples, encoder_features=64):
+        super().__init__()
+        self.num_classes = num_classes
+        self.device = device
+        self.num_samples = num_samples
+        self.encoder_features = encoder_features
+        
+        self.u = nn.Parameter(torch.zeros(num_samples, dtype=torch.float32))
+        
+        self.class_centroids = nn.Parameter(torch.randn(num_classes, encoder_features))
+        
+    def compute_soft_labels(self, embeddings, labels):
+
+        embeddings_norm = F.normalize(embeddings, p=2, dim=1)
+        centroids_norm = F.normalize(self.class_centroids, p=2, dim=1)
+        
+        similarities = torch.mm(embeddings_norm, centroids_norm.t())
+        soft_labels = F.softmax(similarities, dim=1)
+        
+        return soft_labels
+    
+    def forward(self, batch_indices, predictions, embeddings, labels, train_acc):
+
+        batch_size = predictions.size(0)
+        u_batch = self.u[batch_indices]
+        
+        if labels.dim() == 1:
+            labels_onehot = F.one_hot(labels, num_classes=self.num_classes).float()
+        else:
+            labels_onehot = labels
+        
+        soft_labels = self.compute_soft_labels(embeddings, labels)
+
+        u_diag = torch.diag(u_batch)
+        modified_predictions = predictions + train_acc * torch.mm(u_diag, labels_onehot)
+        modified_predictions = torch.clamp(modified_predictions, min=1e-7, max=1-1e-7)
+        
+        L1 = F.cross_entropy(modified_predictions, soft_labels)
+        
+        pred_onehot = F.one_hot(predictions.argmax(dim=1), num_classes=self.num_classes).float()
+        regularized_pred = pred_onehot + torch.mm(u_diag, labels_onehot)
+        L2 = F.mse_loss(regularized_pred, labels_onehot, reduction='mean')
+        
+        prediction_alignment = torch.diag(torch.mm(predictions, labels_onehot.t()))
+        L_term = F.logsigmoid(prediction_alignment)
+        
+        u_term = torch.sigmoid(-torch.log(u_batch + 1e-8))
+        
+        L3 = (1 - train_acc) * F.kl_div(
+            F.log_softmax(L_term, dim=0), 
+            F.softmax(u_term, dim=0), 
+            reduction='batchmean'
+        )
+        
+        total_loss = L1 + L2 + L3
+        
+        return total_loss, L1, L2, L3
+
+def train_with_gcod(model, data, noisy_indices=None, device='cuda', epochs=500, 
+                   patience=100, lambda_dir=0.1, config=None):
+
+    model.to(device)
+    data = data.to(device)
+    
+    num_classes = int(data.y.max().item()) + 1
+    
+    model_optimizer = torch.optim.Adam(model.parameters(), lr=0.01, weight_decay=5e-4)
+    
+    gcod_loss_fn = GCODLoss(
+        num_classes=num_classes,
+        device=device,
+        num_samples=data.num_nodes,
+        encoder_features=num_classes
+    ).to(device)
+    
+    u_optimizer = torch.optim.SGD([gcod_loss_fn.u], lr=0.001)
+    
+    best_val_loss = float('inf')
+    best_model_state = None
+    epochs_no_improve = 0
+    
+    for epoch in range(1, epochs + 1):
+        model.train()
+        gcod_loss_fn.train()
+        
+        out = model(data)
+        embeddings = out
+        
+        train_idx = data.train_mask.nonzero(as_tuple=True)[0]
+        
+        with torch.no_grad():
+            pred_train = out[train_idx].argmax(dim=1)
+            train_acc = (pred_train == data.y[train_idx]).sum().item() / len(train_idx)
+        
+        gcod_total_loss, L1, L2, L3 = gcod_loss_fn(
+            batch_indices=train_idx,
+            predictions=out[train_idx],
+            embeddings=embeddings[train_idx],
+            labels=data.y[train_idx],
+            train_acc=train_acc
+        )
+        
+        loss_dir = dirichlet_energy(embeddings, data.edge_index)
+        
+        loss_train = gcod_total_loss + lambda_dir * loss_dir
+        
+        model_optimizer.zero_grad()
+        (L1 + L3).backward(retain_graph=True)
+        model_optimizer.step()
+        
+        u_optimizer.zero_grad()
+        L2.backward()
+        u_optimizer.step()
+        
+        train_f1 = f1_score(data.y[train_idx].cpu(), pred_train.cpu(), average='macro')
+        
+        model.eval()
+        gcod_loss_fn.eval()
+        with torch.no_grad():
+            out_val = model(data)
+            embeddings_val = out_val
+            val_idx = data.val_mask.nonzero(as_tuple=True)[0]
+            
+            val_gcod_loss, val_L1, val_L2, val_L3 = gcod_loss_fn(
+                batch_indices=val_idx,
+                predictions=out_val[val_idx],
+                embeddings=embeddings_val[val_idx],
+                labels=data.y[val_idx],
+                train_acc=train_acc
+            )
+            
+            val_loss_dir = dirichlet_energy(embeddings_val, data.edge_index)
+            val_loss = val_gcod_loss + lambda_dir * val_loss_dir
+            
+            pred_val = out_val[val_idx].argmax(dim=1)
+            val_acc = (pred_val == data.y[val_idx]).sum().item() / len(val_idx)
+            val_f1 = f1_score(data.y[val_idx].cpu(), pred_val.cpu(), average='macro')
+        
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_model_state = deepcopy(model.state_dict())
+            epochs_no_improve = 0
+        else:
+            epochs_no_improve += 1
+            
+        if epochs_no_improve >= patience:
+            print(f"Early stopping at epoch {epoch}")
+            model.load_state_dict(best_model_state)
+            break
+        
+        print(f"Epoch {epoch:03d} | Train Loss: {loss_train:.4f}, Val Loss: {val_loss:.4f} | "
+              f"Train Acc: {train_acc:.4f}, Val Acc: {val_acc:.4f} | "
+              f"Train F1: {train_f1:.4f}, Val F1: {val_f1:.4f} | "
+              f"GCOD Components - L1: {L1:.4f}, L2: {L2:.4f}, L3: {L3:.4f} | "
+              f"Dirichlet Energy: {loss_dir:.4f}")
+    
+    model.eval()
+    gcod_loss_fn.eval()
+    with torch.no_grad():
+        out_test = model(data)
+        embeddings_test = out_test
+        test_idx = data.test_mask.nonzero(as_tuple=True)[0]
+        
+        test_gcod_loss, test_L1, test_L2, test_L3 = gcod_loss_fn(
+            batch_indices=test_idx,
+            predictions=out_test[test_idx],
+            embeddings=embeddings_test[test_idx],
+            labels=data.y[test_idx],
+            train_acc=train_acc
+        )
+        
+        test_loss_dir = dirichlet_energy(embeddings_test, data.edge_index)
+        test_loss = test_gcod_loss + lambda_dir * test_loss_dir
+        
+        pred_test = out_test[test_idx].argmax(dim=1)
+        test_acc = (pred_test == data.y[test_idx]).sum().item() / len(test_idx)
+        test_f1 = f1_score(data.y[test_idx].cpu(), pred_test.cpu(), average='macro')
+    
+    print(f"Test Loss: {test_loss:.4f} | Test Acc: {test_acc:.4f} | Test F1: {test_f1:.4f} | "
+          f"GCOD Components - L1: {test_L1:.4f}, L2: {test_L2:.4f}, L3: {test_L3:.4f} | "
+          f"Dirichlet Energy: {test_loss_dir:.4f}")
+    
+    return test_acc
