@@ -7,6 +7,11 @@ from copy import deepcopy
 import time
 from sklearn.metrics import accuracy_score, f1_score
 
+def dirichlet_energy(x, edge_index):
+    row, col = edge_index
+    diff = x[row] - x[col]
+    return (diff ** 2).sum(dim=1).mean()
+
 class ProjectionHead(torch.nn.Module):
     def __init__(self, in_channels, out_channels):
         super().__init__()
@@ -122,11 +127,13 @@ class CRGNNTrainer:
             h = projection_adapter(h)
             output = classifier(h)
             
+            dir_energy = dirichlet_energy(h, edge_index)
+        
         loss = F.cross_entropy(output[mask], labels[mask])
         pred_labels = output[mask].argmax(dim=1)
         acc = accuracy_score(labels[mask].cpu().numpy(), pred_labels.cpu().numpy())
         f1 = f1_score(labels[mask].cpu().numpy(), pred_labels.cpu().numpy(), average='macro')
-        return loss, acc, f1
+        return loss, acc, f1, dir_energy
     
     def fit(self, base_model, data, config, get_model_func):
         print(f"Training CR-GNN with {config['model_name'].upper()} backbone...")
@@ -202,7 +209,7 @@ class CRGNNTrainer:
                 encoder, projection_adapter, projection_head, classifier,
                 data.x, data.edge_index, noisy_labels, train_mask
             )
-            
+
             if loss_train is not None and torch.isfinite(loss_train):
                 loss_train.backward()
                 torch.nn.utils.clip_grad_norm_(
@@ -216,7 +223,16 @@ class CRGNNTrainer:
 
             torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
-            loss_val, acc_val, f1_val = self.evaluate(
+            with torch.no_grad():
+                h_train = encoder(Data(x=data.x, edge_index=data.edge_index))
+                h_train = projection_adapter(h_train)
+                dir_energy_train = dirichlet_energy(h_train, data.edge_index)
+
+                h_val = encoder(Data(x=data.x, edge_index=data.edge_index))
+                h_val = projection_adapter(h_val)
+                dir_energy_val = dirichlet_energy(h_val, data.edge_index)
+
+            loss_val, acc_val, f1_val, _ = self.evaluate(
                 encoder, projection_adapter, classifier,
                 data.x, data.edge_index, noisy_labels, val_mask
             )
@@ -224,7 +240,8 @@ class CRGNNTrainer:
             if self.config['debug']:
                 print(f"Epoch {epoch+1:03d} | Train Loss: {loss_train:.4f}, Val Loss: {loss_val:.4f} | "
                     f"Train Acc: {acc_train:.4f}, Val Acc: {acc_val:.4f} | "
-                    f"Train F1: {f1_train:.4f}, Val F1: {f1_val:.4f}")
+                    f"Train F1: {f1_train:.4f}, Val F1: {f1_val:.4f} | "
+                    f"Dirichlet Energy - Train: {dir_energy_train:.4f}, Val: {dir_energy_val:.4f}")
 
             flag_earlystop = False
             
@@ -253,12 +270,13 @@ class CRGNNTrainer:
             projection_head.load_state_dict(self.best_weights['projection_head'])
             classifier.load_state_dict(self.best_weights['classifier'])
 
-        loss_test, test_acc, test_f1 = self.evaluate(
+        loss_test, test_acc, test_f1, dir_energy_test = self.evaluate(
             encoder, projection_adapter, classifier,
             data.x, data.edge_index, clean_labels, test_mask
         )
 
         if self.config['debug']:
+            print(f"Dirichlet Energy Test: {dir_energy_test:.4f}")
             print('Optimization Finished!')
             print(f'Time(s): {total_time:.4f}')
             print(f"Test Loss: {loss_test:.4f} | Test Acc: {test_acc:.4f} | Test F1: {test_f1:.4f}")

@@ -7,12 +7,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from sklearn.metrics import f1_score
+from copy import deepcopy
 
 def dirichlet_energy(x, edge_index):
     row, col = edge_index
     diff = x[row] - x[col]
     return (diff ** 2).sum(dim=1).mean()
-
 
 def torch_cdf_loss(tensor_a, tensor_b, p=1):
     tensor_a = tensor_a / (torch.sum(tensor_a, dim=-1, keepdim=True) + 1e-14)
@@ -41,7 +41,6 @@ def torch_energy_loss(tensor_a, tensor_b):
 cross_entropy_val = nn.CrossEntropyLoss
 mean = 1e-8
 std = 1e-9
-
 
 class ncodLoss(nn.Module):
     def __init__(self, sample_labels, device, num_examp=50000, num_classes=100, ratio_consistency=0, ratio_balance=0, encoder_features=64, total_epochs=100):
@@ -193,9 +192,12 @@ def train_with_standard_loss(model, data, noisy_indices, device, total_epochs=20
     print(f"Test Loss: {test_loss:.4f} | Test Acc: {test_acc:.4f} | Test F1: {test_f1:.4f}")
     return test_acc
 
-def train_with_dirichlet(model, data, noisy_indices, device, lambda_dir=0.1, epochs=200, patience=20):
+def train_with_dirichlet(model, data, noisy_indices=None, device='cuda', epochs=200, patience=20, config=None):
+    lambda_dir = config.get('lambda_dir', 0.1) if config else 0.1
     model.to(device)
-    optimizer = optim.Adam(model.parameters(), lr=0.01, weight_decay=5e-4)
+    data = data.to(device)
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.01, weight_decay=5e-4)
 
     best_val_loss = float('inf')
     best_model_state = None
@@ -204,31 +206,39 @@ def train_with_dirichlet(model, data, noisy_indices, device, lambda_dir=0.1, epo
     for epoch in range(1, epochs + 1):
         model.train()
         optimizer.zero_grad()
+
         out = model(data)
+        embeddings = out
 
         train_idx = data.train_mask.nonzero(as_tuple=True)[0]
         loss_ce = F.cross_entropy(out[train_idx], data.y[train_idx])
-        loss_dir = dirichlet_energy(out, data.edge_index)
+        loss_dir = dirichlet_energy(embeddings, data.edge_index)
         loss_train = loss_ce + lambda_dir * loss_dir
+
         loss_train.backward()
         optimizer.step()
 
+        pred_train = out[train_idx].argmax(dim=1)
+        train_acc = (pred_train == data.y[train_idx]).sum().item() / len(train_idx)
+        train_f1 = f1_score(data.y[train_idx].cpu(), pred_train.cpu(), average='macro')
+
         model.eval()
         with torch.no_grad():
+            out_val = model(data)
+            embeddings_val = out_val
             val_idx = data.val_mask.nonzero(as_tuple=True)[0]
-            val_loss_ce = F.cross_entropy(out[val_idx], data.y[val_idx])
-            val_loss_dir = dirichlet_energy(out, data.edge_index)
+
+            val_loss_ce = F.cross_entropy(out_val[val_idx], data.y[val_idx])
+            val_loss_dir = dirichlet_energy(embeddings_val, data.edge_index)
             val_loss = val_loss_ce + lambda_dir * val_loss_dir
 
-            pred = out.argmax(dim=1)
-            train_acc = (pred[train_idx] == data.y[train_idx]).sum().item() / len(train_idx)
-            val_acc = (pred[val_idx] == data.y[val_idx]).sum().item() / len(val_idx)
-            train_f1 = f1_score(data.y[train_idx].cpu(), pred[train_idx].cpu(), average='macro')
-            val_f1 = f1_score(data.y[val_idx].cpu(), pred[val_idx].cpu(), average='macro')
+            pred_val = out_val[val_idx].argmax(dim=1)
+            val_acc = (pred_val == data.y[val_idx]).sum().item() / len(val_idx)
+            val_f1 = f1_score(data.y[val_idx].cpu(), pred_val.cpu(), average='macro')
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            best_model_state = model.state_dict()
+            best_model_state = deepcopy(model.state_dict())
             epochs_no_improve = 0
         else:
             epochs_no_improve += 1
@@ -240,19 +250,24 @@ def train_with_dirichlet(model, data, noisy_indices, device, lambda_dir=0.1, epo
 
         print(f"Epoch {epoch:03d} | Train Loss: {loss_train:.4f}, Val Loss: {val_loss:.4f} | "
               f"Train Acc: {train_acc:.4f}, Val Acc: {val_acc:.4f} | "
-              f"Train F1: {train_f1:.4f}, Val F1: {val_f1:.4f}")
+              f"Train F1: {train_f1:.4f}, Val F1: {val_f1:.4f} | "
+              f"Dirichlet Energy - Train: {loss_dir:.4f}, Val: {val_loss_dir:.4f}")
 
     model.eval()
     with torch.no_grad():
+        out_test = model(data)
+        embeddings_test = out_test
         test_idx = data.test_mask.nonzero(as_tuple=True)[0]
-        test_loss_ce = F.cross_entropy(out[test_idx], data.y[test_idx])
-        test_loss_dir = dirichlet_energy(out, data.edge_index)
-        test_loss = test_loss_ce + lambda_dir * test_loss_dir
-        pred = out.argmax(dim=1)
-        test_acc = (pred[test_idx] == data.y[test_idx]).sum().item() / len(test_idx)
-        test_f1 = f1_score(data.y[test_idx].cpu(), pred[test_idx].cpu(), average='macro')
 
-    print(f"Test Loss: {test_loss:.4f} | Test Acc: {test_acc:.4f} | Test F1: {test_f1:.4f}")
+        test_loss_ce = F.cross_entropy(out_test[test_idx], data.y[test_idx])
+        test_loss_dir = dirichlet_energy(embeddings_test, data.edge_index)
+        test_loss = test_loss_ce + lambda_dir * test_loss_dir
+
+        pred_test = out_test[test_idx].argmax(dim=1)
+        test_acc = (pred_test == data.y[test_idx]).sum().item() / len(test_idx)
+        test_f1 = f1_score(data.y[test_idx].cpu(), pred_test.cpu(), average='macro')
+
+    print(f"Test Loss: {test_loss:.4f} | Test Acc: {test_acc:.4f} | Test F1: {test_f1:.4f} | Dirichlet Energy: {test_loss_dir:.4f}")
     return test_acc
 
 def train_with_ncod(model, data, noisy_indices, device, total_epochs=200, lambda_dir=0.1, num_classes=None, patience=20):
