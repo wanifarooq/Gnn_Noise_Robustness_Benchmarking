@@ -561,6 +561,9 @@ def run_experiment(config, run_id=1):
             'dropout': config.get('dropout', 0.5),
             'lr': config.get('lr', 0.01),
             'weight_decay': config.get('weight_decay', 5e-4),
+            'P0': config.get('P0', 0.5),
+            'K': config.get('K', 2),
+            'D2': config.get('D2', 16),
             'attention': config.get('attention', True),
             'device': device
         }
