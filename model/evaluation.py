@@ -10,42 +10,50 @@ class OversmoothingMetrics:
     def __init__(self, device='cpu'):
         self.device = device
         
-    def compute_all_metrics(self, X, edge_index, edge_weight=None, batch_size=None):
-        
+    def compute_all_metrics(self, X, edge_index, edge_weight=None, batch_size=None, graphs_in_class=None):
+
         metrics = {}
         
         X_np = X.detach().cpu().numpy()
-        
-        metrics['EDir'] = self._compute_edir_original(X, edge_index, edge_weight)
-        
-        metrics['NumRank'] = self._compute_numerical_rank(X_np)
-        
-        metrics['Erank'] = self._compute_effective_rank(X_np)
- 
-        metrics['EDir_traditional'] = self._compute_dirichlet_energy_traditional(X, edge_index, edge_weight)
-        
-        metrics['EProj'] = self._compute_projection_energy(X, edge_index, edge_weight)
 
+        metrics['EDir'] = self._compute_edir_average(graphs_in_class)
+        metrics['NumRank'] = self._compute_numerical_rank(X_np)
+        metrics['Erank'] = self._compute_effective_rank(X_np)
+        metrics['EDir_traditional'] = self._compute_dirichlet_energy_traditional(X, edge_index, edge_weight)
+        metrics['EProj'] = self._compute_projection_energy(X, edge_index, edge_weight)
         metrics['MAD'] = self._compute_mad(X, edge_index)
         
         return metrics
     
-    def _compute_edir_original(self, X, edge_index, edge_weight=None):
-        num_edges = edge_index.size(1)
-        total_energy = 0.0
+    def _compute_edir_average(self, graphs_in_class):
+
+        if not graphs_in_class:
+            return 0.0
         
-        for i in range(num_edges):
-            u, v = edge_index[0, i], edge_index[1, i]
-
-            gradient = X[u] - X[v]
-            energy = torch.norm(gradient, p=2)**2
+        total_energy = 0.0
+        num_graphs = len(graphs_in_class)
+        
+        for graph_data in graphs_in_class:
+            X = graph_data['X']
+            edge_index = graph_data['edge_index']
+            edge_weight = graph_data.get('edge_weight', None)
             
-            if edge_weight is not None:
-                energy *= edge_weight[i]
-                
-            total_energy += energy
-
-        return (total_energy / (2 * num_edges)).item()
+            num_edges = edge_index.size(1)
+            if num_edges == 0:
+                continue
+            
+            energy = 0.0
+            for i in range(num_edges):
+                u, v = edge_index[0, i], edge_index[1, i]
+                grad = X[u] - X[v]
+                e = torch.norm(grad, p=2)**2
+                if edge_weight is not None:
+                    e *= edge_weight[i]
+                energy += e
+            
+            total_energy += energy.item()
+        
+        return total_energy / (2 * num_graphs)
     
     def _compute_numerical_rank(self, X):
 
@@ -198,4 +206,4 @@ class OversmoothingMetrics:
         print(f"Traditional Dirichlet energy: {metrics['EDir_traditional']:.6f}")
         print(f"EProj: {metrics['EProj']:.6f}")
         print(f"MAD: {metrics['MAD']:.6f}")
-        print("=" * 35)
+        print("-"*50)

@@ -45,7 +45,7 @@ def run_experiment(config, run_id=1):
         noise_rate=config['noise']['rate'],
         random_seed=config['noise'].get('seed', 42) + run_id * 10,
         idx_train=train_indices,
-        debug=False
+        debug=True
     )
     
     global_noisy_indices = train_indices[relative_noisy_indices]
@@ -94,7 +94,7 @@ def run_experiment(config, run_id=1):
                 self.p_u = nrgnn_config.get('p_u', 0.7)
                 self.t_small = nrgnn_config.get('t_small', 0.1)
                 self.n_n = nrgnn_config.get('n_n', 1)
-                self.debug = False
+                self.debug = True
                 self.patience = nrgnn_config.get('patience', 50)
         
         args = Args(nrgnn_config)
@@ -425,7 +425,7 @@ def run_experiment(config, run_id=1):
             noise_rate=config['noise']['rate'],
             random_seed=config['noise'].get('seed', 42) + 1000 + run_id * 10,
             idx_train=test_indices,
-            debug=False
+            debug=True
         )
         
         data_for_detection.y_noisy = data.y_noisy.clone()
@@ -482,7 +482,7 @@ def run_experiment(config, run_id=1):
         }
         
         unionnet = UnionNET(gnn_model, data, num_classes, unionnet_config)
-        result = unionnet.train(debug=False)
+        result = unionnet.train(debug=True)
         
         return result['test']
     

@@ -4,10 +4,7 @@ import torch
 import torch.nn.functional as F
 from sklearn.metrics import accuracy_score, f1_score
 
-def dirichlet_energy(x, edge_index):
-    row, col = edge_index
-    diff = x[row] - x[col]
-    return (diff ** 2).sum(dim=1).mean()
+from model.evaluation import OversmoothingMetrics
 
 def normalize_features(features):
     row_sum = torch.sum(features, dim=1, keepdim=True)
@@ -110,6 +107,8 @@ class UnionNET:
         self.results = {'train': -1, 'val': -1, 'test': -1}
         
         self._print_stats()
+
+        self.smooth_metrics = OversmoothingMetrics(device=self.device)
     
     def _print_stats(self):
         print("UnionNET Dataset Statistics")
@@ -189,7 +188,13 @@ class UnionNET:
             train_acc = accuracy_score(train_labels, train_preds)
             train_f1 = f1_score(train_labels, train_preds, average='macro')
             
-            train_de = dirichlet_energy(output, self.edge_index).item()
+            train_metrics = self.compute_oversmoothing_metrics(output, mask=self.train_mask)
+            train_de = train_metrics['EDir']
+            train_de_traditional = train_metrics['EDir_traditional']
+            train_num_rank = train_metrics['NumRank']
+            train_eff_rank = train_metrics['Erank']
+            train_eproj = train_metrics['EProj']
+            train_mad = train_metrics['MAD']
             
             _, val_loss, _ = self._forward('val')
             val_labels = self.noisy_labels[self.val_mask].cpu().numpy()
@@ -197,7 +202,13 @@ class UnionNET:
             val_acc = accuracy_score(val_labels, val_preds)
             val_f1 = f1_score(val_labels, val_preds, average='macro')
             
-            val_de = dirichlet_energy(output, self.edge_index).item()
+            val_metrics = self.compute_oversmoothing_metrics(output, mask=self.val_mask)
+            val_de = val_metrics['EDir']
+            val_de_traditional = val_metrics['EDir_traditional']
+            val_num_rank = val_metrics['NumRank']
+            val_eff_rank = val_metrics['Erank']
+            val_eproj = val_metrics['EProj']
+            val_mad = val_metrics['MAD']
             
             metrics = {
                 'train_acc': train_acc,
@@ -217,11 +228,14 @@ class UnionNET:
                 self.wait += 1
 
             if debug:
-                print(f"Epoch {epoch:03d} | Train Loss: {loss_train:.4f}, Val Loss: {metrics['val_loss']:.4f} | "
-                      f"Train Acc: {metrics['train_acc']:.4f}, Val Acc: {metrics['val_acc']:.4f} | "
-                      f"Train F1: {metrics['train_f1']:.4f}, Val F1: {metrics['val_f1']:.4f} | "
-                      f"Train DE: {train_de:.4f}, Val DE: {val_de:.4f}")
-            
+                print(f"Epoch {epoch:03d} | Train Acc: {train_acc:.4f}, Val Acc: {val_acc:.4f} | "
+                      f"Train F1: {train_f1:.4f}, Val F1: {val_f1:.4f}")
+                print(f"Train DE: {train_de:.4f}, Val DE: {val_de:.4f} | "
+                      f"Train EProj: {train_eproj:.4f}, Val EProj: {val_eproj:.4f} | "
+                      f"Train MAD: {train_mad:.4f}, Val MAD: {val_mad:.4f} | "
+                      f"Train NumRank: {train_num_rank:.4f}, Val NumRank: {val_num_rank:.4f} | "
+                      f"Train Erank: {train_eff_rank:.4f}, Val Erank: {val_eff_rank:.4f}")
+
             if self.patience and self.wait >= self.patience:
                 if debug:
                     print(f"Early stopping at epoch {epoch}")
@@ -239,17 +253,53 @@ class UnionNET:
             test_acc = accuracy_score(test_labels, test_preds)
             test_f1 = f1_score(test_labels, test_preds, average='macro')
             test_loss = F.cross_entropy(output[self.test_mask], self.clean_labels[self.test_mask])
-            test_de = dirichlet_energy(output, self.edge_index).item()
+            test_metrics = self.compute_oversmoothing_metrics(output, mask=self.test_mask)
+            test_de = test_metrics['EDir']
+            test_de_traditional = test_metrics['EDir_traditional']
+            test_num_rank = test_metrics['NumRank']
+            test_eff_rank = test_metrics['Erank']
+            test_eproj = test_metrics['EProj']
+            test_mad = test_metrics['MAD']
 
-            final_train_de = dirichlet_energy(output, self.edge_index).item()
-            final_val_de = dirichlet_energy(output, self.edge_index).item()
-        
         total_time = time.time() - start_time
         
         if debug:
             print(f"\nTraining completed in {total_time:.2f}s")
             print(f"Test Loss: {test_loss:.4f} | Test Acc: {test_acc:.4f} | Test F1: {test_f1:.4f}")
-            print(f"Final Dirichlet Energy - Train: {final_train_de:.4f}, Val: {final_val_de:.4f}, Test: {test_de:.4f}")
-        
+            print("Final Oversmoothing Metrics:")
+            print(f"Train: EDir: {train_metrics['EDir']:.4f}, EDir_traditional: {train_metrics['EDir_traditional']:.4f}, "
+                  f"EProj: {train_metrics['EProj']:.4f}, MAD: {train_metrics['MAD']:.4f}, "
+                  f"NumRank: {train_metrics['NumRank']:.4f}, Erank: {train_metrics['Erank']:.4f}")
+            print(f"Val: EDir: {val_metrics['EDir']:.4f}, EDir_traditional: {val_metrics['EDir_traditional']:.4f}, "
+                  f"EProj: {val_metrics['EProj']:.4f}, MAD: {val_metrics['MAD']:.4f}, "
+                  f"NumRank: {val_metrics['NumRank']:.4f}, Erank: {val_metrics['Erank']:.4f}")
+            print(f"Test: EDir: {test_metrics['EDir']:.4f}, EDir_traditional: {test_metrics['EDir_traditional']:.4f}, "
+                  f"EProj: {test_metrics['EProj']:.4f}, MAD: {test_metrics['MAD']:.4f}, "
+                  f"NumRank: {test_metrics['NumRank']:.4f}, Erank: {test_metrics['Erank']:.4f}")
+
         self.results['test'] = test_acc
         return self.results
+
+    def compute_oversmoothing_metrics(self, embeddings, mask=None):
+        if mask is not None:
+            X_masked = embeddings[mask]
+            edge_mask = mask[self.edge_index[0]] & mask[self.edge_index[1]]
+            edge_index_masked = self.edge_index[:, edge_mask]
+
+            idx_map = torch.full((mask.size(0),), -1, device=edge_index_masked.device)
+            idx_map[mask] = torch.arange(mask.sum(), device=edge_index_masked.device)
+            edge_index_masked = idx_map[edge_index_masked]
+
+            graphs_in_class = [{'X': X_masked, 'edge_index': edge_index_masked}]
+            return self.smooth_metrics.compute_all_metrics(
+                X=X_masked,
+                edge_index=edge_index_masked,
+                graphs_in_class=graphs_in_class
+            )
+        else:
+            graphs_in_class = [{'X': embeddings, 'edge_index': self.edge_index}]
+            return self.smooth_metrics.compute_all_metrics(
+                X=embeddings,
+                edge_index=self.edge_index,
+                graphs_in_class=graphs_in_class
+            )
