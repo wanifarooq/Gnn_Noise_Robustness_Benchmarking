@@ -7,6 +7,8 @@ from copy import deepcopy
 import time
 from sklearn.metrics import accuracy_score, f1_score
 
+from model.evaluation import OversmoothingMetrics
+
 def dirichlet_energy(x, edge_index):
     row, col = edge_index
     diff = x[row] - x[col]
@@ -70,15 +72,20 @@ class CRGNNTrainer:
         self.best_val_loss = float('inf')
         self.patience_counter = 0
         self.best_weights = None
+
+        self.oversmoothing_evaluator = OversmoothingMetrics(device=device)
     
-    def get_prediction(self, encoder, projection_adapter, projection_head, classifier, 
-                  features, edge_index, labels=None, mask=None):
+    def get_prediction(self, encoder, projection_adapter, projection_head, classifier,
+                    features, edge_index, labels=None, mask=None):
         h = encoder(Data(x=features, edge_index=edge_index))
         h = projection_adapter(h)
         output = h
+        
         loss, acc, f1, de = None, None, None, None
-
+        oversmoothing_metrics = None
+        
         if labels is not None and mask is not None:
+
             edge_index1, _ = dropout_adj(edge_index, p=0.3)
             edge_index2, _ = dropout_adj(edge_index, p=0.3)
             x1, _ = mask_feature(features, p=0.3)
@@ -100,11 +107,8 @@ class CRGNNTrainer:
             if self.config['beta'] > 0:
                 zm = torch.exp(F.cosine_similarity(z1.unsqueeze(1), z2.unsqueeze(0), dim=2) / self.config['T']).mean(dim=1)
                 pm = torch.exp(F.cosine_similarity(p1.unsqueeze(1), p2.unsqueeze(0), dim=2) / self.config['T']).mean(dim=1)
-                
                 pm = torch.where(pm > self.config['p'], pm, torch.zeros_like(pm))
-
                 loss_ccon = cross_space_consistency_loss(zm, pm)
-                
                 loss = self.config['alpha'] * loss_con + loss_sup + self.config['beta'] * loss_ccon
             else:
                 loss = self.config['alpha'] * loss_con + loss_sup
@@ -114,18 +118,15 @@ class CRGNNTrainer:
                 pred_labels = pred_output[mask].argmax(dim=1)
                 acc = accuracy_score(labels[mask].cpu().numpy(), pred_labels.cpu().numpy())
                 f1 = f1_score(labels[mask].cpu().numpy(), pred_labels.cpu().numpy(), average='macro')
-                
+
                 mask_indices = torch.where(mask)[0]
                 mask_set = set(mask_indices.cpu().numpy())
-
-                edge_mask = torch.tensor([src.item() in mask_set and tgt.item() in mask_set 
+                edge_mask = torch.tensor([src.item() in mask_set and tgt.item() in mask_set
                                         for src, tgt in edge_index.t()], device=edge_index.device)
                 
                 if edge_mask.any():
                     masked_edges = edge_index[:, edge_mask]
-
                     node_mapping = {orig_idx.item(): local_idx for local_idx, orig_idx in enumerate(mask_indices)}
-
                     remapped_edges = torch.stack([
                         torch.tensor([node_mapping[src.item()] for src in masked_edges[0]], device=edge_index.device),
                         torch.tensor([node_mapping[tgt.item()] for tgt in masked_edges[1]], device=edge_index.device)
@@ -134,7 +135,17 @@ class CRGNNTrainer:
                 else:
                     de = torch.tensor(0.0, device=output.device)
 
-        return output, loss, acc, f1, de
+                try:
+                    oversmoothing_metrics = self.oversmoothing_evaluator.compute_all_metrics(
+                        X=output,
+                        edge_index=edge_index,
+                        edge_weight=None
+                    )
+                except Exception as e:
+                    print(f"Warning: Could not compute oversmoothing metrics: {e}")
+                    oversmoothing_metrics = None
+
+        return output, loss, acc, f1, de, oversmoothing_metrics
 
     def evaluate(self, encoder, projection_adapter, classifier, features, edge_index, labels, mask):
         encoder.eval()
@@ -146,23 +157,19 @@ class CRGNNTrainer:
             h = projection_adapter(h)
             output = classifier(h)
             
-        loss = F.cross_entropy(output[mask], labels[mask])
-        pred_labels = output[mask].argmax(dim=1)
-        acc = accuracy_score(labels[mask].cpu().numpy(), pred_labels.cpu().numpy())
-        f1 = f1_score(labels[mask].cpu().numpy(), pred_labels.cpu().numpy(), average='macro')
-        
-        with torch.no_grad():
+            loss = F.cross_entropy(output[mask], labels[mask])
+            pred_labels = output[mask].argmax(dim=1)
+            acc = accuracy_score(labels[mask].cpu().numpy(), pred_labels.cpu().numpy())
+            f1 = f1_score(labels[mask].cpu().numpy(), pred_labels.cpu().numpy(), average='macro')
+
             mask_indices = torch.where(mask)[0]
             mask_set = set(mask_indices.cpu().numpy())
-
-            edge_mask = torch.tensor([src.item() in mask_set and tgt.item() in mask_set 
+            edge_mask = torch.tensor([src.item() in mask_set and tgt.item() in mask_set
                                     for src, tgt in edge_index.t()], device=edge_index.device)
             
             if edge_mask.any():
                 masked_edges = edge_index[:, edge_mask]
-
                 node_mapping = {orig_idx.item(): local_idx for local_idx, orig_idx in enumerate(mask_indices)}
-
                 remapped_edges = torch.stack([
                     torch.tensor([node_mapping[src.item()] for src in masked_edges[0]], device=edge_index.device),
                     torch.tensor([node_mapping[tgt.item()] for tgt in masked_edges[1]], device=edge_index.device)
@@ -170,11 +177,23 @@ class CRGNNTrainer:
                 de = dirichlet_energy(h[mask], remapped_edges)
             else:
                 de = torch.tensor(0.0, device=h.device)
-        
-        return loss, acc, f1, de
+
+            oversmoothing_metrics = None
+            try:
+                oversmoothing_metrics = self.oversmoothing_evaluator.compute_all_metrics(
+                    X=h,
+                    edge_index=edge_index,
+                    edge_weight=None
+                )
+            except Exception as e:
+                print(f"Warning: Could not compute oversmoothing metrics: {e}")
+                oversmoothing_metrics = None
+
+        return loss, acc, f1, de, oversmoothing_metrics
 
     def fit(self, base_model, data, config, get_model_func):
-        print(f"Training CR-GNN with {config['model_name'].upper()} backbone...")
+        print(f"Training CR-GNN with {config['model_name'].upper()} backbone")
+    
 
         if data.num_nodes > 10000:
             print(f"Warning: large dataset with {data.num_nodes} nodes.")
@@ -236,22 +255,25 @@ class CRGNNTrainer:
         start_time = time.time()
         total_time = 0
         
+        oversmoothing_history = {'train': [], 'val': [], 'test': []}
+        
         for epoch in range(self.config['epochs']):
             encoder.train()
             projection_adapter.train()
             projection_head.train()
             classifier.train()
-            optimizer.zero_grad()
 
-            output, train_loss, train_acc, train_f1, train_de = self.get_prediction(
+            optimizer.zero_grad()
+            
+            output, train_loss, train_acc, train_f1, train_de, train_oversmoothing = self.get_prediction(
                 encoder, projection_adapter, projection_head, classifier,
                 data.x, data.edge_index, noisy_labels, train_mask
             )
-            
+
             if train_loss is not None and torch.isfinite(train_loss):
                 train_loss.backward()
                 torch.nn.utils.clip_grad_norm_(
-                    list(encoder.parameters()) + 
+                    list(encoder.parameters()) +
                     list(projection_adapter.parameters()) +
                     list(projection_head.parameters()) +
                     list(classifier.parameters()),
@@ -261,7 +283,7 @@ class CRGNNTrainer:
 
             torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
-            val_loss, val_acc, val_f1, val_de = self.evaluate(
+            val_loss, val_acc, val_f1, val_de, val_oversmoothing = self.evaluate(
                 encoder, projection_adapter, classifier,
                 data.x, data.edge_index, noisy_labels, val_mask
             )
@@ -274,19 +296,44 @@ class CRGNNTrainer:
                 'val_f1': val_f1
             }
 
+            if train_oversmoothing is not None:
+                oversmoothing_history['train'].append(train_oversmoothing)
+            if val_oversmoothing is not None:
+                oversmoothing_history['val'].append(val_oversmoothing)
+
             if self.config['debug']:
-                print(f"Epoch {epoch:03d} | Train Loss: {train_loss:.4f}, Val Loss: {metrics['val_loss']:.4f} | "
-                      f"Train Acc: {metrics['train_acc']:.4f}, Val Acc: {metrics['val_acc']:.4f} | "
-                      f"Train F1: {metrics['train_f1']:.4f}, Val F1: {metrics['val_f1']:.4f} | "
-                      f"Train DE: {train_de:.4f}, Val DE: {val_de:.4f}")
+                debug_msg = (f"Epoch {epoch:03d} | Train Loss: {train_loss:.4f}, Val Loss: {metrics['val_loss']:.4f} | "
+                            f"Train Acc: {metrics['train_acc']:.4f}, Val Acc: {metrics['val_acc']:.4f} | "
+                            f"Train F1: {metrics['train_f1']:.4f}, Val F1: {metrics['val_f1']:.4f} | "
+                            f"Train DE: {train_de:.4f}, Val DE: {val_de:.4f}")
+                
+                if epoch % 10 == 0 and val_oversmoothing is not None:
+                    debug_msg += f"\n    Oversmoothing -> NumRank: {val_oversmoothing['NumRank']:.4f}, Erank: {val_oversmoothing['Erank']:.4f}, MAD: {val_oversmoothing['MAD']:.4f}"
+                
+                print(debug_msg)
 
             flag_earlystop = False
-            
             if val_loss < self.best_val_loss:
                 self.best_val_loss = val_loss
                 self.patience_counter = 0
                 total_time = time.time() - start_time
-                
+                self.best_weights = {
+                    'encoder': deepcopy(encoder.state_dict()),
+                    'projection_adapter': deepcopy(projection_adapter.state_dict()),
+                    'projection_head': deepcopy(projection_head.state_dict()),
+                    'classifier': deepcopy(classifier.state_dict())
+                }
+            else:
+                self.patience_counter += 1
+                if self.patience_counter >= self.config['patience']:
+                    flag_earlystop = True
+
+            if flag_earlystop:
+                break
+            if val_loss < self.best_val_loss:
+                self.best_val_loss = val_loss
+                self.patience_counter = 0
+                total_time = time.time() - start_time
                 self.best_weights = {
                     'encoder': deepcopy(encoder.state_dict()),
                     'projection_adapter': deepcopy(projection_adapter.state_dict()),
@@ -307,17 +354,17 @@ class CRGNNTrainer:
             projection_head.load_state_dict(self.best_weights['projection_head'])
             classifier.load_state_dict(self.best_weights['classifier'])
 
-        final_train_loss, final_train_acc, final_train_f1, final_train_de = self.evaluate(
+        final_train_loss, final_train_acc, final_train_f1, final_train_de, final_train_oversmoothing = self.evaluate(
             encoder, projection_adapter, classifier,
             data.x, data.edge_index, clean_labels, train_mask
         )
-        
-        final_val_loss, final_val_acc, final_val_f1, final_val_de = self.evaluate(
+
+        final_val_loss, final_val_acc, final_val_f1, final_val_de, final_val_oversmoothing = self.evaluate(
             encoder, projection_adapter, classifier,
             data.x, data.edge_index, clean_labels, val_mask
         )
-        
-        test_loss, test_acc, test_f1, test_de = self.evaluate(
+
+        test_loss, test_acc, test_f1, test_de, test_oversmoothing = self.evaluate(
             encoder, projection_adapter, classifier,
             data.x, data.edge_index, clean_labels, test_mask
         )
@@ -332,5 +379,13 @@ class CRGNNTrainer:
             print(f"\nTraining completed in {total_time:.2f}s")
             print(f"Test Loss: {final_metrics['test_loss']:.4f} | Test Acc: {final_metrics['test_acc']:.4f} | Test F1: {final_metrics['test_f1']:.4f}")
             print(f"Final Dirichlet Energy - Train: {final_train_de:.4f}, Val: {final_val_de:.4f}, Test: {test_de:.4f}")
+            
+            print("\nFinal OVERSMOOTHING METRICS ")
+            if test_oversmoothing is not None:
+                print("Test Set:")
+                self.oversmoothing_evaluator.print_metrics(test_oversmoothing)
+            if final_val_oversmoothing is not None:
+                print("Validation Set:")  
+                self.oversmoothing_evaluator.print_metrics(final_val_oversmoothing)
 
         return test_acc

@@ -9,6 +9,8 @@ from sklearn.metrics import accuracy_score, f1_score
 from typing import Tuple
 import copy
 
+from model.evaluation import OversmoothingMetrics
+
 def dirichlet_energy(x, edge_index):
     row, col = edge_index
     diff = x[row] - x[col]
@@ -355,6 +357,7 @@ class ERASETrainer:
         self.device = device
         self.num_classes = num_classes
         self.get_model_fn = get_model_fn
+        self.oversmoothing_evaluator = OversmoothingMetrics(device=device)
         
     def train(self, data, debug=False):
         enhancement_config = {
@@ -379,6 +382,7 @@ class ERASETrainer:
             train_eps=self.config.get('train_eps', True),
             heads=self.config.get('n_heads', 8)
         ).to(self.device)
+
         
         noisy_labels = getattr(data, 'y_noisy', data.y_original)
 
@@ -409,6 +413,8 @@ class ERASETrainer:
         patience_counter = 0
         num_epochs = self.config.get('total_epochs', 200)
         patience = self.config.get('patience', 50)
+
+        best_oversmoothing_metrics = None
         
         for epoch in range(1, num_epochs + 1):
             train_result = self._train_epoch(model, data, optimizer, loss_fn, A, Y_all, L_all)
@@ -419,6 +425,12 @@ class ERASETrainer:
             train_f1, val_f1 = self._compute_f1_scores(model, data, L_all)
             
             train_de, val_de = self._compute_dirichlet_energy_train_val(model, data)
+            
+            if epoch % 10 == 0 or epoch == num_epochs:
+                oversmoothing_metrics = self._compute_oversmoothing_metrics(model, data)
+                if debug:
+                    print(f"Epoch {epoch} - Oversmoothing Metrics:")
+                    self.oversmoothing_evaluator.print_metrics(oversmoothing_metrics)
                     
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
@@ -426,6 +438,7 @@ class ERASETrainer:
                 best_val_acc = val_acc
                 patience_counter = 0
                 best_model_state = copy.deepcopy(model.state_dict())
+                best_oversmoothing_metrics = self._compute_oversmoothing_metrics(model, data)
             else:
                 patience_counter += 1
 
@@ -441,13 +454,19 @@ class ERASETrainer:
                 break
 
         model.load_state_dict(best_model_state)
-        
+
         test_acc, test_f1, test_loss = self._evaluate_test_final(model, data, L_all)
         
         final_train_de, final_val_de, final_test_de = self._compute_dirichlet_energy(model, data)
+        
+        final_oversmoothing_metrics = self._compute_oversmoothing_metrics(model, data)
 
         print(f"Test Loss: {test_loss:.4f} | Test Acc: {test_acc:.4f} | Test F1: {test_f1:.4f}")
         print(f"Final Dirichlet Energy - Train: {final_train_de:.4f}, Val: {final_val_de:.4f}, Test: {final_test_de:.4f}")
+        
+        if debug:
+            print("\nFinal Oversmoothing Metrics")
+            self.oversmoothing_evaluator.print_metrics(final_oversmoothing_metrics)
 
         return {
             'train': best_train_acc,
@@ -457,8 +476,75 @@ class ERASETrainer:
                 'train': final_train_de,
                 'val': final_val_de,
                 'test': final_test_de
-            }
+            },
+            'oversmoothing_metrics': final_oversmoothing_metrics
         }
+
+    @torch.no_grad()
+    def _compute_oversmoothing_metrics(self, model, data):
+
+        model.eval()
+        features = model(data)
+        
+        metrics = self.oversmoothing_evaluator.compute_all_metrics(
+            X=features,
+            edge_index=data.edge_index,
+            edge_weight=getattr(data, 'edge_attr', None)
+        )
+        
+        return metrics
+
+    @torch.no_grad()
+    def _compute_oversmoothing_metrics_splits(self, model, data):
+
+        model.eval()
+        features = model(data)
+        
+        def filter_data_for_split(mask):
+
+            nodes = torch.where(mask)[0]
+            node_mapping = {node.item(): i for i, node in enumerate(nodes)}
+            
+            edge_mask = torch.isin(data.edge_index[0], nodes) & torch.isin(data.edge_index[1], nodes)
+            filtered_edges = data.edge_index[:, edge_mask]
+            
+            if filtered_edges.size(1) > 0:
+                remapped_edges = torch.zeros_like(filtered_edges)
+                for i in range(filtered_edges.size(1)):
+                    remapped_edges[0, i] = node_mapping[filtered_edges[0, i].item()]
+                    remapped_edges[1, i] = node_mapping[filtered_edges[1, i].item()]
+                return features[mask], remapped_edges
+            else:
+                return features[mask], torch.empty((2, 0), dtype=torch.long, device=data.edge_index.device)
+
+        splits_metrics = {}
+        for split_name, mask in [('train', data.train_mask), ('val', data.val_mask), ('test', data.test_mask)]:
+            split_features, split_edges = filter_data_for_split(mask)
+            
+            if split_edges.size(1) > 0:
+                split_metrics = self.oversmoothing_evaluator.compute_all_metrics(
+                    X=split_features,
+                    edge_index=split_edges,
+                    edge_weight=None
+                )
+                splits_metrics[split_name] = split_metrics
+            else:
+
+                splits_metrics[split_name] = {
+                    'EDir': 0.0,
+                    'NumRank': float(min(split_features.shape)),
+                    'Erank': float(min(split_features.shape)),
+                    'EDir_traditional': 0.0,
+                    'EProj': 0.0,
+                    'MAD': 0.0
+                }
+        
+        return splits_metrics
+
+    @torch.no_grad()
+    def evaluate_model_oversmoothing(self, model, data):
+        return self.oversmoothing_evaluator.evaluate_model_oversmoothing(model, data, self.device)
+
 
     @torch.no_grad()
     def _compute_dirichlet_energy_train_val(self, model, data):
@@ -592,3 +678,14 @@ class ERASETrainer:
         model.eval()
         features = model(data)
         return evaluate_linear_probe(features, data, noisy_labels, clean_labels)
+
+
+def analyze_oversmoothing_evolution(trainer, model, data, epochs_to_analyze=None):
+
+    if epochs_to_analyze is None:
+        epochs_to_analyze = list(range(10, 201, 10))
+    
+    evolution = {epoch: trainer._compute_oversmoothing_metrics(model, data) 
+                for epoch in epochs_to_analyze}
+    
+    return evolution

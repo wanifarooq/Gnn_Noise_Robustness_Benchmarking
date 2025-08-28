@@ -616,7 +616,7 @@ def run_experiment(config, run_id=1):
 
 if __name__ == "__main__":
     print("\n" + "-"*50)
-    print("Multi-run experiment - 10 runs")
+    print("Multi-run experiment: 10 runs")
     print("-"*50)
     
     with open("config.yaml", "r") as f:
@@ -630,7 +630,7 @@ if __name__ == "__main__":
     print(f"Dataset: {dataset_name}")
     print(f"Method: {method_name}")
     print(f"Noise Rate: {noise_rate}")
-    print(f"Running 10 experiments...")
+    print(f"Running 10 experiments")
     print("-"*50)
     
     test_accuracies = []
@@ -672,10 +672,10 @@ if __name__ == "__main__":
         print(f"Noise Rate: {noise_rate}")
         print(f"Completed Runs: {len(test_accuracies)}/10")
         print("-"*50)
-        print(f"Mean Test Accuracy:    {mean_acc:.4f}")
-        print(f"Std Test Accuracy:     {std_acc:.4f}")
-        print(f"Min Test Accuracy:     {min_acc:.4f}")
-        print(f"Max Test Accuracy:     {max_acc:.4f}")
+        print(f"Mean Test Accuracy: {mean_acc:.4f}")
+        print(f"Std Test Accuracy: {std_acc:.4f}")
+        print(f"Min Test Accuracy: {min_acc:.4f}")
+        print(f"Max Test Accuracy: {max_acc:.4f}")
         print("-"*50)
         print("Individual Run Results:")
         for i, acc in enumerate(test_accuracies, 1):
