@@ -186,7 +186,7 @@ class GAT(nn.Module):
                 norm.reset_parameters()
 
 
-class GAT2(nn.Module):
+class GATv2(nn.Module):
     def __init__(self, in_channels: int, hidden_channels: int, out_channels: int,
                  n_layers: int = 3, heads: int = 4, dropout: float = 0.6, 
                  with_bias: bool = True, self_loop: bool = True, 

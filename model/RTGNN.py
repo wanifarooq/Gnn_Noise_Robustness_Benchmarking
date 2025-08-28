@@ -12,7 +12,7 @@ import numpy as np
 import scipy.sparse as sp
 from sklearn.metrics import f1_score
 
-from model.GNNs import GCN, GIN, GAT, GAT2
+from model.GNNs import GCN, GIN, GAT, GATv2
 
 def dirichlet_energy(x, edge_index):
     row, col = edge_index
@@ -62,8 +62,8 @@ class DualGNN(nn.Module):
             elif self.gnn_type == 'gat' and not use_edge_weight:
                 return GAT(nfeat, nhid, nclass, n_layers=n_layers or 3,
                            heads=heads, dropout=dropout, self_loop=self.self_loop)
-            elif self.gnn_type == 'gat2' and not use_edge_weight:
-                return GAT2(nfeat, nhid, nclass, n_layers=n_layers or 3,
+            elif self.gnn_type == 'gatv2' and not use_edge_weight:
+                return GATv2(nfeat, nhid, nclass, n_layers=n_layers or 3,
                             heads=heads, dropout=dropout, self_loop=self.self_loop)
             else:
                 raise ValueError(f"GNN type {gnn_type} not supported")
@@ -259,7 +259,7 @@ class RTGNN(nn.Module):
         elif self.gnn_type == 'gin':
             base.update({'mlp_layers': getattr(self.args, 'mlp_layers', 2),
                          'train_eps': getattr(self.args, 'train_eps', True)})
-        elif self.gnn_type in ['gat', 'gat2']:
+        elif self.gnn_type in ['gat', 'gatv2']:
             base.update({'heads': getattr(self.args, 'heads', 8),
                          'self_loop': getattr(self.args, 'self_loop', True)})
         return base

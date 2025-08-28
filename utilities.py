@@ -8,7 +8,7 @@ from torch_geometric.transforms import NormalizeFeatures, RandomNodeSplit
 from scipy import stats
 from numpy.testing import assert_array_almost_equal
 
-from model.GNNs import GCN, GIN, GAT, GAT2
+from model.GNNs import GCN, GIN, GAT, GATv2
 from loss.GNNs_loss import train_with_standard_loss, train_with_dirichlet, train_with_ncod, train_with_positive_eigenvalues, train_with_gcod
 
 # Noises
@@ -254,7 +254,7 @@ def get_model(model_name, in_channels, hidden_channels, out_channels, **kwargs):
         'gcn':  (GCN, ['n_layers', 'dropout', 'self_loop']),
         'gin':  (GIN, ['n_layers', 'dropout', 'mlp_layers', 'train_eps']),
         'gat':  (GAT, ['n_layers', 'dropout', 'heads']),
-        'gat2': (GAT2, ['n_layers', 'dropout', 'heads']),
+        'gatv2': (GATv2, ['n_layers', 'dropout', 'heads']),
     }
 
     if model_name not in model_registry:

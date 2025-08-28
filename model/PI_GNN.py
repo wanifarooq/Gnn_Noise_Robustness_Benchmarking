@@ -74,7 +74,7 @@ class InnerProductTrainer:
         self.delta = delta
 
     def get_model_lr(self, config, model_name):
-        if model_name.lower() in ['gat', 'gat2']:
+        if model_name.lower() in ['gat', 'gatv2']:
             return config.get('lr', 0.005)
         else:
             return config.get('lr', 0.01)
