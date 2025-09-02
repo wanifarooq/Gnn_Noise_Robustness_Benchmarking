@@ -134,16 +134,19 @@ unionnet_params:
   alpha: 0.5
   beta: 1
   feat_norm: True
-  lr: 0.01
+  lr: 0.01 #GCN and GIN: 0.01. GAT and GATv2: 0.005.
   weight_decay: 5e-4
   patience: 10
 
 # GNN Cleaner parameters
 gnn_cleaner_params:
   lr: 0.01
-  alpha: 0.9
+  net_lr: 0.001
+  weight_decay: 5e-4
   lp_iters: 50
-  sharpen_temp: 1.0
+  epsilon: 1e-8
+  epochs: 300
+  patience: 40
 
 # ERASE parameters
 erase_params:

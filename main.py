@@ -3,7 +3,6 @@ import torch
 from torch_geometric.utils import to_scipy_sparse_matrix
 import scipy.sparse as sp
 import yaml
-import statistics
 
 from utilities import setup_seed_device, load_dataset, get_model, train
 from utilities import label_process
@@ -485,11 +484,10 @@ def run_experiment(config, run_id=1):
         result = unionnet.train(debug=True)
         
         return result['test']
-    
+
     # GNN Cleaner Training
     if supp_gnn in ['gnn_cleaner'] or method == 'gnn_cleaner':
         print(f"Run {run_id}: Using GNN Cleaner")
-
         gnn_model = get_model(
             model_name=config['model']['name'],
             in_channels=data.num_features,
@@ -504,20 +502,17 @@ def run_experiment(config, run_id=1):
         )
         
         gnn_cleaner_config = {
-            'epochs': config.get('total_epochs', 200),
+            'epochs': config["training"].get('total_epochs', 200),
             'lr': config.get('lr', 0.01),
+            'net_lr': config.get('net_lr', 0.001),
             'weight_decay': config.get('weight_decay', 5e-4),
+            'lp_iters': config.get('lp_iters', 50),
+            'epsilon': config.get('epsilon', 1e-8),
             'patience': config.get('patience', 10),
-            'hidden_channels': config.get('hidden_channels', 64),
-            'alpha': config.get('alpha', 0.9),
-            'lp_iters': config.get('lp_iters', 30),
-            'sharpen_temp': config.get('sharpen_temp', 1.0),
-            'epochs': config["training"].get('total_epochs', 200)
         }
-
+        
         trainer = GNNCleanerTrainer(gnn_cleaner_config, data, device, num_classes, gnn_model)
         result = trainer.train(debug=True)
-        
         return result['test']
     
     # ERASE Training
