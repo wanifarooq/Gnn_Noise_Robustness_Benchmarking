@@ -500,7 +500,7 @@ def run_experiment(config, run_id=1):
             heads=config.get('heads', 8),
             n_layers=config['model'].get('n_layers', 2),
             dropout=config['model'].get('dropout', 0.5),
-            self_loop=config['model'].get('self_loop', True)
+            self_loop=config['model'].get('self_loop', True),
         )
         
         gnn_cleaner_config = {
@@ -511,7 +511,8 @@ def run_experiment(config, run_id=1):
             'hidden_channels': config.get('hidden_channels', 64),
             'alpha': config.get('alpha', 0.9),
             'lp_iters': config.get('lp_iters', 30),
-            'sharpen_temp': config.get('sharpen_temp', 1.0)
+            'sharpen_temp': config.get('sharpen_temp', 1.0),
+            'epochs': config["training"].get('total_epochs', 200)
         }
 
         trainer = GNNCleanerTrainer(gnn_cleaner_config, data, device, num_classes, gnn_model)
@@ -565,7 +566,7 @@ def run_experiment(config, run_id=1):
             'K': config.get('K', 2),
             'D2': config.get('D2', 16),
             'attention': config.get('attention', True),
-            'device': device
+            'device': device,
         }
         
         gnnguard_model = GNNGuard(
@@ -594,7 +595,7 @@ def run_experiment(config, run_id=1):
             idx_train=idx_train,
             idx_val=idx_val,
             idx_test=idx_test,
-            train_iters=config.get('total_epochs', 200),
+            epochs=config["training"].get('total_epochs', 200),
             verbose=True,
             patience=config.get('patience', 5)
         )

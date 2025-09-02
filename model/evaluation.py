@@ -26,8 +26,7 @@ class OversmoothingMetrics:
         return metrics
     
     def _compute_edir_average(self, graphs_in_class):
-
-        if not graphs_in_class:
+        if not graphs_in_class or len(graphs_in_class) == 0:
             return 0.0
         
         total_energy = 0.0
@@ -38,21 +37,26 @@ class OversmoothingMetrics:
             edge_index = graph_data['edge_index']
             edge_weight = graph_data.get('edge_weight', None)
             
-            num_edges = edge_index.size(1)
-            if num_edges == 0:
+            if edge_index.size(1) == 0:
                 continue
             
-            energy = 0.0
+            graph_energy = 0.0
+            num_edges = edge_index.size(1)
+            
             for i in range(num_edges):
                 u, v = edge_index[0, i], edge_index[1, i]
+                
                 grad = X[u] - X[v]
-                e = torch.norm(grad, p=2)**2
+                
+                edge_energy = torch.norm(grad, p=2)**2
+
                 if edge_weight is not None:
-                    e *= edge_weight[i]
-                energy += e
+                    edge_energy *= edge_weight[i]
+                
+                graph_energy += edge_energy.item()
             
-            total_energy += energy.item()
-        
+            total_energy += graph_energy
+
         return total_energy / (2 * num_graphs)
     
     def _compute_numerical_rank(self, X):

@@ -12,45 +12,7 @@ import numpy as np
 from copy import deepcopy
 from sklearn.metrics import accuracy_score, f1_score
 
-def dirichlet_energy(x, edge_index):
-    row, col = edge_index
-    diff = x[row] - x[col]
-    return (diff ** 2).sum(dim=1).mean()
-
-def compute_dirichlet_energy_splits(features, edge_index, train_mask, val_mask, test_mask):
-
-    train_features = features[train_mask]
-    val_features = features[val_mask] 
-    test_features = features[test_mask]
-    
-    train_nodes = torch.where(train_mask)[0]
-    val_nodes = torch.where(val_mask)[0] 
-    test_nodes = torch.where(test_mask)[0]
-    
-    def filter_edges_for_nodes(edge_index, node_set):
-        node_mapping = {node.item(): i for i, node in enumerate(node_set)}
-        
-        mask = torch.isin(edge_index[0], node_set) & torch.isin(edge_index[1], node_set)
-        filtered_edges = edge_index[:, mask]
-        
-        if filtered_edges.size(1) > 0:
-            remapped_edges = torch.zeros_like(filtered_edges)
-            for i in range(filtered_edges.size(1)):
-                remapped_edges[0, i] = node_mapping[filtered_edges[0, i].item()]
-                remapped_edges[1, i] = node_mapping[filtered_edges[1, i].item()]
-            return remapped_edges
-        else:
-            return torch.empty((2, 0), dtype=torch.long, device=edge_index.device)
-    
-    train_edges = filter_edges_for_nodes(edge_index, train_nodes)
-    val_edges = filter_edges_for_nodes(edge_index, val_nodes)
-    test_edges = filter_edges_for_nodes(edge_index, test_nodes)
-    
-    train_de = dirichlet_energy(train_features, train_edges) if train_edges.size(1) > 0 else torch.tensor(0.0)
-    val_de = dirichlet_energy(val_features, val_edges) if val_edges.size(1) > 0 else torch.tensor(0.0)
-    test_de = dirichlet_energy(test_features, test_edges) if test_edges.size(1) > 0 else torch.tensor(0.0)
-    
-    return train_de.item(), val_de.item(), test_de.item()
+from model.evaluation import OversmoothingMetrics
 
 class GNNGuard(nn.Module):
     def __init__(self, nfeat, nhid, nclass, dropout=0.5, lr=0.01, weight_decay=5e-4,
@@ -77,6 +39,13 @@ class GNNGuard(nn.Module):
         self.features = None
         self.labels = None
 
+        self.oversmoothing_evaluator = OversmoothingMetrics(device=device)
+        self.oversmoothing_history = {
+            'train': [],
+            'val': [],
+            'test': []
+        }
+
         self.gate = Parameter(torch.rand(1))
         self.test_value = Parameter(torch.rand(1))
 
@@ -85,6 +54,51 @@ class GNNGuard(nn.Module):
         if self.K > 1:
             self.gc_layers.append(GCNConv(nhid, self.D2, bias=True))
         self.gc_layers.append(GCNConv(D2 if self.K > 1 else nhid, nclass, bias=True))
+
+    def _compute_oversmoothing_for_mask(self, embeddings, edge_index, mask, labels=None):
+        try:
+            mask_indices = torch.where(mask)[0]
+            mask_embeddings = embeddings[mask]
+            
+            mask_set = set(mask_indices.cpu().numpy())
+            edge_mask = torch.tensor([
+                src.item() in mask_set and tgt.item() in mask_set
+                for src, tgt in edge_index.t()
+            ], device=edge_index.device)
+            
+            if not edge_mask.any():
+                return {
+                    'NumRank': float(min(mask_embeddings.shape)),
+                    'Erank': float(min(mask_embeddings.shape)),
+                    'EDir': 0.0,
+                    'EDir_traditional': 0.0,
+                    'EProj': 0.0,
+                    'MAD': 0.0
+                }
+            
+            masked_edges = edge_index[:, edge_mask]
+            node_mapping = {orig_idx.item(): local_idx for local_idx, orig_idx in enumerate(mask_indices)}
+            
+            remapped_edges = torch.stack([
+                torch.tensor([node_mapping[src.item()] for src in masked_edges[0]], device=edge_index.device),
+                torch.tensor([node_mapping[tgt.item()] for tgt in masked_edges[1]], device=edge_index.device)
+            ])
+            
+            graphs_in_class = [{
+                'X': mask_embeddings,
+                'edge_index': remapped_edges,
+                'edge_weight': None
+            }]
+            
+            return self.oversmoothing_evaluator.compute_all_metrics(
+                X=mask_embeddings,
+                edge_index=remapped_edges,
+                graphs_in_class=graphs_in_class
+            )
+            
+        except Exception as e:
+            print(f"Warning: Could not compute oversmoothing metrics for mask: {e}")
+            return None
 
     def forward(self, x, adj):
         x = x.to_dense() if x.is_sparse else x
@@ -174,39 +188,8 @@ class GNNGuard(nn.Module):
         for gc in self.gc_layers:
             gc.reset_parameters()
 
-    @torch.no_grad()
-    def _compute_dirichlet_energy_train_val(self, idx_train, idx_val):
-        self.eval()
-        output = self.forward(self.features, self.adj_norm)
-        
-        train_mask = torch.zeros(self.features.size(0), dtype=torch.bool, device=self.device)
-        val_mask = torch.zeros(self.features.size(0), dtype=torch.bool, device=self.device)
-        train_mask[idx_train] = True
-        val_mask[idx_val] = True
-
-        test_mask = torch.zeros(self.features.size(0), dtype=torch.bool, device=self.device)
-        
-        edge_index = self.adj_norm._indices()
-        train_de, val_de, _ = compute_dirichlet_energy_splits(output, edge_index, train_mask, val_mask, test_mask)
-        return train_de, val_de
-
-    @torch.no_grad()
-    def _compute_dirichlet_energy_all(self, idx_train, idx_val, idx_test):
-        self.eval()
-        output = self.forward(self.features, self.adj_norm)
-        
-        train_mask = torch.zeros(self.features.size(0), dtype=torch.bool, device=self.device)
-        val_mask = torch.zeros(self.features.size(0), dtype=torch.bool, device=self.device)
-        test_mask = torch.zeros(self.features.size(0), dtype=torch.bool, device=self.device)
-        train_mask[idx_train] = True
-        val_mask[idx_val] = True
-        test_mask[idx_test] = True
-        
-        edge_index = self.adj_norm._indices()
-        return compute_dirichlet_energy_splits(output, edge_index, train_mask, val_mask, test_mask)
-
     def fit(self, features, adj, labels, idx_train, idx_val, idx_test=None,
-            train_iters=200, verbose=True, patience=5):
+            epochs=200, verbose=True, patience=5):
         self.initialize()
 
         if not isinstance(adj, torch.Tensor):
@@ -216,7 +199,7 @@ class GNNGuard(nn.Module):
         self.adj_norm = self.add_loop_sparse(adj.to(self.device))
         self.labels = labels.to(self.device)
 
-        self._train_with_early_stopping(labels, idx_train, idx_val, idx_test, train_iters, patience, verbose)
+        self._train_with_early_stopping(labels, idx_train, idx_val, idx_test, epochs, patience, verbose)
 
     def sparse_mx_to_torch_sparse_tensor(self, sparse_mx):
         sparse_mx = sparse_mx.tocoo().astype(np.float32)
@@ -225,7 +208,7 @@ class GNNGuard(nn.Module):
         shape = torch.Size(sparse_mx.shape)
         return torch.sparse_coo_tensor(indices, values, shape, dtype=torch.float32, device=self.device)
 
-    def _train_with_early_stopping(self, labels, idx_train, idx_val, idx_test, train_iters, patience, verbose):
+    def _train_with_early_stopping(self, labels, idx_train, idx_val, idx_test, epochs, patience, verbose):
         if verbose:
             print('Training GNNGuard model')
         optimizer = optim.Adam(self.parameters(), lr=self.lr, weight_decay=self.weight_decay)
@@ -235,7 +218,7 @@ class GNNGuard(nn.Module):
         patience_counter = early_stopping
         weights = deepcopy(self.state_dict())
 
-        for i in range(train_iters):
+        for i in range(epochs):
             self.train()
             optimizer.zero_grad()
             output_train = self.forward(self.features, self.adj_norm)
@@ -258,13 +241,44 @@ class GNNGuard(nn.Module):
                 train_f1 = f1_score(true_train_labels, pred_train_labels, average='macro')
                 val_f1 = f1_score(true_val_labels, pred_val_labels, average='macro')
 
-                train_de, val_de = self._compute_dirichlet_energy_train_val(idx_train, idx_val)
+                train_mask = torch.zeros(self.features.size(0), dtype=torch.bool, device=self.device)
+                val_mask = torch.zeros(self.features.size(0), dtype=torch.bool, device=self.device)
+                train_mask[idx_train] = True
+                val_mask[idx_val] = True
+
+                edge_index = self.adj_norm._indices()
+                train_oversmoothing = self._compute_oversmoothing_for_mask(output_train, edge_index, train_mask, labels)
+                val_oversmoothing = self._compute_oversmoothing_for_mask(output_val, edge_index, val_mask, labels)
+
+                if train_oversmoothing is not None:
+                    self.oversmoothing_history['train'].append(train_oversmoothing)
+                if val_oversmoothing is not None:
+                    self.oversmoothing_history['val'].append(val_oversmoothing)
 
             if verbose:
-                print(f"Epoch {i:03d} | Train Loss: {loss_train:.4f}, Val Loss: {loss_val:.4f} | "
-                      f"Train Acc: {train_acc:.4f}, Val Acc: {val_acc:.4f} | "
-                      f"Train F1: {train_f1:.4f}, Val F1: {val_f1:.4f} | "
-                      f"Train DE: {train_de:.4f}, Val DE: {val_de:.4f}")
+                train_de = train_oversmoothing['EDir'] if train_oversmoothing else 0.0
+                train_de_traditional = train_oversmoothing['EDir_traditional'] if train_oversmoothing else 0.0
+                train_eproj = train_oversmoothing['EProj'] if train_oversmoothing else 0.0
+                train_mad = train_oversmoothing['MAD'] if train_oversmoothing else 0.0
+                train_num_rank = train_oversmoothing['NumRank'] if train_oversmoothing else 0.0
+                train_eff_rank = train_oversmoothing['Erank'] if train_oversmoothing else 0.0
+                
+                val_de = val_oversmoothing['EDir'] if val_oversmoothing else 0.0
+                val_de_traditional = val_oversmoothing['EDir_traditional'] if val_oversmoothing else 0.0
+                val_eproj = val_oversmoothing['EProj'] if val_oversmoothing else 0.0
+                val_mad = val_oversmoothing['MAD'] if val_oversmoothing else 0.0
+                val_num_rank = val_oversmoothing['NumRank'] if val_oversmoothing else 0.0
+                val_eff_rank = val_oversmoothing['Erank'] if val_oversmoothing else 0.0
+                
+                print(f"Epoch {i+1:03d} | Train Loss: {loss_train:.4f}, Val Loss: {loss_val:.4f} | "
+                    f"Train Acc: {train_acc:.4f}, Val Acc: {val_acc:.4f} | "
+                    f"Train F1: {train_f1:.4f}, Val F1: {val_f1:.4f}")
+                print(f"Train DE: {train_de:.4f}, Val DE: {val_de:.4f} | "
+                    f"Train DE_trad: {train_de_traditional:.4f}, Val DE_trad: {val_de_traditional:.4f} | "
+                    f"Train EProj: {train_eproj:.4f}, Val EProj: {val_eproj:.4f} | "
+                    f"Train MAD: {train_mad:.4f}, Val MAD: {val_mad:.4f} | "
+                    f"Train NumRank: {train_num_rank:.4f}, Val NumRank: {val_num_rank:.4f} | "
+                    f"Train Erank: {train_eff_rank:.4f}, Val Erank: {val_eff_rank:.4f}")
 
             if loss_val < best_loss_val:
                 best_loss_val = loss_val
@@ -282,9 +296,58 @@ class GNNGuard(nn.Module):
         self.load_state_dict(weights)
         
         if idx_test is not None:
-            final_train_de, final_val_de, final_test_de = self._compute_dirichlet_energy_all(idx_train, idx_val, idx_test)
+            test_mask = torch.zeros(self.features.size(0), dtype=torch.bool, device=self.device)
+            train_mask_final = torch.zeros(self.features.size(0), dtype=torch.bool, device=self.device)
+            val_mask_final = torch.zeros(self.features.size(0), dtype=torch.bool, device=self.device)
+            
+            train_mask_final[idx_train] = True
+            val_mask_final[idx_val] = True
+            test_mask[idx_test] = True
+            
+            self.eval()
+            with torch.no_grad():
+                final_output = self.forward(self.features, self.adj_norm)
+                
+                pred_test_labels = final_output[idx_test].max(1)[1].cpu().numpy()
+                true_test_labels = self.labels[idx_test].cpu().numpy()
+                test_acc = accuracy_score(true_test_labels, pred_test_labels)
+                test_f1 = f1_score(true_test_labels, pred_test_labels, average='macro')
+                test_loss = F.nll_loss(final_output[idx_test], self.labels[idx_test])
+                
+                edge_index = self.adj_norm._indices()
+                
+                final_train_oversmoothing = self._compute_oversmoothing_for_mask(final_output, edge_index, train_mask_final, self.labels)
+                final_val_oversmoothing = self._compute_oversmoothing_for_mask(final_output, edge_index, val_mask_final, self.labels)
+                final_test_oversmoothing = self._compute_oversmoothing_for_mask(final_output, edge_index, test_mask, self.labels)
+                
+                if final_test_oversmoothing is not None:
+                    self.oversmoothing_history['test'].append(final_test_oversmoothing)
+            
+            final_metrics = {
+                'test_loss': test_loss.item(),
+                'test_acc': test_acc,
+                'test_f1': test_f1
+            }
+            
             if verbose:
-                print(f"Final Dirichlet Energy - Train: {final_train_de:.4f}, Val: {final_val_de:.4f}, Test: {final_test_de:.4f}")
+                print(f"\nTraining completed")
+                print(f"Test Loss: {final_metrics['test_loss']:.4f} | Test Acc: {final_metrics['test_acc']:.4f} | Test F1: {final_metrics['test_f1']:.4f}")
+                print("Final Oversmoothing Metrics:")
+                
+                if final_train_oversmoothing is not None:
+                    print(f"Train: EDir: {final_train_oversmoothing['EDir']:.4f}, EDir_traditional: {final_train_oversmoothing['EDir_traditional']:.4f}, "
+                          f"EProj: {final_train_oversmoothing['EProj']:.4f}, MAD: {final_train_oversmoothing['MAD']:.4f}, "
+                          f"NumRank: {final_train_oversmoothing['NumRank']:.4f}, Erank: {final_train_oversmoothing['Erank']:.4f}")
+                
+                if final_val_oversmoothing is not None:
+                    print(f"Val: EDir: {final_val_oversmoothing['EDir']:.4f}, EDir_traditional: {final_val_oversmoothing['EDir_traditional']:.4f}, "
+                          f"EProj: {final_val_oversmoothing['EProj']:.4f}, MAD: {final_val_oversmoothing['MAD']:.4f}, "
+                          f"NumRank: {final_val_oversmoothing['NumRank']:.4f}, Erank: {final_val_oversmoothing['Erank']:.4f}")
+                
+                if final_test_oversmoothing is not None:
+                    print(f"Test: EDir: {final_test_oversmoothing['EDir']:.4f}, EDir_traditional: {final_test_oversmoothing['EDir_traditional']:.4f}, "
+                          f"EProj: {final_test_oversmoothing['EProj']:.4f}, MAD: {final_test_oversmoothing['MAD']:.4f}, "
+                          f"NumRank: {final_test_oversmoothing['NumRank']:.4f}, Erank: {final_test_oversmoothing['Erank']:.4f}")
 
     def test(self, idx_test):
         self.eval()
@@ -295,6 +358,20 @@ class GNNGuard(nn.Module):
             true_test_labels = self.labels[idx_test].cpu().numpy()
             acc_test = accuracy_score(true_test_labels, pred_test_labels)
             f1_test = f1_score(true_test_labels, pred_test_labels, average='macro')
+            
+            test_mask = torch.zeros(self.features.size(0), dtype=torch.bool, device=self.device)
+            test_mask[idx_test] = True
+            edge_index = self.adj_norm._indices()
+            test_oversmoothing = self._compute_oversmoothing_for_mask(output, edge_index, test_mask, self.labels)
 
         print(f"Test Loss: {loss_test:.4f} | Test Acc: {acc_test:.4f} | Test F1: {f1_test:.4f}")
+        
+        if test_oversmoothing is not None:
+            print(f"Test Oversmoothing: EDir: {test_oversmoothing['EDir']:.4f}, EDir_traditional: {test_oversmoothing['EDir_traditional']:.4f}, "
+                  f"EProj: {test_oversmoothing['EProj']:.4f}, MAD: {test_oversmoothing['MAD']:.4f}, "
+                  f"NumRank: {test_oversmoothing['NumRank']:.4f}, Erank: {test_oversmoothing['Erank']:.4f}")
+        
         return acc_test, f1_test
+    
+    def get_oversmoothing_history(self):
+        return self.oversmoothing_history

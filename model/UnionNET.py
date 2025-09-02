@@ -228,9 +228,10 @@ class UnionNET:
                 self.wait += 1
 
             if debug:
-                print(f"Epoch {epoch:03d} | Train Acc: {train_acc:.4f}, Val Acc: {val_acc:.4f} | "
+                print(f"Epoch {epoch+1:03d} | Train Acc: {train_acc:.4f}, Val Acc: {val_acc:.4f} | "
                       f"Train F1: {train_f1:.4f}, Val F1: {val_f1:.4f}")
                 print(f"Train DE: {train_de:.4f}, Val DE: {val_de:.4f} | "
+                      f"Train DE_trad: {train_de_traditional:.4f}, Val DE_trad: {val_de_traditional:.4f} | "
                       f"Train EProj: {train_eproj:.4f}, Val EProj: {val_eproj:.4f} | "
                       f"Train MAD: {train_mad:.4f}, Val MAD: {val_mad:.4f} | "
                       f"Train NumRank: {train_num_rank:.4f}, Val NumRank: {val_num_rank:.4f} | "
@@ -282,22 +283,34 @@ class UnionNET:
 
     def compute_oversmoothing_metrics(self, embeddings, mask=None):
         if mask is not None:
+
             X_masked = embeddings[mask]
+            
             edge_mask = mask[self.edge_index[0]] & mask[self.edge_index[1]]
             edge_index_masked = self.edge_index[:, edge_mask]
-
+            
             idx_map = torch.full((mask.size(0),), -1, device=edge_index_masked.device)
             idx_map[mask] = torch.arange(mask.sum(), device=edge_index_masked.device)
             edge_index_masked = idx_map[edge_index_masked]
 
-            graphs_in_class = [{'X': X_masked, 'edge_index': edge_index_masked}]
+            graphs_in_class = [{
+                'X': X_masked, 
+                'edge_index': edge_index_masked,
+                'edge_weight': None
+            }]
+            
             return self.smooth_metrics.compute_all_metrics(
                 X=X_masked,
                 edge_index=edge_index_masked,
                 graphs_in_class=graphs_in_class
             )
         else:
-            graphs_in_class = [{'X': embeddings, 'edge_index': self.edge_index}]
+            graphs_in_class = [{
+                'X': embeddings, 
+                'edge_index': self.edge_index,
+                'edge_weight': None
+            }]
+            
             return self.smooth_metrics.compute_all_metrics(
                 X=embeddings,
                 edge_index=self.edge_index,

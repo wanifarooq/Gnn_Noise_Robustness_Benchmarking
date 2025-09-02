@@ -11,45 +11,6 @@ import copy
 
 from model.evaluation import OversmoothingMetrics
 
-def dirichlet_energy(x, edge_index):
-    row, col = edge_index
-    diff = x[row] - x[col]
-    return (diff ** 2).sum(dim=1).mean()
-
-def compute_dirichlet_energy_splits(features, data):
-    train_features = features[data.train_mask]
-    val_features = features[data.val_mask] 
-    test_features = features[data.test_mask]
-    
-    train_nodes = torch.where(data.train_mask)[0]
-    val_nodes = torch.where(data.val_mask)[0] 
-    test_nodes = torch.where(data.test_mask)[0]
-    
-    def filter_edges_for_nodes(edge_index, node_set):
-        node_mapping = {node.item(): i for i, node in enumerate(node_set)}
-        
-        mask = torch.isin(edge_index[0], node_set) & torch.isin(edge_index[1], node_set)
-        filtered_edges = edge_index[:, mask]
-
-        if filtered_edges.size(1) > 0:
-            remapped_edges = torch.zeros_like(filtered_edges)
-            for i in range(filtered_edges.size(1)):
-                remapped_edges[0, i] = node_mapping[filtered_edges[0, i].item()]
-                remapped_edges[1, i] = node_mapping[filtered_edges[1, i].item()]
-            return remapped_edges
-        else:
-            return torch.empty((2, 0), dtype=torch.long, device=edge_index.device)
-    
-    train_edges = filter_edges_for_nodes(data.edge_index, train_nodes)
-    val_edges = filter_edges_for_nodes(data.edge_index, val_nodes)
-    test_edges = filter_edges_for_nodes(data.edge_index, test_nodes)
-    
-    train_de = dirichlet_energy(train_features, train_edges) if train_edges.size(1) > 0 else torch.tensor(0.0)
-    val_de = dirichlet_energy(val_features, val_edges) if val_edges.size(1) > 0 else torch.tensor(0.0)
-    test_de = dirichlet_energy(test_features, test_edges) if test_edges.size(1) > 0 else torch.tensor(0.0)
-    
-    return train_de.item(), val_de.item(), test_de.item()
-
 class MaximalCodingRateReduction(nn.Module):
     def __init__(self, gam1: float = 1.0, gam2: float = 1.0, eps: float = 0.01, corafull: bool = False):
         super().__init__()
@@ -416,37 +377,50 @@ class ERASETrainer:
 
         best_oversmoothing_metrics = None
         
-        for epoch in range(1, num_epochs + 1):
+        for epoch in range(num_epochs):
             train_result = self._train_epoch(model, data, optimizer, loss_fn, A, Y_all, L_all)
             train_loss, loss_components, L_all = train_result
             
             train_acc, val_acc, val_loss = self._evaluate_train_val(model, data, L_all)
-
             train_f1, val_f1 = self._compute_f1_scores(model, data, L_all)
+
+            train_val_metrics = self._compute_oversmoothing_metrics_splits(model, data)
+            train_metrics = train_val_metrics.get('train', {})
+            val_metrics = train_val_metrics.get('val', {})
             
-            train_de, val_de = self._compute_dirichlet_energy_train_val(model, data)
-            
-            if epoch % 10 == 0 or epoch == num_epochs:
-                oversmoothing_metrics = self._compute_oversmoothing_metrics(model, data)
-                if debug:
-                    print(f"Epoch {epoch} - Oversmoothing Metrics:")
-                    self.oversmoothing_evaluator.print_metrics(oversmoothing_metrics)
-                    
+            train_de = train_metrics.get('EDir', 0.0)
+            train_de_traditional = train_metrics.get('EDir_traditional', 0.0)
+            train_eproj = train_metrics.get('EProj', 0.0)
+            train_mad = train_metrics.get('MAD', 0.0)
+            train_num_rank = train_metrics.get('NumRank', 0.0)
+            train_eff_rank = train_metrics.get('Erank', 0.0)
+
+            val_de = val_metrics.get('EDir', 0.0)
+            val_de_traditional = val_metrics.get('EDir_traditional', 0.0)
+            val_eproj = val_metrics.get('EProj', 0.0)
+            val_mad = val_metrics.get('MAD', 0.0)
+            val_num_rank = val_metrics.get('NumRank', 0.0)
+            val_eff_rank = val_metrics.get('Erank', 0.0)
+
+            if debug:
+                print(f"Epoch {epoch+1:03d} | Train Acc: {train_acc:.4f}, Val Acc: {val_acc:.4f} | "
+                      f"Train F1: {train_f1:.4f}, Val F1: {val_f1:.4f}")
+                print(f"Train DE: {train_de:.4f}, Val DE: {val_de:.4f} | "
+                      f"Train DE_trad: {train_de_traditional:.4f}, Val DE_trad: {val_de_traditional:.4f} | "
+                      f"Train EProj: {train_eproj:.4f}, Val EProj: {val_eproj:.4f} | "
+                      f"Train MAD: {train_mad:.4f}, Val MAD: {val_mad:.4f} | "
+                      f"Train NumRank: {train_num_rank:.4f}, Val NumRank: {val_num_rank:.4f} | "
+                      f"Train Erank: {train_eff_rank:.4f}, Val Erank: {val_eff_rank:.4f}")
+
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 best_train_acc = train_acc
                 best_val_acc = val_acc
                 patience_counter = 0
                 best_model_state = copy.deepcopy(model.state_dict())
-                best_oversmoothing_metrics = self._compute_oversmoothing_metrics(model, data)
+                best_oversmoothing_metrics = train_val_metrics
             else:
                 patience_counter += 1
-
-            if debug:
-                print(f"Epoch {epoch:03d} | Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f} | "
-                      f"Train Acc: {train_acc:.4f}, Val Acc: {val_acc:.4f} | "
-                      f"Train F1: {train_f1:.4f}, Val F1: {val_f1:.4f} | "
-                      f"Train DE: {train_de:.4f}, Val DE: {val_de:.4f}")
 
             if patience_counter >= patience:
                 if debug:
@@ -457,51 +431,59 @@ class ERASETrainer:
 
         test_acc, test_f1, test_loss = self._evaluate_test_final(model, data, L_all)
         
-        final_train_de, final_val_de, final_test_de = self._compute_dirichlet_energy(model, data)
-        
-        final_oversmoothing_metrics = self._compute_oversmoothing_metrics(model, data)
+        final_metrics_splits = self._compute_oversmoothing_metrics_splits(model, data)
+        final_train_metrics = final_metrics_splits.get('train', {})
+        final_val_metrics = final_metrics_splits.get('val', {})
+        final_test_metrics = final_metrics_splits.get('test', {})
 
         print(f"Test Loss: {test_loss:.4f} | Test Acc: {test_acc:.4f} | Test F1: {test_f1:.4f}")
-        print(f"Final Dirichlet Energy - Train: {final_train_de:.4f}, Val: {final_val_de:.4f}, Test: {final_test_de:.4f}")
-        
-        if debug:
-            print("\nFinal Oversmoothing Metrics")
-            self.oversmoothing_evaluator.print_metrics(final_oversmoothing_metrics)
+        print("Final Oversmoothing Metrics:")
+
+        if final_train_metrics:
+            print(f"Train: EDir: {final_train_metrics['EDir']:.4f}, EDir_traditional: {final_train_metrics['EDir_traditional']:.4f}, "
+                f"EProj: {final_train_metrics['EProj']:.4f}, MAD: {final_train_metrics['MAD']:.4f}, "
+                f"NumRank: {final_train_metrics['NumRank']:.4f}, Erank: {final_train_metrics['Erank']:.4f}")
+
+        if final_val_metrics:
+            print(f"Val: EDir: {final_val_metrics['EDir']:.4f}, EDir_traditional: {final_val_metrics['EDir_traditional']:.4f}, "
+                f"EProj: {final_val_metrics['EProj']:.4f}, MAD: {final_val_metrics['MAD']:.4f}, "
+                f"NumRank: {final_val_metrics['NumRank']:.4f}, Erank: {final_val_metrics['Erank']:.4f}")
+
+        if final_test_metrics:
+            print(f"Test: EDir: {final_test_metrics['EDir']:.4f}, EDir_traditional: {final_test_metrics['EDir_traditional']:.4f}, "
+                f"EProj: {final_test_metrics['EProj']:.4f}, MAD: {final_test_metrics['MAD']:.4f}, "
+                f"NumRank: {final_test_metrics['NumRank']:.4f}, Erank: {final_test_metrics['Erank']:.4f}")
 
         return {
             'train': best_train_acc,
             'val': best_val_acc,
-            'test': test_acc,
-            'dirichlet_energy': {
-                'train': final_train_de,
-                'val': final_val_de,
-                'test': final_test_de
-            },
-            'oversmoothing_metrics': final_oversmoothing_metrics
+            'test': test_acc
         }
 
     @torch.no_grad()
     def _compute_oversmoothing_metrics(self, model, data):
-
         model.eval()
         features = model(data)
         
-        metrics = self.oversmoothing_evaluator.compute_all_metrics(
+        graphs_in_class = [{
+            'X': features,
+            'edge_index': data.edge_index,
+            'edge_weight': getattr(data, 'edge_attr', None)
+        }]
+        
+        return self.oversmoothing_evaluator.compute_all_metrics(
             X=features,
             edge_index=data.edge_index,
-            edge_weight=getattr(data, 'edge_attr', None)
+            edge_weight=getattr(data, 'edge_attr', None),
+            graphs_in_class=graphs_in_class
         )
-        
-        return metrics
 
     @torch.no_grad()
     def _compute_oversmoothing_metrics_splits(self, model, data):
-
         model.eval()
         features = model(data)
         
         def filter_data_for_split(mask):
-
             nodes = torch.where(mask)[0]
             node_mapping = {node.item(): i for i, node in enumerate(nodes)}
             
@@ -522,14 +504,20 @@ class ERASETrainer:
             split_features, split_edges = filter_data_for_split(mask)
             
             if split_edges.size(1) > 0:
+                graphs_in_class = [{
+                    'X': split_features,
+                    'edge_index': split_edges,
+                    'edge_weight': None
+                }]
+                
                 split_metrics = self.oversmoothing_evaluator.compute_all_metrics(
                     X=split_features,
                     edge_index=split_edges,
-                    edge_weight=None
+                    edge_weight=None,
+                    graphs_in_class=graphs_in_class
                 )
                 splits_metrics[split_name] = split_metrics
             else:
-
                 splits_metrics[split_name] = {
                     'EDir': 0.0,
                     'NumRank': float(min(split_features.shape)),
@@ -544,20 +532,6 @@ class ERASETrainer:
     @torch.no_grad()
     def evaluate_model_oversmoothing(self, model, data):
         return self.oversmoothing_evaluator.evaluate_model_oversmoothing(model, data, self.device)
-
-
-    @torch.no_grad()
-    def _compute_dirichlet_energy_train_val(self, model, data):
-        model.eval()
-        features = model(data)
-        train_de, val_de, _ = compute_dirichlet_energy_splits(features, data)
-        return train_de, val_de
-
-    @torch.no_grad()
-    def _compute_dirichlet_energy(self, model, data):
-        model.eval()
-        features = model(data)
-        return compute_dirichlet_energy_splits(features, data)
 
     @torch.no_grad()
     def _compute_f1_scores(self, model, data, L_all):
