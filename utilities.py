@@ -219,15 +219,13 @@ def setup_seed_device(seed: int):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Device: {device}")
 
-def load_dataset(name, root=None):
-    if root is None:
-        root = "./data"
+def load_dataset(name, root="./data"):
     name_lower = name.lower()
     
     if name_lower == "corafull":
         dataset = CoraFull(root=f"{root}/CoraFull", transform=NormalizeFeatures())
     elif name_lower in ["cora", "citeseer", "pubmed"]:
-        dataset = Planetoid(root=f"{root}/{name}", name=name.capitalize(), transform=NormalizeFeatures())
+        dataset = Planetoid(root=f"{root}/{name}", name=name.capitalize(), transform=NormalizeFeatures(), split='public')
     elif name_lower in ["computers", "photo"]:
         dataset = Amazon(root=f"{root}/Amazon", name=name.capitalize(), transform=NormalizeFeatures())
     elif name_lower in ["coauthorcs", "coauthorphysics"]:
@@ -240,8 +238,13 @@ def load_dataset(name, root=None):
         raise ValueError(f"Dataset {name} not supported.")
     
     data = dataset[0]
+    
     if not hasattr(data, 'train_mask'):
-        data = RandomNodeSplit(num_train_per_class=20, num_val=500, num_test=1000)(data)
+        if name_lower in ['wikics', 'reddit', 'computers', 'photo', 'coauthorcs', 'coauthorphysics']:
+            data = RandomNodeSplit(train_ratio=0.7, val_ratio=0.1, test_ratio=0.2)(data)
+        else:
+            data = RandomNodeSplit(num_train_per_class=20, num_val=500, num_test=1000)(data)
+    
     return data, dataset.num_classes
 
 def get_model(model_name, in_channels, hidden_channels, out_channels, **kwargs):
