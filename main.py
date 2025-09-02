@@ -318,8 +318,6 @@ def run_experiment(config, run_id=1):
                 self_loop=config['model'].get('self_loop', True)
             )
             
-            print(f"[Debug] Modello creato con {gnn_model_defense.out_channels if hasattr(gnn_model_defense, 'out_channels') else 'unknown'} output channels")
-
             defense = CommunityDefense(
                 pyg_data,
                 community_method=defense_cfg.get("community_method", "louvain"),

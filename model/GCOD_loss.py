@@ -6,10 +6,60 @@ from sklearn.metrics import f1_score
 from copy import deepcopy
 from torch_geometric.loader import NeighborLoader
 
+from model.evaluation import OversmoothingMetrics
+
 def dirichlet_energy(x, edge_index):
     row, col = edge_index
     diff = x[row] - x[col]
     return (diff ** 2).sum(dim=1).mean()
+
+def _compute_oversmoothing_for_batch(oversmoothing_evaluator, embeddings, edge_index, batch_mask):
+    try:
+        mask_indices = torch.where(batch_mask)[0]
+        if len(mask_indices) == 0:
+            return None
+            
+        mask_embeddings = embeddings[mask_indices]
+        
+        mask_set = set(mask_indices.cpu().numpy())
+        edge_mask = torch.tensor([
+            src.item() in mask_set and tgt.item() in mask_set
+            for src, tgt in edge_index.t()
+        ], device=edge_index.device)
+        
+        if not edge_mask.any():
+            return {
+                'NumRank': float(min(mask_embeddings.shape)),
+                'Erank': float(min(mask_embeddings.shape)),
+                'EDir': 0.0,
+                'EDir_traditional': 0.0,
+                'EProj': 0.0,
+                'MAD': 0.0
+            }
+        
+        masked_edges = edge_index[:, edge_mask]
+        node_mapping = {orig_idx.item(): local_idx for local_idx, orig_idx in enumerate(mask_indices)}
+        
+        remapped_edges = torch.stack([
+            torch.tensor([node_mapping[src.item()] for src in masked_edges[0]], device=edge_index.device),
+            torch.tensor([node_mapping[tgt.item()] for tgt in masked_edges[1]], device=edge_index.device)
+        ])
+        
+        graphs_in_class = [{
+            'X': mask_embeddings,
+            'edge_index': remapped_edges,
+            'edge_weight': None
+        }]
+        
+        return oversmoothing_evaluator.compute_all_metrics(
+            X=mask_embeddings,
+            edge_index=remapped_edges,
+            graphs_in_class=graphs_in_class
+        )
+        
+    except Exception as e:
+        print(f"Warning: Could not compute oversmoothing metrics: {e}")
+        return None
 
 class GCODLoss(nn.Module):
     def __init__(self, num_classes, device, num_samples, encoder_features=64):
@@ -73,6 +123,8 @@ def train_with_gcod(model, data, noisy_indices=None, device='cuda', epochs=500,
 
     model.to(device)
     data = data.to(device)
+
+    oversmoothing_evaluator = OversmoothingMetrics(device=device)
     
     num_classes = int(data.y.max().item()) + 1
     
@@ -194,6 +246,17 @@ def train_with_gcod(model, data, noisy_indices=None, device='cuda', epochs=500,
         avg_train_f1 = total_train_f1 / num_train_batches
 
         model.eval()
+        with torch.no_grad():
+            full_embeddings = model(data)
+            
+            train_oversmoothing = _compute_oversmoothing_for_batch(
+                oversmoothing_evaluator, full_embeddings, data.edge_index, data.train_mask
+            )
+            val_oversmoothing = _compute_oversmoothing_for_batch(
+                oversmoothing_evaluator, full_embeddings, data.edge_index, data.val_mask
+            )
+
+        model.eval()
         gcod_loss_fn.eval()
         total_val_loss = 0
         total_val_acc = 0
@@ -250,9 +313,28 @@ def train_with_gcod(model, data, noisy_indices=None, device='cuda', epochs=500,
             model.load_state_dict(best_model_state)
             break
         
-        print(f"Epoch {epoch:03d} | Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f} | "
-              f"Train Acc: {avg_train_acc:.4f}, Val Acc: {avg_val_acc:.4f} | "
-              f"Train F1: {avg_train_f1:.4f}, Val F1: {avg_val_f1:.4f}")
+        train_de = train_oversmoothing['EDir'] if train_oversmoothing else 0.0
+        train_de_traditional = train_oversmoothing['EDir_traditional'] if train_oversmoothing else 0.0
+        train_eproj = train_oversmoothing['EProj'] if train_oversmoothing else 0.0
+        train_mad = train_oversmoothing['MAD'] if train_oversmoothing else 0.0
+        train_num_rank = train_oversmoothing['NumRank'] if train_oversmoothing else 0.0
+        train_eff_rank = train_oversmoothing['Erank'] if train_oversmoothing else 0.0
+
+        val_de = val_oversmoothing['EDir'] if val_oversmoothing else 0.0
+        val_de_traditional = val_oversmoothing['EDir_traditional'] if val_oversmoothing else 0.0
+        val_eproj = val_oversmoothing['EProj'] if val_oversmoothing else 0.0
+        val_mad = val_oversmoothing['MAD'] if val_oversmoothing else 0.0
+        val_num_rank = val_oversmoothing['NumRank'] if val_oversmoothing else 0.0
+        val_eff_rank = val_oversmoothing['Erank'] if val_oversmoothing else 0.0
+
+        print(f"Epoch {epoch:03d} | Train Acc: {avg_train_acc:.4f}, Val Acc: {avg_val_acc:.4f} | "
+            f"Train F1: {avg_train_f1:.4f}, Val F1: {avg_val_f1:.4f}")
+        print(f"Train DE: {train_de:.4f}, Val DE: {val_de:.4f} | "
+            f"Train DE_trad: {train_de_traditional:.4f}, Val DE_trad: {val_de_traditional:.4f} | "
+            f"Train EProj: {train_eproj:.4f}, Val EProj: {val_eproj:.4f} | "
+            f"Train MAD: {train_mad:.4f}, Val MAD: {val_mad:.4f} | "
+            f"Train NumRank: {train_num_rank:.4f}, Val NumRank: {val_num_rank:.4f} | "
+            f"Train Erank: {train_eff_rank:.4f}, Val Erank: {val_eff_rank:.4f}")
     
     model.eval()
     gcod_loss_fn.eval()
@@ -264,7 +346,7 @@ def train_with_gcod(model, data, noisy_indices=None, device='cuda', epochs=500,
     with torch.no_grad():
         for batch in test_loader:
             batch = batch.to(device)
-            out_test = model(batch.x, batch.edge_index)
+            out_test = model(batch)
             embeddings_test = out_test
             
             batch_mask = batch.test_mask[:batch.batch_size]
@@ -294,11 +376,29 @@ def train_with_gcod(model, data, noisy_indices=None, device='cuda', epochs=500,
             total_test_acc += batch_test_acc
             total_test_f1 += batch_test_f1
             num_test_batches += 1
+
+    model.eval()
+    with torch.no_grad():
+        full_embeddings_test = model(data)
+        test_oversmoothing = _compute_oversmoothing_for_batch(
+            oversmoothing_evaluator, full_embeddings_test, data.edge_index, data.test_mask
+        )
     
     avg_test_loss = total_test_loss / num_test_batches
     avg_test_acc = total_test_acc / num_test_batches
     avg_test_f1 = total_test_f1 / num_test_batches
+
+    test_de = test_oversmoothing['EDir'] if test_oversmoothing else 0.0
+    test_de_traditional = test_oversmoothing['EDir_traditional'] if test_oversmoothing else 0.0
+    test_eproj = test_oversmoothing['EProj'] if test_oversmoothing else 0.0
+    test_mad = test_oversmoothing['MAD'] if test_oversmoothing else 0.0
+    test_num_rank = test_oversmoothing['NumRank'] if test_oversmoothing else 0.0
+    test_eff_rank = test_oversmoothing['Erank'] if test_oversmoothing else 0.0
     
     print(f"Test Loss: {avg_test_loss:.4f} | Test Acc: {avg_test_acc:.4f} | Test F1: {avg_test_f1:.4f}")
+    print("Final Oversmoothing Metrics:")
+    print(f"Test: EDir: {test_de:.4f}, EDir_traditional: {test_de_traditional:.4f}, "
+        f"EProj: {test_eproj:.4f}, MAD: {test_mad:.4f}, "
+        f"NumRank: {test_num_rank:.4f}, Erank: {test_eff_rank:.4f}")
     
     return avg_test_acc

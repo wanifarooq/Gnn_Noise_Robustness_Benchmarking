@@ -15,32 +15,7 @@ except ImportError:
     nx = None
 from sklearn.metrics import f1_score
 
-def compute_dirichlet_energy(predictions, edge_index, mask=None):
-
-    if predictions.dim() > 1:
-        probs = F.softmax(predictions, dim=1)
-    else:
-        probs = predictions
-    
-    if mask is not None:
-
-        valid_edges = mask[edge_index[0]] & mask[edge_index[1]]
-        edge_index_filtered = edge_index[:, valid_edges]
-    else:
-        edge_index_filtered = edge_index
-    
-    if edge_index_filtered.shape[1] == 0:
-        return 0.0
-
-    node_i = edge_index_filtered[0]
-    node_j = edge_index_filtered[1]
-    
-    diff = probs[node_i] - probs[node_j]
-    squared_diff = (diff ** 2).sum(dim=1)
-    
-    dirichlet_energy = 0.5 * squared_diff.mean().item()
-    
-    return dirichlet_energy
+from model.evaluation import OversmoothingMetrics
 
 def BinaryLabelToPosNeg(labels):
     if isinstance(labels, torch.Tensor):
@@ -54,7 +29,6 @@ def BinaryLabelTo01(labels):
     else:
         return (labels + 1) / 2
     
-
 def accuracy_torch(preds, labels):
     pred_labels = preds.argmax(dim=1)
     correct = (pred_labels == labels).sum().item()
@@ -215,6 +189,52 @@ class Attack:
         self.device = torch.device(f"cuda:{gpu_id}" if torch.cuda.is_available() else "cpu")
         self.tau = smooth_coefficient
         self.c_max = c_max
+        self.oversmoothing_evaluator = OversmoothingMetrics(device=self.device)
+
+    def _compute_oversmoothing_for_mask(self, embeddings, edge_index, mask, labels=None):
+        try:
+            mask_indices = torch.where(mask)[0]
+            mask_embeddings = embeddings[mask]
+            
+            mask_set = set(mask_indices.cpu().numpy())
+            edge_mask = torch.tensor([
+                src.item() in mask_set and tgt.item() in mask_set
+                for src, tgt in edge_index.t()
+            ], device=edge_index.device)
+            
+            if not edge_mask.any():
+                return {
+                    'NumRank': float(min(mask_embeddings.shape)),
+                    'Erank': float(min(mask_embeddings.shape)),
+                    'EDir': 0.0,
+                    'EDir_traditional': 0.0,
+                    'EProj': 0.0,
+                    'MAD': 0.0
+                }
+            
+            masked_edges = edge_index[:, edge_mask]
+            node_mapping = {orig_idx.item(): local_idx for local_idx, orig_idx in enumerate(mask_indices)}
+            
+            remapped_edges = torch.stack([
+                torch.tensor([node_mapping[src.item()] for src in masked_edges[0]], device=edge_index.device),
+                torch.tensor([node_mapping[tgt.item()] for tgt in masked_edges[1]], device=edge_index.device)
+            ])
+            
+            graphs_in_class = [{
+                'X': mask_embeddings,
+                'edge_index': remapped_edges,
+                'edge_weight': None
+            }]
+            
+            return self.oversmoothing_evaluator.compute_all_metrics(
+                X=mask_embeddings,
+                edge_index=remapped_edges,
+                graphs_in_class=graphs_in_class
+            )
+            
+        except Exception as e:
+            print(f"Warning: Could not compute oversmoothing metrics for mask: {e}")
+            return None
 
     def GNN_test(self, gnn_model, epochs=200, early_stopping=10):
         import time
@@ -267,13 +287,33 @@ class Attack:
                 metrics['train_f1'] = f1_torch(out_val[train_mask], y[train_mask])
                 metrics['val_f1'] = f1_torch(out_val[val_mask], y[val_mask])
                 
-                train_de = compute_dirichlet_energy(out_val, edge_index_sub, train_mask)
-                val_de = compute_dirichlet_energy(out_val, edge_index_sub, val_mask)
+                train_oversmoothing = self._compute_oversmoothing_for_mask(out_val, edge_index_sub, train_mask, y)
+                val_oversmoothing = self._compute_oversmoothing_for_mask(out_val, edge_index_sub, val_mask, y)
+                
+                train_de = train_oversmoothing['EDir'] if train_oversmoothing else 0.0
+                train_de_traditional = train_oversmoothing['EDir_traditional'] if train_oversmoothing else 0.0
+                train_eproj = train_oversmoothing['EProj'] if train_oversmoothing else 0.0
+                train_mad = train_oversmoothing['MAD'] if train_oversmoothing else 0.0
+                train_num_rank = train_oversmoothing['NumRank'] if train_oversmoothing else 0.0
+                train_eff_rank = train_oversmoothing['Erank'] if train_oversmoothing else 0.0
+                
+                val_de = val_oversmoothing['EDir'] if val_oversmoothing else 0.0
+                val_de_traditional = val_oversmoothing['EDir_traditional'] if val_oversmoothing else 0.0
+                val_eproj = val_oversmoothing['EProj'] if val_oversmoothing else 0.0
+                val_mad = val_oversmoothing['MAD'] if val_oversmoothing else 0.0
+                val_num_rank = val_oversmoothing['NumRank'] if val_oversmoothing else 0.0
+                val_eff_rank = val_oversmoothing['Erank'] if val_oversmoothing else 0.0
 
-            print(f"Epoch {epoch:03d} | Train Loss: {train_loss:.4f}, Val Loss: {metrics['val_loss']:.4f} | "
-                  f"Train Acc: {metrics['train_acc']:.4f}, Val Acc: {metrics['val_acc']:.4f} | "
-                  f"Train F1: {metrics['train_f1']:.4f}, Val F1: {metrics['val_f1']:.4f} | "
-                  f"Train DE: {train_de:.4f}, Val DE: {val_de:.4f}")
+                print(f"Epoch {epoch:03d} | Train Loss: {train_loss:.4f}, Val Loss: {metrics['val_loss']:.4f} | "
+                    f"Train Acc: {metrics['train_acc']:.4f}, Val Acc: {metrics['val_acc']:.4f} | "
+                    f"Train F1: {metrics['train_f1']:.4f}, Val F1: {metrics['val_f1']:.4f}")
+                print(f"Train DE: {train_de:.4f}, Val DE: {val_de:.4f} | "
+                    f"Train DE_trad: {train_de_traditional:.4f}, Val DE_trad: {val_de_traditional:.4f} | "
+                    f"Train EProj: {train_eproj:.4f}, Val EProj: {val_eproj:.4f} | "
+                    f"Train MAD: {train_mad:.4f}, Val MAD: {val_mad:.4f} | "
+                    f"Train NumRank: {train_num_rank:.4f}, Val NumRank: {val_num_rank:.4f} | "
+                    f"Train Erank: {train_eff_rank:.4f}, Val Erank: {val_eff_rank:.4f}")
+        
 
             if metrics['val_loss'] < best_val_loss:
                 best_val_loss = metrics['val_loss']
@@ -296,14 +336,30 @@ class Attack:
             final_metrics['test_acc'] = accuracy_torch(out[test_mask], y[test_mask])
             final_metrics['test_f1'] = f1_torch(out[test_mask], y[test_mask])
             
-            final_train_de = compute_dirichlet_energy(out, edge_index_sub, train_mask)
-            final_val_de = compute_dirichlet_energy(out, edge_index_sub, val_mask)
-            final_test_de = compute_dirichlet_energy(out, edge_index_sub, test_mask)
+            final_train_oversmoothing = self._compute_oversmoothing_for_mask(out, edge_index_sub, train_mask, y)
+            final_val_oversmoothing = self._compute_oversmoothing_for_mask(out, edge_index_sub, val_mask, y)  
+            final_test_oversmoothing = self._compute_oversmoothing_for_mask(out, edge_index_sub, test_mask, y)
 
         total_time = time.time() - start_time
         print(f"\nTraining completed in {total_time:.2f}s")
         print(f"Test Loss: {final_metrics['test_loss']:.4f} | Test Acc: {final_metrics['test_acc']:.4f} | Test F1: {final_metrics['test_f1']:.4f}")
-        print(f"Final Dirichlet Energy - Train: {final_train_de:.4f}, Val: {final_val_de:.4f}, Test: {final_test_de:.4f}")
+        print("Final Oversmoothing Metrics:")
+    
+        if final_train_oversmoothing is not None:
+            print(f"Train: EDir: {final_train_oversmoothing['EDir']:.4f}, EDir_traditional: {final_train_oversmoothing['EDir_traditional']:.4f}, "
+                f"EProj: {final_train_oversmoothing['EProj']:.4f}, MAD: {final_train_oversmoothing['MAD']:.4f}, "
+                f"NumRank: {final_train_oversmoothing['NumRank']:.4f}, Erank: {final_train_oversmoothing['Erank']:.4f}")
+            
+        if final_val_oversmoothing is not None:
+            print(f"Val: EDir: {final_val_oversmoothing['EDir']:.4f}, EDir_traditional: {final_val_oversmoothing['EDir_traditional']:.4f}, "
+                f"EProj: {final_val_oversmoothing['EProj']:.4f}, MAD: {final_val_oversmoothing['MAD']:.4f}, "
+                f"NumRank: {final_val_oversmoothing['NumRank']:.4f}, Erank: {final_val_oversmoothing['Erank']:.4f}")
+
+        if final_test_oversmoothing is not None:
+            print(f"Test: EDir: {final_test_oversmoothing['EDir']:.4f}, EDir_traditional: {final_test_oversmoothing['EDir_traditional']:.4f}, "
+                f"EProj: {final_test_oversmoothing['EProj']:.4f}, MAD: {final_test_oversmoothing['MAD']:.4f}, "
+                f"NumRank: {final_test_oversmoothing['NumRank']:.4f}, Erank: {final_test_oversmoothing['Erank']:.4f}")
+
 
         return final_metrics['test_acc'], final_metrics['test_f1'], out[test_mask].cpu().numpy()
 
@@ -597,14 +653,55 @@ class CommunityDefense:
         self.verbose = verbose
         self.device = device or (torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu"))
         
+        self.oversmoothing_evaluator = OversmoothingMetrics(device=self.device)
+        
         self._prepare_graph()
         self.comm_labels = self._compute_communities()
         
-        if self.verbose:
-            print(f"[Defense Init] Nodi: {self.N}, Comunità: {len(np.unique(self.comm_labels))}")
-            print(f"[Defense Init] Train mask sum: {self.data.train_mask.sum()}")
-            print(f"[Defense Init] Val mask sum: {self.data.val_mask.sum()}")
-            print(f"[Defense Init] Test mask sum: {self.data.test_mask.sum()}")
+    def _compute_oversmoothing_for_mask(self, embeddings, edge_index, mask, labels=None):
+        try:
+            mask_indices = torch.where(mask)[0]
+            mask_embeddings = embeddings[mask]
+            
+            mask_set = set(mask_indices.cpu().numpy())
+            edge_mask = torch.tensor([
+                src.item() in mask_set and tgt.item() in mask_set
+                for src, tgt in edge_index.t()
+            ], device=edge_index.device)
+            
+            if not edge_mask.any():
+                return {
+                    'NumRank': float(min(mask_embeddings.shape)),
+                    'Erank': float(min(mask_embeddings.shape)),
+                    'EDir': 0.0,
+                    'EDir_traditional': 0.0,
+                    'EProj': 0.0,
+                    'MAD': 0.0
+                }
+            
+            masked_edges = edge_index[:, edge_mask]
+            node_mapping = {orig_idx.item(): local_idx for local_idx, orig_idx in enumerate(mask_indices)}
+            
+            remapped_edges = torch.stack([
+                torch.tensor([node_mapping[src.item()] for src in masked_edges[0]], device=edge_index.device),
+                torch.tensor([node_mapping[tgt.item()] for tgt in masked_edges[1]], device=edge_index.device)
+            ])
+            
+            graphs_in_class = [{
+                'X': mask_embeddings,
+                'edge_index': remapped_edges,
+                'edge_weight': None
+            }]
+            
+            return self.oversmoothing_evaluator.compute_all_metrics(
+                X=mask_embeddings,
+                edge_index=remapped_edges,
+                graphs_in_class=graphs_in_class
+            )
+            
+        except Exception as e:
+            print(f"Warning: Could not compute oversmoothing metrics for mask: {e}")
+            return None
 
     def _prepare_graph(self):
         row, col = self.data.edge_index.cpu().numpy()
@@ -625,17 +722,81 @@ class CommunityDefense:
         self.test_mask = torch.as_tensor(self.data.test_mask, dtype=torch.bool, device=self.device)
 
     def _compute_communities(self):
-
         if self.community_method.lower() == "louvain":
             if nx is None:
                 raise ImportError("For 'louvain' you need networkx: pip install networkx python-louvain")
+            
+            community_louvain = None
+
             try:
-                import community as community_louvain
+                import community.community_louvain as community_louvain
+                if self.verbose:
+                    print("Using community.community_louvain")
             except ImportError:
-                raise ImportError("For Louvain you need the 'python-louvain' package: pip install python-louvain")
+                pass
+            
+            if community_louvain is None:
+                try:
+                    import community as community_module
+                    if hasattr(community_module, 'best_partition'):
+                        community_louvain = community_module
+                        if self.verbose:
+                            print("Using community module with best_partition")
+                    else:
+                        if self.verbose:
+                            print("community module found but no best_partition attribute")
+                except ImportError:
+                    pass
+            
+            if community_louvain is None:
+                try:
+                    import community_louvain
+                    if self.verbose:
+                        print("Using direct community_louvain import")
+                except ImportError:
+                    pass
+
+            if community_louvain is None:
+                try:
+                    import networkx.algorithms.community as nx_community
+                    if self.verbose:
+                        print("Using NetworkX community detection as fallback")
+                    
+                    G = nx.Graph()
+                    G.add_nodes_from(range(self.N))
+                    r, c = self.A.nonzero()
+                    edges = list(zip(r.tolist(), c.tolist()))
+                    G.add_edges_from(edges)
+                    
+                    if hasattr(nx_community, 'louvain_communities'):
+                        communities = nx_community.louvain_communities(G, seed=0)
+                        partition = {}
+                        for comm_id, nodes in enumerate(communities):
+                            for node in nodes:
+                                partition[node] = comm_id
+                    else:
+                        communities = nx_community.greedy_modularity_communities(G)
+                        partition = {}
+                        for comm_id, nodes in enumerate(communities):
+                            for node in nodes:
+                                partition[node] = comm_id
+                    
+                    labels = np.array([partition.get(i, 0) for i in range(self.N)], dtype=np.int64)
+                    if self.verbose:
+                        k = len(set(labels.tolist()))
+                        print(f"Defense: NetworkX community detection: found {k} community")
+                    return labels
+                    
+                except (ImportError, AttributeError) as e:
+                    if self.verbose:
+                        print(f"NetworkX community detection also failed: {e}")
+            
+            if community_louvain is None:
+                raise ImportError(
+                    "Could not import Louvain community detection."
+                )
 
             G = nx.Graph()
-
             G.add_nodes_from(range(self.N))
             r, c = self.A.nonzero()
             edges = list(zip(r.tolist(), c.tolist()))
@@ -649,7 +810,6 @@ class CommunityDefense:
             return labels
 
         elif self.community_method.lower() == "spectral":
-
             from sklearn.cluster import KMeans
             from scipy.sparse import csgraph
 
@@ -746,7 +906,7 @@ class CommunityDefense:
                         early_stopping: int = 20,
                         lr: float = 0.005,
                         weight_decay: float = 1e-3,
-                        debug: bool = False):
+                        debug: bool = True):
         import time
         start_time = time.time()
         
@@ -820,17 +980,36 @@ class CommunityDefense:
                 metrics['val_f1'] = f1_score(y_true[self.val_mask.cpu().numpy()],
                                 pred[self.val_mask.cpu().numpy()],
                                 average="macro")
+
+                train_oversmoothing = self._compute_oversmoothing_for_mask(logits_eval, edge_index, self.train_mask, y)
+                val_oversmoothing = self._compute_oversmoothing_for_mask(logits_eval, edge_index, self.val_mask, y)
                 
-                train_de = compute_dirichlet_energy(logits_eval, edge_index, self.train_mask)
-                val_de = compute_dirichlet_energy(logits_eval, edge_index, self.val_mask)
+                train_de = train_oversmoothing['EDir'] if train_oversmoothing else 0.0
+                train_de_traditional = train_oversmoothing['EDir_traditional'] if train_oversmoothing else 0.0
+                train_eproj = train_oversmoothing['EProj'] if train_oversmoothing else 0.0
+                train_mad = train_oversmoothing['MAD'] if train_oversmoothing else 0.0
+                train_num_rank = train_oversmoothing['NumRank'] if train_oversmoothing else 0.0
+                train_eff_rank = train_oversmoothing['Erank'] if train_oversmoothing else 0.0
+                
+                val_de = val_oversmoothing['EDir'] if val_oversmoothing else 0.0
+                val_de_traditional = val_oversmoothing['EDir_traditional'] if val_oversmoothing else 0.0
+                val_eproj = val_oversmoothing['EProj'] if val_oversmoothing else 0.0
+                val_mad = val_oversmoothing['MAD'] if val_oversmoothing else 0.0
+                val_num_rank = val_oversmoothing['NumRank'] if val_oversmoothing else 0.0
+                val_eff_rank = val_oversmoothing['Erank'] if val_oversmoothing else 0.0
 
             scheduler.step(metrics['val_loss'])
 
             if debug:
                 print(f"Epoch {epoch:03d} | Train Loss: {train_loss:.4f}, Val Loss: {metrics['val_loss']:.4f} | "
                       f"Train Acc: {metrics['train_acc']:.4f}, Val Acc: {metrics['val_acc']:.4f} | "
-                      f"Train F1: {metrics['train_f1']:.4f}, Val F1: {metrics['val_f1']:.4f} | "
-                      f"Train DE: {train_de:.4f}, Val DE: {val_de:.4f}")
+                      f"Train F1: {metrics['train_f1']:.4f}, Val F1: {metrics['val_f1']:.4f}")
+                print(f"Train DE: {train_de:.4f}, Val DE: {val_de:.4f} | "
+                      f"Train DE_trad: {train_de_traditional:.4f}, Val DE_trad: {val_de_traditional:.4f} | "
+                      f"Train EProj: {train_eproj:.4f}, Val EProj: {val_eproj:.4f} | "
+                      f"Train MAD: {train_mad:.4f}, Val MAD: {val_mad:.4f} | "
+                      f"Train NumRank: {train_num_rank:.4f}, Val NumRank: {val_num_rank:.4f} | "
+                      f"Train Erank: {train_eff_rank:.4f}, Val Erank: {val_eff_rank:.4f}")
 
             if metrics['val_loss'] < best_val - 1e-4:
                 best_val = metrics['val_loss']
@@ -862,13 +1041,28 @@ class CommunityDefense:
                             pred[self.test_mask.cpu().numpy()],
                             average="macro")
             
-            final_train_de = compute_dirichlet_energy(logits, edge_index, self.train_mask)
-            final_val_de = compute_dirichlet_energy(logits, edge_index, self.val_mask)
-            final_test_de = compute_dirichlet_energy(logits, edge_index, self.test_mask)
+            final_train_oversmoothing = self._compute_oversmoothing_for_mask(logits, edge_index, self.train_mask, y)
+            final_val_oversmoothing = self._compute_oversmoothing_for_mask(logits, edge_index, self.val_mask, y)  
+            final_test_oversmoothing = self._compute_oversmoothing_for_mask(logits, edge_index, self.test_mask, y)
 
         total_time = time.time() - start_time
         print(f"\nTraining completed in {total_time:.2f}s")
         print(f"Test Loss: {final_metrics['test_loss']:.4f} | Test Acc: {final_metrics['test_acc']:.4f} | Test F1: {final_metrics['test_f1']:.4f}")
-        print(f"Final Dirichlet Energy - Train: {final_train_de:.4f}, Val: {final_val_de:.4f}, Test: {final_test_de:.4f}")
+        print("Final Oversmoothing Metrics:")
+        
+        if final_train_oversmoothing is not None:
+            print(f"Train: EDir: {final_train_oversmoothing['EDir']:.4f}, EDir_traditional: {final_train_oversmoothing['EDir_traditional']:.4f}, "
+                  f"EProj: {final_train_oversmoothing['EProj']:.4f}, MAD: {final_train_oversmoothing['MAD']:.4f}, "
+                  f"NumRank: {final_train_oversmoothing['NumRank']:.4f}, Erank: {final_train_oversmoothing['Erank']:.4f}")
+                  
+        if final_val_oversmoothing is not None:
+            print(f"Val: EDir: {final_val_oversmoothing['EDir']:.4f}, EDir_traditional: {final_val_oversmoothing['EDir_traditional']:.4f}, "
+                  f"EProj: {final_val_oversmoothing['EProj']:.4f}, MAD: {final_val_oversmoothing['MAD']:.4f}, "
+                  f"NumRank: {final_val_oversmoothing['NumRank']:.4f}, Erank: {final_val_oversmoothing['Erank']:.4f}")
+
+        if final_test_oversmoothing is not None:
+            print(f"Test: EDir: {final_test_oversmoothing['EDir']:.4f}, EDir_traditional: {final_test_oversmoothing['EDir_traditional']:.4f}, "
+                  f"EProj: {final_test_oversmoothing['EProj']:.4f}, MAD: {final_test_oversmoothing['MAD']:.4f}, "
+                  f"NumRank: {final_test_oversmoothing['NumRank']:.4f}, Erank: {final_test_oversmoothing['Erank']:.4f}")
 
         return final_metrics['test_acc']

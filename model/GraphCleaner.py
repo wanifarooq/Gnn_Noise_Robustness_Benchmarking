@@ -16,6 +16,7 @@ from sklearn.metrics import (
 from torch_geometric.utils import to_scipy_sparse_matrix
 from cleanlab.count import estimate_latent, compute_confident_joint
 
+from model.evaluation import OversmoothingMetrics
 
 class GraphCleanerDetector:
 
@@ -25,9 +26,56 @@ class GraphCleanerDetector:
         self.k = config.get('k', 3)
         self.sample_rate = config.get('sample_rate', 0.5)
         self.max_iter_classifier = config.get('max_iter_classifier', 3000)
+
+        self.oversmoothing_evaluator = OversmoothingMetrics(device=device)
         
     def ensure_dir(self, path):
         os.makedirs(path, exist_ok=True)
+
+    def _compute_oversmoothing_for_mask(self, embeddings, edge_index, mask, labels=None):
+        try:
+            mask_indices = torch.where(mask)[0]
+            mask_embeddings = embeddings[mask]
+            
+            mask_set = set(mask_indices.cpu().numpy())
+            edge_mask = torch.tensor([
+                src.item() in mask_set and tgt.item() in mask_set
+                for src, tgt in edge_index.t()
+            ], device=edge_index.device)
+            
+            if not edge_mask.any():
+                return {
+                    'NumRank': float(min(mask_embeddings.shape)),
+                    'Erank': float(min(mask_embeddings.shape)),
+                    'EDir': 0.0,
+                    'EDir_traditional': 0.0,
+                    'EProj': 0.0,
+                    'MAD': 0.0
+                }
+            
+            masked_edges = edge_index[:, edge_mask]
+            node_mapping = {orig_idx.item(): local_idx for local_idx, orig_idx in enumerate(mask_indices)}
+            
+            remapped_edges = torch.stack([
+                torch.tensor([node_mapping[src.item()] for src in masked_edges[0]], device=edge_index.device),
+                torch.tensor([node_mapping[tgt.item()] for tgt in masked_edges[1]], device=edge_index.device)
+            ])
+            
+            graphs_in_class = [{
+                'X': mask_embeddings,
+                'edge_index': remapped_edges,
+                'edge_weight': None
+            }]
+            
+            return self.oversmoothing_evaluator.compute_all_metrics(
+                X=mask_embeddings,
+                edge_index=remapped_edges,
+                graphs_in_class=graphs_in_class
+            )
+            
+        except Exception as e:
+            print(f"Warning: Could not compute oversmoothing metrics for mask: {e}")
+            return None
         
     def to_softmax(self, log_probs):
         if isinstance(log_probs, np.ndarray):
@@ -77,10 +125,16 @@ class GraphCleanerDetector:
         metrics['val_acc'] = accuracy_score(val_true, val_pred)
         metrics['val_f1'] = f1_score(val_true, val_pred, average='micro')
         
+        train_oversmoothing = self._compute_oversmoothing_for_mask(out, data.edge_index, data.train_mask, data.y)
+        val_oversmoothing = self._compute_oversmoothing_for_mask(out, data.edge_index, data.val_mask, data.y)
+        
+        metrics['train_oversmoothing'] = train_oversmoothing
+        metrics['val_oversmoothing'] = val_oversmoothing
+        
         return metrics
 
     def train_base_gnn(self, data, model, n_epochs=200):
-        print("Training base GNN for GraphCleaner...")
+        print("Training base GNN for GraphCleaner")
         start_time = time.time()
         
         optimizer = torch.optim.Adam(model.parameters(), 
@@ -112,16 +166,34 @@ class GraphCleanerDetector:
             model.eval()
             with torch.no_grad():
                 out = model(data)
-
                 metrics = self.compute_metrics(data, model, out)
                 
-                train_de = self.compute_dirichlet_energy(data, out, data.train_mask.cpu())
-                val_de = self.compute_dirichlet_energy(data, out, data.val_mask.cpu())
-
+                train_oversmoothing = metrics.get('train_oversmoothing', {})
+                val_oversmoothing = metrics.get('val_oversmoothing', {})
+                
+                train_de = train_oversmoothing.get('EDir', 0.0)
+                train_de_traditional = train_oversmoothing.get('EDir_traditional', 0.0)
+                train_eproj = train_oversmoothing.get('EProj', 0.0)
+                train_mad = train_oversmoothing.get('MAD', 0.0)
+                train_num_rank = train_oversmoothing.get('NumRank', 0.0)
+                train_eff_rank = train_oversmoothing.get('Erank', 0.0)
+                
+                val_de = val_oversmoothing.get('EDir', 0.0)
+                val_de_traditional = val_oversmoothing.get('EDir_traditional', 0.0)
+                val_eproj = val_oversmoothing.get('EProj', 0.0)
+                val_mad = val_oversmoothing.get('MAD', 0.0)
+                val_num_rank = val_oversmoothing.get('NumRank', 0.0)
+                val_eff_rank = val_oversmoothing.get('Erank', 0.0)
+                
                 print(f"Epoch {epoch:03d} | Train Loss: {metrics['train_loss']:.4f}, Val Loss: {metrics['val_loss']:.4f} | "
-                      f"Train Acc: {metrics['train_acc']:.4f}, Val Acc: {metrics['val_acc']:.4f} | "
-                      f"Train F1: {metrics['train_f1']:.4f}, Val F1: {metrics['val_f1']:.4f} | "
-                      f"Train DE: {train_de:.4f}, Val DE: {val_de:.4f}")
+                    f"Train Acc: {metrics['train_acc']:.4f}, Val Acc: {metrics['val_acc']:.4f} | "
+                    f"Train F1: {metrics['train_f1']:.4f}, Val F1: {metrics['val_f1']:.4f}")
+                print(f"Train DE: {train_de:.4f}, Val DE: {val_de:.4f} | "
+                    f"Train DE_trad: {train_de_traditional:.4f}, Val DE_trad: {val_de_traditional:.4f} | "
+                    f"Train EProj: {train_eproj:.4f}, Val EProj: {val_eproj:.4f} | "
+                    f"Train MAD: {train_mad:.4f}, Val MAD: {val_mad:.4f} | "
+                    f"Train NumRank: {train_num_rank:.4f}, Val NumRank: {val_num_rank:.4f} | "
+                    f"Train Erank: {train_eff_rank:.4f}, Val Erank: {val_eff_rank:.4f}")
 
                 if metrics['val_loss'] < best_val_loss:
                     best_val_loss = metrics['val_loss']
@@ -144,23 +216,37 @@ class GraphCleanerDetector:
         model.eval()
         with torch.no_grad():
             out = model(data)
-
             final_metrics = {}
             test_pred = out[data.test_mask].argmax(dim=-1).cpu()
             test_true = data.y[data.test_mask].cpu()
             final_metrics['test_loss'] = F.cross_entropy(out[data.test_mask], data.y_noisy[data.test_mask]).item()
             final_metrics['test_acc'] = accuracy_score(test_true, test_pred)
             final_metrics['test_f1'] = f1_score(test_true, test_pred, average='micro')
-
-            final_train_de = self.compute_dirichlet_energy(data, out, data.train_mask.cpu())
-            final_val_de = self.compute_dirichlet_energy(data, out, data.val_mask.cpu())
-            final_test_de = self.compute_dirichlet_energy(data, out, data.test_mask.cpu())
+            
+            final_train_oversmoothing = self._compute_oversmoothing_for_mask(out, data.edge_index, data.train_mask, data.y)
+            final_val_oversmoothing = self._compute_oversmoothing_for_mask(out, data.edge_index, data.val_mask, data.y)
+            final_test_oversmoothing = self._compute_oversmoothing_for_mask(out, data.edge_index, data.test_mask, data.y)
 
         total_time = time.time() - start_time
-        
+
         print(f"\nTraining completed in {total_time:.2f}s")
         print(f"Test Loss: {final_metrics['test_loss']:.4f} | Test Acc: {final_metrics['test_acc']:.4f} | Test F1: {final_metrics['test_f1']:.4f}")
-        print(f"Final Dirichlet Energy - Train: {final_train_de:.4f}, Val: {final_val_de:.4f}, Test: {final_test_de:.4f}")
+        print("Final Oversmoothing Metrics:")
+
+        if final_train_oversmoothing is not None:
+            print(f"Train: EDir: {final_train_oversmoothing['EDir']:.4f}, EDir_traditional: {final_train_oversmoothing['EDir_traditional']:.4f}, "
+                f"EProj: {final_train_oversmoothing['EProj']:.4f}, MAD: {final_train_oversmoothing['MAD']:.4f}, "
+                f"NumRank: {final_train_oversmoothing['NumRank']:.4f}, Erank: {final_train_oversmoothing['Erank']:.4f}")
+
+        if final_val_oversmoothing is not None:
+            print(f"Val: EDir: {final_val_oversmoothing['EDir']:.4f}, EDir_traditional: {final_val_oversmoothing['EDir_traditional']:.4f}, "
+                f"EProj: {final_val_oversmoothing['EProj']:.4f}, MAD: {final_val_oversmoothing['MAD']:.4f}, "
+                f"NumRank: {final_val_oversmoothing['NumRank']:.4f}, Erank: {final_val_oversmoothing['Erank']:.4f}")
+
+        if final_test_oversmoothing is not None:
+            print(f"Test: EDir: {final_test_oversmoothing['EDir']:.4f}, EDir_traditional: {final_test_oversmoothing['EDir_traditional']:.4f}, "
+                f"EProj: {final_test_oversmoothing['EProj']:.4f}, MAD: {final_test_oversmoothing['MAD']:.4f}, "
+                f"NumRank: {final_test_oversmoothing['NumRank']:.4f}, Erank: {final_test_oversmoothing['Erank']:.4f}")
 
         return np.array(all_sm_vectors), best_sm_vectors, model
     
@@ -176,7 +262,6 @@ class GraphCleanerDetector:
         print(noise_matrix)
         
         return py, noise_matrix, inv_noise_matrix
-
     
     def negative_sampling(self, data_orig, noise_matrix, n_classes, sample_rate=None):
         if sample_rate is None:
