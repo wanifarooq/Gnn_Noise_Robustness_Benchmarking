@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from scipy import sparse
-from sklearn.metrics import f1_score
+from sklearn.metrics import f1_score, precision_score, recall_score
 
 from model.evaluation import OversmoothingMetrics
 
@@ -247,6 +247,8 @@ class GNNCleanerTrainer:
 
     @torch.no_grad()
     def evaluate(self, include_test=False):
+        from sklearn.metrics import precision_score, recall_score
+        
         self.model.eval()
         
         x, edge_index = self.data.x.to(self.device), self.data.edge_index.to(self.device)
@@ -291,7 +293,24 @@ class GNNCleanerTrainer:
                 preds[self.data.test_mask].cpu().numpy(), 
                 average='macro'
             )
-            result.update({'test_loss': test_loss, 'test_acc': test_acc, 'test_f1': test_f1})
+
+            test_precision = precision_score(
+                labels[self.data.test_mask].cpu().numpy(), 
+                preds[self.data.test_mask].cpu().numpy(), 
+                average='macro'
+            )
+            test_recall = recall_score(
+                labels[self.data.test_mask].cpu().numpy(), 
+                preds[self.data.test_mask].cpu().numpy(), 
+                average='macro'
+            )
+            result.update({
+                'test_loss': test_loss, 
+                'test_acc': test_acc, 
+                'test_f1': test_f1,
+                'test_precision': test_precision,
+                'test_recall': test_recall
+            })
         
         return result
 
@@ -378,7 +397,7 @@ class GNNCleanerTrainer:
         if best_state is not None:
             self.model.load_state_dict(best_state["model"])
             self.net.load_state_dict(best_state["net"])
-        
+
         final_metrics = self.evaluate(include_test=True)
         
         try:
@@ -399,16 +418,15 @@ class GNNCleanerTrainer:
         if final_test_oversmoothing is not None:
             self.oversmoothing_history['test'].append(final_test_oversmoothing)
         
-        self.results = {
-            'train': best_train_metrics['train_acc'],
-            'val': best_val_metrics['val_acc'], 
-            'test': final_metrics['test_acc']
-        }
+        total_time = time.time() - start_time
         
         if debug:
-            total_time = time.time() - start_time
-            print(f"\nTraining completed in {total_time:.2f}s")
-            print(f"Test Loss: {final_metrics['test_loss']:.4f} | Test Acc: {final_metrics['test_acc']:.4f} | Test F1: {final_metrics['test_f1']:.4f}")
+            print(f"\nGNN Cleaner Training completed!")
+            print(f"Test Accuracy: {final_metrics['test_acc']:.4f}")
+            print(f"Test F1: {final_metrics['test_f1']:.4f}")
+            print(f"Test Precision: {final_metrics['test_precision']:.4f}")
+            print(f"Test Recall: {final_metrics['test_recall']:.4f}")
+            print(f"Training completed in {total_time:.2f}s")
             print("Final Oversmoothing Metrics:")
             
             if final_train_oversmoothing is not None:
@@ -426,7 +444,13 @@ class GNNCleanerTrainer:
                     f"EProj: {final_test_oversmoothing['EProj']:.4f}, MAD: {final_test_oversmoothing['MAD']:.4f}, "
                     f"NumRank: {final_test_oversmoothing['NumRank']:.4f}, Erank: {final_test_oversmoothing['Erank']:.4f}")
         
-        return self.results
+        return {
+            'accuracy': final_metrics['test_acc'],
+            'f1': final_metrics['test_f1'],
+            'precision': final_metrics['test_precision'],
+            'recall': final_metrics['test_recall'],
+            'oversmoothing': final_test_oversmoothing
+        }
     
     def _compute_oversmoothing_for_mask(self, embeddings, edge_index, mask, labels=None):
         try:

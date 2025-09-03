@@ -5,7 +5,7 @@ import numpy as np
 from torch_geometric.utils import to_dense_adj
 from sklearn.preprocessing import normalize
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score, f1_score
+from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 from typing import Tuple
 import copy
 
@@ -320,6 +320,52 @@ class ERASETrainer:
         self.get_model_fn = get_model_fn
         self.oversmoothing_evaluator = OversmoothingMetrics(device=device)
         
+    @torch.no_grad()
+    def _evaluate_test_final(self, model, data, L_all):
+        from sklearn.metrics import precision_score, recall_score
+        
+        model.eval()
+        features = model(data)
+
+        _, _, test_acc = evaluate_linear_probe(features, data, L_all, data.y)
+
+        features_norm = normalize(features.detach().cpu().numpy(), norm='l2')
+        
+        train_features = features_norm[data.train_mask.cpu()]
+        test_features = features_norm[data.test_mask.cpu()]
+        
+        train_labels = L_all[data.train_mask].cpu().numpy()
+        y_true = data.y.cpu().numpy()
+        
+        clf = LogisticRegression(solver='lbfgs', multi_class='auto', max_iter=1000, random_state=42)
+        clf.fit(train_features, train_labels)
+        
+        test_pred = clf.predict(test_features)
+        test_f1 = f1_score(
+            y_true[data.test_mask.cpu()], 
+            test_pred, 
+            average='macro',
+            zero_division=0
+        )
+        
+        test_precision = precision_score(
+            y_true[data.test_mask.cpu()], 
+            test_pred, 
+            average='macro',
+            zero_division=0
+        )
+        
+        test_recall = recall_score(
+            y_true[data.test_mask.cpu()], 
+            test_pred, 
+            average='macro',
+            zero_division=0
+        )
+        
+        test_loss = self._compute_val_loss_ce(model, data, data.test_mask)
+        
+        return test_acc, test_f1, test_precision, test_recall, test_loss.item()
+
     def train(self, data, debug=False):
         enhancement_config = {
             'use_layer_norm': self.config.get('use_layer_norm', False),
@@ -429,35 +475,42 @@ class ERASETrainer:
 
         model.load_state_dict(best_model_state)
 
-        test_acc, test_f1, test_loss = self._evaluate_test_final(model, data, L_all)
+        test_acc, test_f1, test_precision, test_recall, test_loss = self._evaluate_test_final(model, data, L_all)
         
         final_metrics_splits = self._compute_oversmoothing_metrics_splits(model, data)
         final_train_metrics = final_metrics_splits.get('train', {})
         final_val_metrics = final_metrics_splits.get('val', {})
         final_test_metrics = final_metrics_splits.get('test', {})
 
-        print(f"Test Loss: {test_loss:.4f} | Test Acc: {test_acc:.4f} | Test F1: {test_f1:.4f}")
-        print("Final Oversmoothing Metrics:")
+        if debug:
+            print(f"\nERASE Training completed!")
+            print(f"Test Accuracy: {test_acc:.4f}")
+            print(f"Test F1: {test_f1:.4f}")
+            print(f"Test Precision: {test_precision:.4f}")
+            print(f"Test Recall: {test_recall:.4f}")
+            print("Final Oversmoothing Metrics:")
 
-        if final_train_metrics:
-            print(f"Train: EDir: {final_train_metrics['EDir']:.4f}, EDir_traditional: {final_train_metrics['EDir_traditional']:.4f}, "
-                f"EProj: {final_train_metrics['EProj']:.4f}, MAD: {final_train_metrics['MAD']:.4f}, "
-                f"NumRank: {final_train_metrics['NumRank']:.4f}, Erank: {final_train_metrics['Erank']:.4f}")
+            if final_train_metrics:
+                print(f"Train: EDir: {final_train_metrics['EDir']:.4f}, EDir_traditional: {final_train_metrics['EDir_traditional']:.4f}, "
+                    f"EProj: {final_train_metrics['EProj']:.4f}, MAD: {final_train_metrics['MAD']:.4f}, "
+                    f"NumRank: {final_train_metrics['NumRank']:.4f}, Erank: {final_train_metrics['Erank']:.4f}")
 
-        if final_val_metrics:
-            print(f"Val: EDir: {final_val_metrics['EDir']:.4f}, EDir_traditional: {final_val_metrics['EDir_traditional']:.4f}, "
-                f"EProj: {final_val_metrics['EProj']:.4f}, MAD: {final_val_metrics['MAD']:.4f}, "
-                f"NumRank: {final_val_metrics['NumRank']:.4f}, Erank: {final_val_metrics['Erank']:.4f}")
+            if final_val_metrics:
+                print(f"Val: EDir: {final_val_metrics['EDir']:.4f}, EDir_traditional: {final_val_metrics['EDir_traditional']:.4f}, "
+                    f"EProj: {final_val_metrics['EProj']:.4f}, MAD: {final_val_metrics['MAD']:.4f}, "
+                    f"NumRank: {final_val_metrics['NumRank']:.4f}, Erank: {final_val_metrics['Erank']:.4f}")
 
-        if final_test_metrics:
-            print(f"Test: EDir: {final_test_metrics['EDir']:.4f}, EDir_traditional: {final_test_metrics['EDir_traditional']:.4f}, "
-                f"EProj: {final_test_metrics['EProj']:.4f}, MAD: {final_test_metrics['MAD']:.4f}, "
-                f"NumRank: {final_test_metrics['NumRank']:.4f}, Erank: {final_test_metrics['Erank']:.4f}")
+            if final_test_metrics:
+                print(f"Test: EDir: {final_test_metrics['EDir']:.4f}, EDir_traditional: {final_test_metrics['EDir_traditional']:.4f}, "
+                    f"EProj: {final_test_metrics['EProj']:.4f}, MAD: {final_test_metrics['MAD']:.4f}, "
+                    f"NumRank: {final_test_metrics['NumRank']:.4f}, Erank: {final_test_metrics['Erank']:.4f}")
 
         return {
-            'train': best_train_acc,
-            'val': best_val_acc,
-            'test': test_acc
+            'accuracy': test_acc,
+            'f1': test_f1,
+            'precision': test_precision,
+            'recall': test_recall,
+            'oversmoothing': final_test_metrics
         }
 
     @torch.no_grad()
@@ -566,36 +619,6 @@ class ERASETrainer:
         )
         
         return train_f1, val_f1
-
-    @torch.no_grad()
-    def _evaluate_test_final(self, model, data, L_all):
-        model.eval()
-        features = model(data)
-
-        _, _, test_acc = evaluate_linear_probe(features, data, L_all, data.y)
-
-        features_norm = normalize(features.detach().cpu().numpy(), norm='l2')
-        
-        train_features = features_norm[data.train_mask.cpu()]
-        test_features = features_norm[data.test_mask.cpu()]
-        
-        train_labels = L_all[data.train_mask].cpu().numpy()
-        y_true = data.y.cpu().numpy()
-        
-        clf = LogisticRegression(solver='lbfgs', multi_class='auto', max_iter=1000, random_state=42)
-        clf.fit(train_features, train_labels)
-        
-        test_pred = clf.predict(test_features)
-        test_f1 = f1_score(
-            y_true[data.test_mask.cpu()], 
-            test_pred, 
-            average='macro',
-            zero_division=0
-        )
-        
-        test_loss = self._compute_val_loss_ce(model, data, data.test_mask)
-        
-        return test_acc, test_f1, test_loss.item()
 
     @torch.no_grad()
     def _compute_val_loss_ce(self, model, data, val_mask):

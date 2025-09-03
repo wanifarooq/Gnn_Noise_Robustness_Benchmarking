@@ -10,7 +10,7 @@ from scipy.sparse import lil_matrix, diags
 import scipy.sparse as sp
 import numpy as np
 from copy import deepcopy
-from sklearn.metrics import accuracy_score, f1_score
+from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 
 from model.evaluation import OversmoothingMetrics
 
@@ -350,28 +350,43 @@ class GNNGuard(nn.Module):
                           f"NumRank: {final_test_oversmoothing['NumRank']:.4f}, Erank: {final_test_oversmoothing['Erank']:.4f}")
 
     def test(self, idx_test):
+        from sklearn.metrics import precision_score, recall_score
+        
         self.eval()
         with torch.no_grad():
             output = self.forward(self.features, self.adj_norm)
             loss_test = F.nll_loss(output[idx_test], self.labels[idx_test])
             pred_test_labels = output[idx_test].max(1)[1].cpu().numpy()
             true_test_labels = self.labels[idx_test].cpu().numpy()
+            
             acc_test = accuracy_score(true_test_labels, pred_test_labels)
             f1_test = f1_score(true_test_labels, pred_test_labels, average='macro')
+            precision_test = precision_score(true_test_labels, pred_test_labels, average='macro')
+            recall_test = recall_score(true_test_labels, pred_test_labels, average='macro')
             
             test_mask = torch.zeros(self.features.size(0), dtype=torch.bool, device=self.device)
             test_mask[idx_test] = True
             edge_index = self.adj_norm._indices()
             test_oversmoothing = self._compute_oversmoothing_for_mask(output, edge_index, test_mask, self.labels)
 
-        print(f"Test Loss: {loss_test:.4f} | Test Acc: {acc_test:.4f} | Test F1: {f1_test:.4f}")
+        print(f"GNNGuard Training completed!")
+        print(f"Test Accuracy: {acc_test:.4f}")
+        print(f"Test F1: {f1_test:.4f}")
+        print(f"Test Precision: {precision_test:.4f}")
+        print(f"Test Recall: {recall_test:.4f}")
         
         if test_oversmoothing is not None:
             print(f"Test Oversmoothing: EDir: {test_oversmoothing['EDir']:.4f}, EDir_traditional: {test_oversmoothing['EDir_traditional']:.4f}, "
                   f"EProj: {test_oversmoothing['EProj']:.4f}, MAD: {test_oversmoothing['MAD']:.4f}, "
                   f"NumRank: {test_oversmoothing['NumRank']:.4f}, Erank: {test_oversmoothing['Erank']:.4f}")
         
-        return acc_test, f1_test
+        return {
+            'accuracy': acc_test,
+            'f1': f1_test,
+            'precision': precision_test,
+            'recall': recall_test,
+            'oversmoothing': test_oversmoothing
+        }
     
     def get_oversmoothing_history(self):
         return self.oversmoothing_history

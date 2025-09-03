@@ -13,7 +13,7 @@ try:
     import networkx as nx
 except ImportError:
     nx = None
-from sklearn.metrics import f1_score
+from sklearn.metrics import f1_score, precision_score, recall_score
 
 from model.evaluation import OversmoothingMetrics
 
@@ -901,168 +901,145 @@ class CommunityDefense:
         return loss / max(cnt, 1)
 
     def train_with_defense(self,
-                        gnn_model,
-                        epochs: int = 200,
-                        early_stopping: int = 20,
-                        lr: float = 0.005,
-                        weight_decay: float = 1e-3,
-                        debug: bool = True):
+                          gnn_model,
+                          epochs: int = 200,
+                          early_stopping: int = 20,
+                          lr: float = 0.005,
+                          weight_decay: float = 1e-3,
+                          debug: bool = True):
         import time
         start_time = time.time()
         
         model = gnn_model.to(self.device)
         optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
-        
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, mode='min', factor=0.5, patience=10
         )
         
         ce = torch.nn.CrossEntropyLoss()
-
         A = self.A
         if hasattr(A, "tocoo"):
             A = A.tocoo()
         edge_index, _ = from_scipy_sparse_matrix(A)
         edge_index = edge_index.to(self.device)
-
+        
         X = self.data.x.to(self.device, dtype=torch.float32)
         y = self.data.y.to(self.device, dtype=torch.long)
-
+        
         best_val = float("inf")
         best_state = None
         no_improve = 0
         comm_np = self.comm_labels.copy()
-
+        
         for epoch in range(1, epochs + 1):
             model.train()
             optimizer.zero_grad()
             
             batch = PyGData(x=X, edge_index=edge_index, y=y)
             out = model(batch)
-
+            
             if isinstance(out, tuple) and len(out) == 2:
                 logits, z = out
             else:
                 logits = out
-                if hasattr(model, 'last_hidden'):
-                    z = model.last_hidden
-                else:
-                    z = F.dropout(logits, p=0.3, training=True)
-
-            loss_sup = ce(logits[self.train_mask], y[self.train_mask])
             
+            if hasattr(model, 'last_hidden'):
+                z = model.last_hidden
+            else:
+                z = F.dropout(logits, p=0.3, training=True)
+            
+            loss_sup = ce(logits[self.train_mask], y[self.train_mask])
             adaptive_lambda = self.lambda_comm * min(1.0, epoch / 50.0)
             loss_comm = self.community_loss(z, comm_np) if adaptive_lambda > 0 else torch.zeros([], device=self.device)
-            
             loss = loss_sup + adaptive_lambda * loss_comm
-            train_loss = loss.item()
             
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
-
+            
             model.eval()
             with torch.no_grad():
                 out_eval = model(batch)
                 logits_eval = out_eval[0] if (isinstance(out_eval, tuple) and len(out_eval) == 2) else out_eval
                 
-                metrics = {}
-                metrics['val_loss'] = ce(logits_eval[self.val_mask], y[self.val_mask]).item()
-                pred = logits_eval.argmax(dim=1).cpu().numpy()
-                y_true = y.cpu().numpy()
-
-                metrics['train_acc'] = (pred[self.train_mask.cpu().numpy()] == y_true[self.train_mask.cpu().numpy()]).mean()
-                metrics['val_acc'] = (pred[self.val_mask.cpu().numpy()] == y_true[self.val_mask.cpu().numpy()]).mean()
-
-                metrics['train_f1'] = f1_score(y_true[self.train_mask.cpu().numpy()],
-                                    pred[self.train_mask.cpu().numpy()],
-                                    average="macro")
-                metrics['val_f1'] = f1_score(y_true[self.val_mask.cpu().numpy()],
-                                pred[self.val_mask.cpu().numpy()],
-                                average="macro")
-
-                train_oversmoothing = self._compute_oversmoothing_for_mask(logits_eval, edge_index, self.train_mask, y)
-                val_oversmoothing = self._compute_oversmoothing_for_mask(logits_eval, edge_index, self.val_mask, y)
+                val_loss = ce(logits_eval[self.val_mask], y[self.val_mask]).item()
+                scheduler.step(val_loss)
                 
-                train_de = train_oversmoothing['EDir'] if train_oversmoothing else 0.0
-                train_de_traditional = train_oversmoothing['EDir_traditional'] if train_oversmoothing else 0.0
-                train_eproj = train_oversmoothing['EProj'] if train_oversmoothing else 0.0
-                train_mad = train_oversmoothing['MAD'] if train_oversmoothing else 0.0
-                train_num_rank = train_oversmoothing['NumRank'] if train_oversmoothing else 0.0
-                train_eff_rank = train_oversmoothing['Erank'] if train_oversmoothing else 0.0
-                
-                val_de = val_oversmoothing['EDir'] if val_oversmoothing else 0.0
-                val_de_traditional = val_oversmoothing['EDir_traditional'] if val_oversmoothing else 0.0
-                val_eproj = val_oversmoothing['EProj'] if val_oversmoothing else 0.0
-                val_mad = val_oversmoothing['MAD'] if val_oversmoothing else 0.0
-                val_num_rank = val_oversmoothing['NumRank'] if val_oversmoothing else 0.0
-                val_eff_rank = val_oversmoothing['Erank'] if val_oversmoothing else 0.0
-
-            scheduler.step(metrics['val_loss'])
-
-            if debug:
-                print(f"Epoch {epoch:03d} | Train Loss: {train_loss:.4f}, Val Loss: {metrics['val_loss']:.4f} | "
-                      f"Train Acc: {metrics['train_acc']:.4f}, Val Acc: {metrics['val_acc']:.4f} | "
-                      f"Train F1: {metrics['train_f1']:.4f}, Val F1: {metrics['val_f1']:.4f}")
-                print(f"Train DE: {train_de:.4f}, Val DE: {val_de:.4f} | "
-                      f"Train DE_trad: {train_de_traditional:.4f}, Val DE_trad: {val_de_traditional:.4f} | "
-                      f"Train EProj: {train_eproj:.4f}, Val EProj: {val_eproj:.4f} | "
-                      f"Train MAD: {train_mad:.4f}, Val MAD: {val_mad:.4f} | "
-                      f"Train NumRank: {train_num_rank:.4f}, Val NumRank: {val_num_rank:.4f} | "
-                      f"Train Erank: {train_eff_rank:.4f}, Val Erank: {val_eff_rank:.4f}")
-
-            if metrics['val_loss'] < best_val - 1e-4:
-                best_val = metrics['val_loss']
-                best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
-                no_improve = 0
-            else:
-                no_improve += 1
-                
-            if no_improve >= early_stopping:
-                if self.verbose:
-                    print(f"Defense: Early stopping at epoch {epoch}")
-                break
-
+                if val_loss < best_val - 1e-4:
+                    best_val = val_loss
+                    best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+                    no_improve = 0
+                else:
+                    no_improve += 1
+                    
+                if no_improve >= early_stopping:
+                    if self.verbose and debug:
+                        print(f"Defense: Early stopping at epoch {epoch}")
+                    break
+        
         if best_state is not None:
             model.load_state_dict(best_state)
-
+        
         model.eval()
         with torch.no_grad():
             batch = PyGData(x=X, edge_index=edge_index, y=y)
             out = model(batch)
             logits = out[0] if (isinstance(out, tuple) and len(out) == 2) else out
+            
             pred = logits.argmax(dim=1).cpu().numpy()
             y_true = y.cpu().numpy()
 
-            final_metrics = {}
-            final_metrics['test_loss'] = ce(logits[self.test_mask], y[self.test_mask]).item()
-            final_metrics['test_acc'] = (pred[self.test_mask.cpu().numpy()] == y_true[self.test_mask.cpu().numpy()]).mean()
-            final_metrics['test_f1'] = f1_score(y_true[self.test_mask.cpu().numpy()],
-                            pred[self.test_mask.cpu().numpy()],
-                            average="macro")
+            test_mask_np = self.test_mask.cpu().numpy()
+            y_test_true = y_true[test_mask_np]
+            y_test_pred = pred[test_mask_np]
+
+            test_acc = (y_test_pred == y_test_true).mean()
+            test_f1 = f1_score(y_test_true, y_test_pred, average="macro")
+            test_precision = precision_score(y_test_true, y_test_pred, average="macro", zero_division=0)
+            test_recall = recall_score(y_test_true, y_test_pred, average="macro", zero_division=0)
+
+            test_oversmoothing = self._compute_oversmoothing_for_mask(logits, edge_index, self.test_mask, y)
             
-            final_train_oversmoothing = self._compute_oversmoothing_for_mask(logits, edge_index, self.train_mask, y)
-            final_val_oversmoothing = self._compute_oversmoothing_for_mask(logits, edge_index, self.val_mask, y)  
-            final_test_oversmoothing = self._compute_oversmoothing_for_mask(logits, edge_index, self.test_mask, y)
-
-        total_time = time.time() - start_time
-        print(f"\nTraining completed in {total_time:.2f}s")
-        print(f"Test Loss: {final_metrics['test_loss']:.4f} | Test Acc: {final_metrics['test_acc']:.4f} | Test F1: {final_metrics['test_f1']:.4f}")
-        print("Final Oversmoothing Metrics:")
+            if test_oversmoothing is not None:
+                oversmoothing_dict = {
+                    'EDir': test_oversmoothing['EDir'],
+                    'EDir_traditional': test_oversmoothing['EDir_traditional'],
+                    'EProj': test_oversmoothing['EProj'],
+                    'MAD': test_oversmoothing['MAD'],
+                    'NumRank': test_oversmoothing['NumRank'],
+                    'Erank': test_oversmoothing['Erank']
+                }
+            else:
+                oversmoothing_dict = {
+                    'EDir': 0.0,
+                    'EDir_traditional': 0.0,
+                    'EProj': 0.0,
+                    'MAD': 0.0,
+                    'NumRank': 0.0,
+                    'Erank': 0.0
+                }
+            
+            test_results = {
+                'accuracy': test_acc,
+                'f1': test_f1,
+                'precision': test_precision,
+                'recall': test_recall,
+                'oversmoothing': oversmoothing_dict
+            }
+            
+            total_time = time.time() - start_time
+            if debug:
+                print(f"\nTraining completed in {total_time:.2f}s")
+                print(f"Test Acc: {test_results['accuracy']:.4f} | Test F1: {test_results['f1']:.4f}")
+                print(f"Test Precision: {test_results['precision']:.4f} | Test Recall: {test_results['recall']:.4f}")
+                print("Oversmoothing metrics:")
+                for metric_name, value in oversmoothing_dict.items():
+                    print(f"  {metric_name}: {value:.4f}")
         
-        if final_train_oversmoothing is not None:
-            print(f"Train: EDir: {final_train_oversmoothing['EDir']:.4f}, EDir_traditional: {final_train_oversmoothing['EDir_traditional']:.4f}, "
-                  f"EProj: {final_train_oversmoothing['EProj']:.4f}, MAD: {final_train_oversmoothing['MAD']:.4f}, "
-                  f"NumRank: {final_train_oversmoothing['NumRank']:.4f}, Erank: {final_train_oversmoothing['Erank']:.4f}")
-                  
-        if final_val_oversmoothing is not None:
-            print(f"Val: EDir: {final_val_oversmoothing['EDir']:.4f}, EDir_traditional: {final_val_oversmoothing['EDir_traditional']:.4f}, "
-                  f"EProj: {final_val_oversmoothing['EProj']:.4f}, MAD: {final_val_oversmoothing['MAD']:.4f}, "
-                  f"NumRank: {final_val_oversmoothing['NumRank']:.4f}, Erank: {final_val_oversmoothing['Erank']:.4f}")
-
-        if final_test_oversmoothing is not None:
-            print(f"Test: EDir: {final_test_oversmoothing['EDir']:.4f}, EDir_traditional: {final_test_oversmoothing['EDir_traditional']:.4f}, "
-                  f"EProj: {final_test_oversmoothing['EProj']:.4f}, MAD: {final_test_oversmoothing['MAD']:.4f}, "
-                  f"NumRank: {final_test_oversmoothing['NumRank']:.4f}, Erank: {final_test_oversmoothing['Erank']:.4f}")
-
-        return final_metrics['test_acc']
+        return {
+            'accuracy': test_results['accuracy'],
+            'f1': test_results['f1'],
+            'precision': test_results['precision'],
+            'recall': test_results['recall'],
+            'oversmoothing': test_results['oversmoothing']
+        }

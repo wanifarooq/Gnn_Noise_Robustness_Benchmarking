@@ -501,7 +501,7 @@ def run_experiment(config, run_id=1):
                 verbose=True
             )
 
-            test_acc_def = defense.train_with_defense(
+            test_results = defense.train_with_defense(
                 gnn_model_defense,
                 epochs=defense_cfg.get("epochs", 250),
                 early_stopping=20,
@@ -509,12 +509,15 @@ def run_experiment(config, run_id=1):
                 weight_decay=1e-3
             )
 
-            print(f"Accuracy with defense (all nodes): {test_acc_def:.4f}")
+            print(f"Defense completed!")
+            print(f"Test Accuracy: {test_results['accuracy']:.4f}")
 
             return {
-                "binary_attacked_acc": results['binary_attacked_acc'],
-                "gnn_attacked_acc": results.get('gnn_attacked_acc'),
-                "defense_acc": test_acc_def
+                'accuracy': test_results['accuracy'],
+                'f1': test_results['f1'],
+                'precision': test_results['precision'],
+                'recall': test_results['recall'],
+                'oversmoothing': test_results['oversmoothing']
             }
 
     # RTGNN Training
@@ -572,23 +575,33 @@ def run_experiment(config, run_id=1):
         rtgnn_model.fit(features, adj, labels, idx_train, idx_val, idx_test)
         
         clean_labels = data.y_original.cpu().numpy()
-        test_acc = rtgnn_model.test(features, clean_labels, idx_test)
-        
-        return test_acc
+        test_results = rtgnn_model.test(features, clean_labels, idx_test)
+
+        print(f"RTGNN Training completed!")
+        print(f"Test Accuracy: {test_results['accuracy']:.4f}")
+        print(f"Test F1: {test_results['f1']:.4f}")
+        print(f"Test Precision: {test_results['precision']:.4f}")
+        print(f"Test Recall: {test_results['recall']:.4f}")
+
+        return {
+            'accuracy': test_results['accuracy'],
+            'f1': test_results['f1'],
+            'precision': test_results['precision'],
+            'recall': test_results['recall'],
+            'oversmoothing': test_results['oversmoothing']
+        }
     
     # GraphCleaner Training
     if method == 'graphcleaner':
         print(f"Run {run_id}: Using GraphCleaner")
-        
         data_for_detection = data.clone()
-        
         test_labels = data.y_original[data.test_mask]
         test_features = data.x[data.test_mask] if config['noise']['type'] == 'instance' else None
         test_indices = data.test_mask.nonzero(as_tuple=True)[0]
         
         noisy_test_labels, relative_noisy_test_indices = label_process(
             test_labels,
-            test_features, 
+            test_features,
             num_classes,
             noise_type=config['noise']['type'],
             noise_rate=config['noise']['rate'],
@@ -603,7 +616,7 @@ def run_experiment(config, run_id=1):
         
         global_noisy_test_indices = test_indices[relative_noisy_test_indices]
         all_noisy_indices = torch.cat([global_noisy_indices, global_noisy_test_indices])
-
+        
         base_model = get_model(
             model_name=config['model']['name'],
             in_channels=data.num_features,
@@ -613,19 +626,25 @@ def run_experiment(config, run_id=1):
             dropout=config['model'].get('dropout', 0.5),
             self_loop=config['model'].get('self_loop', True)
         )
+        
         detector = GraphCleanerDetector(config, device)
-
-        predictions, probs, _ = detector.detect_noise(data_for_detection, base_model, num_classes)
+        predictions, probs, classifier, trained_model = detector.detect_noise(data_for_detection, base_model, num_classes)
         
         test_ground_truth = get_noisy_ground_truth(data_for_detection, all_noisy_indices)[data.test_mask.cpu()].cpu().numpy()
-        detection_results = detector.evaluate_detection(predictions, test_ground_truth, probs)
         
-        return detection_results.get('accuracy', 0.0)
+        detection_results = detector.evaluate_detection(
+            predictions, 
+            test_ground_truth, 
+            probs, 
+            model=trained_model, 
+            data=data_for_detection
+        )
+        
+        return detection_results
     
     # UnionNET Training
     if method == 'unionnet':
         print(f"Run {run_id}: Using UnionNET")
-        
         gnn_model = get_model(
             model_name=config['model']['name'],
             in_channels=data.num_features,
@@ -653,7 +672,7 @@ def run_experiment(config, run_id=1):
         unionnet = UnionNET(gnn_model, data, num_classes, unionnet_config)
         result = unionnet.train(debug=True)
         
-        return result['test']
+        return result
 
     # GNN Cleaner Training
     if method == 'gnn_cleaner':
@@ -683,12 +702,12 @@ def run_experiment(config, run_id=1):
         
         trainer = GNNCleanerTrainer(gnn_cleaner_config, data, device, num_classes, gnn_model)
         result = trainer.train(debug=True)
-        return result['test']
+        
+        return result
     
     # ERASE Training
     if method == 'erase':
         print(f"Run {run_id}: Using ERASE")
-        
         erase_config = {
             'seed': seed,
             'erase_gnn_type': config['model']['name'],
@@ -717,12 +736,11 @@ def run_experiment(config, run_id=1):
         trainer = ERASETrainer(erase_config, device, num_classes, get_model)
         result = trainer.train(data, debug=True)
         
-        return result['test']
+        return result
     
     # GNNGuard Training
     if method == 'gnnguard':
         print(f"Run {run_id}: Using GNNGuard")
-        
         gnnguard_args = {
             'dropout': config.get('dropout', 0.5),
             'lr': config.get('lr', 0.01),
@@ -740,9 +758,8 @@ def run_experiment(config, run_id=1):
             nclass=num_classes,
             **gnnguard_args
         ).to(device)
-
+        
         adj_matrix = to_scipy_sparse_matrix(data.edge_index, num_nodes=data.num_nodes)
-
         if hasattr(data, 'train_mask'):
             idx_train = data.train_mask.nonzero(as_tuple=True)[0].cpu().numpy()
             idx_val = data.val_mask.nonzero(as_tuple=True)[0].cpu().numpy()
@@ -765,8 +782,15 @@ def run_experiment(config, run_id=1):
             patience=config.get('patience', 5)
         )
         
-        test_acc, test_f1 = gnnguard_model.test(idx_test)
-        return test_acc
+        test_results = gnnguard_model.test(idx_test)
+        
+        return {
+            'accuracy': test_results['accuracy'],
+            'f1': test_results['f1'],
+            'precision': test_results['precision'],
+            'recall': test_results['recall'],
+            'oversmoothing': test_results['oversmoothing']
+        }
     
     else:
         raise ValueError(

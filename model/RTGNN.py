@@ -10,7 +10,7 @@ from sklearn.metrics import accuracy_score
 from torch_geometric.data import Data
 import numpy as np
 import scipy.sparse as sp
-from sklearn.metrics import f1_score
+from sklearn.metrics import f1_score, precision_score, recall_score
 
 from model.GNNs import GCN, GIN, GAT, GATv2
 from model.evaluation import OversmoothingMetrics
@@ -496,9 +496,23 @@ class RTGNN(nn.Module):
         print(f"Training completed! Best validation F1: {best_val_f1:.4f}")
 
     def test(self, features, labels, idx_test):
+
         if self.best_state is None:
             print("Model not trained yet.")
-            return 0.0
+            return {
+                'accuracy': 0.0,
+                'f1': 0.0,
+                'precision': 0.0,
+                'recall': 0.0,
+                'oversmoothing': {
+                    'EDir': 0.0,
+                    'EDir_traditional': 0.0,
+                    'EProj': 0.0,
+                    'MAD': 0.0,
+                    'NumRank': 0.0,
+                    'Erank': 0.0
+                }
+            }
 
         self.eval()
         with torch.no_grad():
@@ -515,9 +529,16 @@ class RTGNN(nn.Module):
             test_loss2 = F.cross_entropy(output2[idx_test], labels[idx_test])
             test_loss = (test_loss1 + test_loss2) / 2
 
-            test_pred = (output1[idx_test] + output2[idx_test]) / 2
-            test_acc = (test_pred.argmax(dim=1) == labels[idx_test]).float().mean().item()
-            test_f1 = f1_score(labels[idx_test].cpu(), test_pred.argmax(dim=1).cpu(), average='macro')
+            test_pred_avg = (output1[idx_test] + output2[idx_test]) / 2
+            test_pred_labels = test_pred_avg.argmax(dim=1)
+            
+            y_true = labels[idx_test].cpu().numpy()
+            y_pred = test_pred_labels.cpu().numpy()
+            
+            test_acc = (test_pred_labels == labels[idx_test]).float().mean().item()
+            test_f1 = f1_score(y_true, y_pred, average='macro')
+            test_precision = precision_score(y_true, y_pred, average='macro', zero_division=0)
+            test_recall = recall_score(y_true, y_pred, average='macro', zero_division=0)
 
             test_mask = torch.zeros(features.size(0), dtype=torch.bool, device=self.device)
             test_mask[idx_test] = True
@@ -531,16 +552,45 @@ class RTGNN(nn.Module):
             h2 = self.predictor.branch2.get_embeddings(data) if hasattr(self.predictor.branch2, 'get_embeddings') else self.predictor.branch2(data)
             h_avg = (h1 + h2) / 2
 
+
             test_oversmoothing = self._compute_oversmoothing_for_mask(h_avg, self.best_state['edges'], test_mask, labels)
 
+            if test_oversmoothing is not None:
+                oversmoothing_dict = {
+                    'EDir': test_oversmoothing['EDir'],
+                    'EDir_traditional': test_oversmoothing['EDir_traditional'],
+                    'EProj': test_oversmoothing['EProj'],
+                    'MAD': test_oversmoothing['MAD'],
+                    'NumRank': test_oversmoothing['NumRank'],
+                    'Erank': test_oversmoothing['Erank']
+                }
+            else:
+                oversmoothing_dict = {
+                    'EDir': 0.0,
+                    'EDir_traditional': 0.0,
+                    'EProj': 0.0,
+                    'MAD': 0.0,
+                    'NumRank': 0.0,
+                    'Erank': 0.0
+                }
+
             print(f"Test Loss: {test_loss:.4f} | Test Acc: {test_acc:.4f} | Test F1: {test_f1:.4f}")
+            print(f"Test Precision: {test_precision:.4f} | Test Recall: {test_recall:.4f}")
             
             if test_oversmoothing is not None:
-                print(f"Test: EDir: {test_oversmoothing['EDir']:.4f}, EDir_traditional: {test_oversmoothing['EDir_traditional']:.4f}, "
-                      f"EProj: {test_oversmoothing['EProj']:.4f}, MAD: {test_oversmoothing['MAD']:.4f}, "
-                      f"NumRank: {test_oversmoothing['NumRank']:.4f}, Erank: {test_oversmoothing['Erank']:.4f}")
+                print(f"Test Oversmoothing - EDir: {oversmoothing_dict['EDir']:.4f}, "
+                      f"EDir_traditional: {oversmoothing_dict['EDir_traditional']:.4f}, "
+                      f"EProj: {oversmoothing_dict['EProj']:.4f}, MAD: {oversmoothing_dict['MAD']:.4f}, "
+                      f"NumRank: {oversmoothing_dict['NumRank']:.4f}, Erank: {oversmoothing_dict['Erank']:.4f}")
             
-            return test_acc
+            return {
+                'accuracy': test_acc,
+                'f1': test_f1,
+                'precision': test_precision,
+                'recall': test_recall,
+                'oversmoothing': oversmoothing_dict
+            }
+
 
         
     def _generate_knn_edges(self, features, edge_index, idx_train, k=None):

@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
-from sklearn.metrics import f1_score
+from sklearn.metrics import f1_score, precision_score, recall_score 
 from copy import deepcopy
 from torch_geometric.loader import NeighborLoader
 
@@ -299,6 +299,8 @@ def train_with_positive_eigenvalues(model, data, noisy_indices=None, device='cud
     total_test_loss = 0
     total_test_acc = 0
     total_test_f1 = 0
+    total_test_precision = 0
+    total_test_recall = 0
     num_test_batches = 0
     
     epoch_test_embeddings = []
@@ -322,10 +324,14 @@ def train_with_positive_eigenvalues(model, data, noisy_indices=None, device='cud
             pred_test = out_test[batch_target_nodes].argmax(dim=1)
             batch_test_acc = (pred_test == batch.y[batch_target_nodes]).sum().item() / len(batch_target_nodes)
             batch_test_f1 = f1_score(batch.y[batch_target_nodes].cpu(), pred_test.cpu(), average='macro')
+            batch_test_precision = precision_score(batch.y[batch_target_nodes].cpu(), pred_test.cpu(), average='macro')
+            batch_test_recall = recall_score(batch.y[batch_target_nodes].cpu(), pred_test.cpu(), average='macro')
             
             total_test_loss += test_loss.item()
             total_test_acc += batch_test_acc
             total_test_f1 += batch_test_f1
+            total_test_precision += batch_test_precision
+            total_test_recall += batch_test_recall
             num_test_batches += 1
             
             if len(epoch_test_embeddings) < 5:
@@ -338,6 +344,8 @@ def train_with_positive_eigenvalues(model, data, noisy_indices=None, device='cud
     avg_test_loss = total_test_loss / num_test_batches
     avg_test_acc = total_test_acc / num_test_batches
     avg_test_f1 = total_test_f1 / num_test_batches
+    avg_test_precision = total_test_precision / num_test_batches
+    avg_test_recall = total_test_recall / num_test_batches
     
     test_oversmoothing = None
     if epoch_test_embeddings:
@@ -354,7 +362,11 @@ def train_with_positive_eigenvalues(model, data, noisy_indices=None, device='cud
         except:
             test_oversmoothing = None
     
-    print(f"Test Loss: {avg_test_loss:.4f} | Test Acc: {avg_test_acc:.4f} | Test F1: {avg_test_f1:.4f}")
+    print(f"Positive Eigenvalues Training completed!")
+    print(f"Test Accuracy: {avg_test_acc:.4f}")
+    print(f"Test F1: {avg_test_f1:.4f}")
+    print(f"Test Precision: {avg_test_precision:.4f}")
+    print(f"Test Recall: {avg_test_recall:.4f}")
     
     print("Final Oversmoothing Metrics:")
     
@@ -380,4 +392,10 @@ def train_with_positive_eigenvalues(model, data, noisy_indices=None, device='cud
     
     print(f"Final Dirichlet Energy - Test: {avg_test_dir:.4f}")
     
-    return avg_test_acc
+    return {
+        'accuracy': avg_test_acc,
+        'f1': avg_test_f1,
+        'precision': avg_test_precision,
+        'recall': avg_test_recall,
+        'oversmoothing': test_oversmoothing
+    }

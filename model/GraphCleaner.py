@@ -340,7 +340,7 @@ class GraphCleanerDetector:
         feat = np.hstack(features_list)
         return feat, y
 
-    
+        
     def detect_noise(self, data, model, num_classes):
         print("Starting GraphCleaner Detection")
 
@@ -388,7 +388,7 @@ class GraphCleanerDetector:
         test_probs = classifier.predict_proba(X_test)[:, 1]
         test_predictions = test_probs > 0.5
         
-        return test_predictions, test_probs, classifier
+        return test_predictions, test_probs, classifier, trained_model
 
     def visualize_noise_matrix(self, noise_matrix, num_classes, title_prefix=""):
 
@@ -407,7 +407,7 @@ class GraphCleanerDetector:
         plt.tight_layout()
         plt.show()
     
-    def evaluate_detection(self, predictions, ground_truth, probs):
+    def evaluate_detection(self, predictions, ground_truth, probs, model=None, data=None):
 
         acc = accuracy_score(ground_truth, predictions)
         f1 = f1_score(ground_truth, predictions)
@@ -416,18 +416,33 @@ class GraphCleanerDetector:
         mcc = matthews_corrcoef(ground_truth, predictions)
         auc = roc_auc_score(ground_truth, probs)
         
-        print(f'Detection Accuracy: {acc:.4f}')
-        print(f'Detection F1 Score: {f1:.4f}')
-        print(f'Detection Precision: {precision:.4f}')
-        print(f'Detection Recall: {recall:.4f}')
-        print(f'Detection MCC: {mcc:.4f}')
-        print(f'Detection AUC: {auc:.4f}')
+        oversmoothing_metrics = None
+        if model is not None and data is not None:
+            model.eval()
+            with torch.no_grad():
+                out = model(data)
+                oversmoothing_metrics = self._compute_oversmoothing_for_mask(
+                    out, data.edge_index, data.test_mask, data.y
+                )
+        
+        print(f"GraphCleaner Training completed!")
+        print(f"Test Accuracy: {acc:.4f}")
+        print(f"Test F1: {f1:.4f}")
+        print(f"Test Precision: {precision:.4f}")
+        print(f"Test Recall: {recall:.4f}")
+        print(f"Test MCC: {mcc:.4f}")
+        print(f"Test AUC: {auc:.4f}")
         print(f"Samples detected as noisy: {np.sum(predictions)}")
         print(f"Actual noisy samples: {np.sum(ground_truth)}")
         
         return {
-            'accuracy': acc, 'f1': f1, 'precision': precision, 
-            'recall': recall, 'mcc': mcc, 'auc': auc
+            'accuracy': acc,
+            'f1': f1,
+            'precision': precision,
+            'recall': recall,
+            'mcc': mcc,
+            'auc': auc,
+            'oversmoothing': oversmoothing_metrics
         }
 
 def get_noisy_ground_truth(data, noisy_indices):

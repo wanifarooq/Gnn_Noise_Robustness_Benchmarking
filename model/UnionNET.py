@@ -2,7 +2,7 @@ import time
 from copy import deepcopy
 import torch
 import torch.nn.functional as F
-from sklearn.metrics import accuracy_score, f1_score
+from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 
 from model.evaluation import OversmoothingMetrics
 
@@ -253,33 +253,43 @@ class UnionNET:
             test_preds = output[self.test_mask].cpu().numpy().argmax(1)
             test_acc = accuracy_score(test_labels, test_preds)
             test_f1 = f1_score(test_labels, test_preds, average='macro')
+            
+            test_precision = precision_score(test_labels, test_preds, average='macro')
+            test_recall = recall_score(test_labels, test_preds, average='macro')
+            
             test_loss = F.cross_entropy(output[self.test_mask], self.clean_labels[self.test_mask])
             test_metrics = self.compute_oversmoothing_metrics(output, mask=self.test_mask)
-            test_de = test_metrics['EDir']
-            test_de_traditional = test_metrics['EDir_traditional']
-            test_num_rank = test_metrics['NumRank']
-            test_eff_rank = test_metrics['Erank']
-            test_eproj = test_metrics['EProj']
-            test_mad = test_metrics['MAD']
 
         total_time = time.time() - start_time
         
         if debug:
-            print(f"\nTraining completed in {total_time:.2f}s")
-            print(f"Test Loss: {test_loss:.4f} | Test Acc: {test_acc:.4f} | Test F1: {test_f1:.4f}")
+            print(f"\nUnionNET Training completed!")
+            print(f"Test Accuracy: {test_acc:.4f}")
+            print(f"Test F1: {test_f1:.4f}")
+            print(f"Test Precision: {test_precision:.4f}")
+            print(f"Test Recall: {test_recall:.4f}")
+            print(f"Training completed in {total_time:.2f}s")
             print("Final Oversmoothing Metrics:")
-            print(f"Train: EDir: {train_metrics['EDir']:.4f}, EDir_traditional: {train_metrics['EDir_traditional']:.4f}, "
-                  f"EProj: {train_metrics['EProj']:.4f}, MAD: {train_metrics['MAD']:.4f}, "
-                  f"NumRank: {train_metrics['NumRank']:.4f}, Erank: {train_metrics['Erank']:.4f}")
-            print(f"Val: EDir: {val_metrics['EDir']:.4f}, EDir_traditional: {val_metrics['EDir_traditional']:.4f}, "
-                  f"EProj: {val_metrics['EProj']:.4f}, MAD: {val_metrics['MAD']:.4f}, "
-                  f"NumRank: {val_metrics['NumRank']:.4f}, Erank: {val_metrics['Erank']:.4f}")
-            print(f"Test: EDir: {test_metrics['EDir']:.4f}, EDir_traditional: {test_metrics['EDir_traditional']:.4f}, "
-                  f"EProj: {test_metrics['EProj']:.4f}, MAD: {test_metrics['MAD']:.4f}, "
-                  f"NumRank: {test_metrics['NumRank']:.4f}, Erank: {test_metrics['Erank']:.4f}")
+            if train_metrics:
+                print(f"Train: EDir: {train_metrics['EDir']:.4f}, EDir_traditional: {train_metrics['EDir_traditional']:.4f}, "
+                      f"EProj: {train_metrics['EProj']:.4f}, MAD: {train_metrics['MAD']:.4f}, "
+                      f"NumRank: {train_metrics['NumRank']:.4f}, Erank: {train_metrics['Erank']:.4f}")
+            if val_metrics:
+                print(f"Val: EDir: {val_metrics['EDir']:.4f}, EDir_traditional: {val_metrics['EDir_traditional']:.4f}, "
+                      f"EProj: {val_metrics['EProj']:.4f}, MAD: {val_metrics['MAD']:.4f}, "
+                      f"NumRank: {val_metrics['NumRank']:.4f}, Erank: {val_metrics['Erank']:.4f}")
+            if test_metrics:
+                print(f"Test: EDir: {test_metrics['EDir']:.4f}, EDir_traditional: {test_metrics['EDir_traditional']:.4f}, "
+                      f"EProj: {test_metrics['EProj']:.4f}, MAD: {test_metrics['MAD']:.4f}, "
+                      f"NumRank: {test_metrics['NumRank']:.4f}, Erank: {test_metrics['Erank']:.4f}")
 
-        self.results['test'] = test_acc
-        return self.results
+        return {
+            'accuracy': test_acc,
+            'f1': test_f1,
+            'precision': test_precision,
+            'recall': test_recall,
+            'oversmoothing': test_metrics
+        }
 
     def compute_oversmoothing_metrics(self, embeddings, mask=None):
         if mask is not None:
