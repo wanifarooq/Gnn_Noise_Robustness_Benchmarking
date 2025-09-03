@@ -8,7 +8,7 @@ import torch.optim as optim
 import scipy.sparse as sp
 from torch_geometric.utils import from_scipy_sparse_matrix, to_undirected, negative_sampling
 from torch_geometric.nn import GCNConv
-from sklearn.metrics import f1_score
+from sklearn.metrics import f1_score, precision_score, recall_score
 
 from model.evaluation import OversmoothingMetrics
 
@@ -505,6 +505,8 @@ class NRGNN:
             self.predictor.load_state_dict(self.predictor_model_weights)
 
     def test(self, idx_test):
+        from sklearn.metrics import precision_score, recall_score
+        
         self.model.eval()
         self.predictor.eval()
         
@@ -530,6 +532,8 @@ class NRGNN:
                 y_true = self.labels[idx_test].cpu().numpy()
                 y_pred = model_output[idx_test].argmax(dim=1).cpu().numpy()
                 f1_test = f1_score(y_true, y_pred, average='macro')
+                precision_test = precision_score(y_true, y_pred, average='macro', zero_division=0)
+                recall_test = recall_score(y_true, y_pred, average='macro', zero_division=0)
                 
                 test_oversmoothing = self._compute_oversmoothing_for_mask(model_output, self.best_model_index, idx_test)
                 if test_oversmoothing is not None:
@@ -538,34 +542,36 @@ class NRGNN:
                 final_metrics = {
                     'test_loss': model_loss,
                     'test_acc': model_acc,
-                    'test_f1': f1_test
+                    'test_f1': f1_test,
+                    'test_precision': precision_test,
+                    'test_recall': recall_test,
+                    'test_oversmoothing': test_oversmoothing if test_oversmoothing is not None else {
+                        'NumRank': 0.0, 'Erank': 0.0, 'EDir': 0.0,
+                        'EDir_traditional': 0.0, 'EProj': 0.0, 'MAD': 0.0
+                    }
                 }
                 
                 print(f"Test Loss: {final_metrics['test_loss']:.4f} | Test Acc: {final_metrics['test_acc']:.4f} | Test F1: {final_metrics['test_f1']:.4f}")
+                print(f"Test Precision: {final_metrics['test_precision']:.4f} | Test Recall: {final_metrics['test_recall']:.4f}")
                 
-                print("Final Oversmoothing Metrics:")
-                
-                if hasattr(self, 'final_train_de') and hasattr(self, 'final_val_de'):
-                    if self.oversmoothing_history['train']:
-                        final_train_oversmoothing = self.oversmoothing_history['train'][-1]
-                        print(f"Train: EDir: {final_train_oversmoothing['EDir']:.4f}, EDir_traditional: {final_train_oversmoothing['EDir_traditional']:.4f}, "
-                            f"EProj: {final_train_oversmoothing['EProj']:.4f}, MAD: {final_train_oversmoothing['MAD']:.4f}, "
-                            f"NumRank: {final_train_oversmoothing['NumRank']:.4f}, Erank: {final_train_oversmoothing['Erank']:.4f}")
-                    
-                    if self.oversmoothing_history['val']:
-                        final_val_oversmoothing = self.oversmoothing_history['val'][-1]
-                        print(f"Val: EDir: {final_val_oversmoothing['EDir']:.4f}, EDir_traditional: {final_val_oversmoothing['EDir_traditional']:.4f}, "
-                            f"EProj: {final_val_oversmoothing['EProj']:.4f}, MAD: {final_val_oversmoothing['MAD']:.4f}, "
-                            f"NumRank: {final_val_oversmoothing['NumRank']:.4f}, Erank: {final_val_oversmoothing['Erank']:.4f}")
-                
+                print("Test Oversmoothing Metrics:")
                 if test_oversmoothing is not None:
                     print(f"Test: EDir: {test_oversmoothing['EDir']:.4f}, EDir_traditional: {test_oversmoothing['EDir_traditional']:.4f}, "
                         f"EProj: {test_oversmoothing['EProj']:.4f}, MAD: {test_oversmoothing['MAD']:.4f}, "
                         f"NumRank: {test_oversmoothing['NumRank']:.4f}, Erank: {test_oversmoothing['Erank']:.4f}")
                 
-                return float(model_acc)
+                return final_metrics
         
-        return 0.0
+        return {
+            'test_acc': 0.0,
+            'test_f1': 0.0,
+            'test_precision': 0.0,
+            'test_recall': 0.0,
+            'test_oversmoothing': {
+                'NumRank': 0.0, 'Erank': 0.0, 'EDir': 0.0,
+                'EDir_traditional': 0.0, 'EProj': 0.0, 'MAD': 0.0
+            }
+        }
 
     def get_oversmoothing_history(self):
         return self.oversmoothing_history

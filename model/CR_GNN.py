@@ -5,7 +5,7 @@ from torch_geometric.utils import dropout_adj, mask_feature
 from torch_geometric.data import Data
 from copy import deepcopy
 import time
-from sklearn.metrics import accuracy_score, f1_score
+from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 
 from model.evaluation import OversmoothingMetrics
 
@@ -193,8 +193,10 @@ class CRGNNTrainer:
         return loss, acc, f1, de, oversmoothing_metrics
 
     def fit(self, base_model, data, config, get_model_func):
+        from sklearn.metrics import precision_score, recall_score
+        
         print(f"Training CR-GNN with {config['model_name'].upper()} backbone")
-    
+
         if data.num_nodes > 10000:
             print(f"Warning: large dataset with {data.num_nodes} nodes.")
         
@@ -351,18 +353,36 @@ class CRGNNTrainer:
             data.x, data.edge_index, clean_labels, test_mask
         )
 
+        encoder.eval()
+        projection_adapter.eval()
+        classifier.eval()
+
+        with torch.no_grad():
+            h = encoder(Data(x=data.x, edge_index=data.edge_index))
+            h = projection_adapter(h)
+            test_output = classifier(h)
+            
+            y_true_test = clean_labels[test_mask].cpu().numpy()
+            y_pred_test = test_output[test_mask].argmax(dim=1).cpu().numpy()
+            
+            test_precision = precision_score(y_true_test, y_pred_test, average='macro', zero_division=0)
+            test_recall = recall_score(y_true_test, y_pred_test, average='macro', zero_division=0)
+
         if test_oversmoothing is not None:
             self.oversmoothing_history['test'].append(test_oversmoothing)
 
         final_metrics = {
             'test_loss': test_loss,
             'test_acc': test_acc,
-            'test_f1': test_f1
+            'test_f1': test_f1,
+            'test_precision': test_precision,
+            'test_recall': test_recall
         }
 
         if self.config['debug']:
             print(f"\nTraining completed in {total_time:.2f}s")
             print(f"Test Loss: {final_metrics['test_loss']:.4f} | Test Acc: {final_metrics['test_acc']:.4f} | Test F1: {final_metrics['test_f1']:.4f}")
+            print(f"Test Precision: {final_metrics['test_precision']:.4f} | Test Recall: {final_metrics['test_recall']:.4f}")
             print("Final Oversmoothing Metrics:")
             
             if final_train_oversmoothing is not None:
@@ -380,7 +400,16 @@ class CRGNNTrainer:
                       f"EProj: {test_oversmoothing['EProj']:.4f}, MAD: {test_oversmoothing['MAD']:.4f}, "
                       f"NumRank: {test_oversmoothing['NumRank']:.4f}, Erank: {test_oversmoothing['Erank']:.4f}")
         
-        return test_acc
+        return {
+            'accuracy': test_acc,
+            'f1': test_f1,
+            'precision': test_precision,
+            'recall': test_recall,
+            'oversmoothing': test_oversmoothing if test_oversmoothing is not None else {
+                'NumRank': 0.0, 'Erank': 0.0, 'EDir': 0.0,
+                'EDir_traditional': 0.0, 'EProj': 0.0, 'MAD': 0.0
+            }
+        }
     
     def get_oversmoothing_history(self):
         return self.oversmoothing_history

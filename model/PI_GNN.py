@@ -9,6 +9,10 @@ import time
 
 from model.evaluation import OversmoothingMetrics
 
+def accuracy(output, labels):
+    preds = output.argmax(dim=1)
+    return (preds == labels).float().mean().item()
+
 class InnerProductDecoder(nn.Module):
     def __init__(self, act=lambda x: x):
         super().__init__()
@@ -54,7 +58,11 @@ class InnerProductTrainer:
 
     def _compute_oversmoothing_for_mask(self, embeddings, edge_index, mask):
         try:
-            mask_indices = torch.where(mask)[0]
+            if hasattr(mask, 'nonzero'):
+                mask_indices = mask.nonzero(as_tuple=True)[0]
+            else:
+                mask_indices = torch.tensor(mask, device=self.device)
+            
             mask_embeddings = embeddings[mask_indices]
             
             mask_set = set(mask_indices.cpu().numpy())
@@ -129,32 +137,44 @@ class InnerProductTrainer:
             return metrics, train_oversmoothing, val_oversmoothing
 
     def compute_final_test_metrics(self, model, data):
+        from sklearn.metrics import precision_score, recall_score, f1_score
+        
         model.eval()
         with torch.no_grad():
-            out_test, _ = model(data)
-            pred_test = out_test.argmax(dim=1)
-            
-            final_metrics = {}
-            
-            final_metrics['train_loss'] = F.nll_loss(out_test[data.train_mask], data.y[data.train_mask]).item()
-            final_metrics['train_acc'] = pred_test[data.train_mask].eq(data.y[data.train_mask]).sum().item() / data.train_mask.sum().item()
-            final_metrics['train_f1'] = f1_score(data.y[data.train_mask].cpu(), pred_test[data.train_mask].cpu(), average='micro')
-            
-            final_metrics['val_loss'] = F.nll_loss(out_test[data.val_mask], data.y[data.val_mask]).item()
-            final_metrics['val_acc'] = pred_test[data.val_mask].eq(data.y[data.val_mask]).sum().item() / data.val_mask.sum().item()
-            final_metrics['val_f1'] = f1_score(data.y[data.val_mask].cpu(), pred_test[data.val_mask].cpu(), average='micro')
-            
-            final_metrics['test_loss'] = F.nll_loss(out_test[data.test_mask], data.y[data.test_mask]).item()
-            final_metrics['test_acc'] = pred_test[data.test_mask].eq(data.y[data.test_mask]).sum().item() / data.test_mask.sum().item()
-            final_metrics['test_f1'] = f1_score(data.y[data.test_mask].cpu(), pred_test[data.test_mask].cpu(), average='micro')
+            out, _ = model(data)
 
-            hidden_embeddings = model.gnn(data)
-            final_train_oversmoothing = self._compute_oversmoothing_for_mask(hidden_embeddings, data.edge_index, data.train_mask)
-            final_val_oversmoothing = self._compute_oversmoothing_for_mask(hidden_embeddings, data.edge_index, data.val_mask)
-            final_test_oversmoothing = self._compute_oversmoothing_for_mask(hidden_embeddings, data.edge_index, data.test_mask)
+            train_loss = F.nll_loss(out[data.train_mask], data.y[data.train_mask]).item()
+            val_loss = F.nll_loss(out[data.val_mask], data.y[data.val_mask]).item()
+            test_loss = F.nll_loss(out[data.test_mask], data.y[data.test_mask]).item()
             
-            return (final_metrics, final_train_oversmoothing, final_val_oversmoothing, final_test_oversmoothing)
+            train_acc = accuracy(out[data.train_mask], data.y[data.train_mask])
+            val_acc = accuracy(out[data.val_mask], data.y[data.val_mask])
+            test_acc = accuracy(out[data.test_mask], data.y[data.test_mask])
 
+            y_true_test = data.y[data.test_mask].cpu().numpy()
+            y_pred_test = out[data.test_mask].argmax(dim=1).cpu().numpy()
+            
+            test_f1 = f1_score(y_true_test, y_pred_test, average='macro')
+            test_precision = precision_score(y_true_test, y_pred_test, average='macro', zero_division=0)
+            test_recall = recall_score(y_true_test, y_pred_test, average='macro', zero_division=0)
+            
+            train_oversmoothing = self._compute_oversmoothing_for_mask(out, data.edge_index, data.train_mask)
+            val_oversmoothing = self._compute_oversmoothing_for_mask(out, data.edge_index, data.val_mask)
+            test_oversmoothing = self._compute_oversmoothing_for_mask(out, data.edge_index, data.test_mask)
+            
+            final_metrics = {
+                'train_loss': train_loss,
+                'val_loss': val_loss,
+                'test_loss': test_loss,
+                'train_acc': train_acc,
+                'val_acc': val_acc,
+                'test_acc': test_acc,
+                'test_f1': test_f1,
+                'test_precision': test_precision,
+                'test_recall': test_recall
+            }
+            
+            return final_metrics, train_oversmoothing, val_oversmoothing, test_oversmoothing
 
     def fit(self, model, data, config=None, get_model_func=None):
         start_time = time.time()
@@ -334,9 +354,17 @@ class InnerProductTrainer:
         val_dirichlet = final_val_oversmoothing.get('EDir', 0.0) if final_val_oversmoothing else 0.0
         test_dirichlet = final_test_oversmoothing.get('EDir', 0.0) if final_test_oversmoothing else 0.0
 
-        print(f"Final Dirichlet Energy - Train: {train_dirichlet:.4f}, Val: {val_dirichlet:.4f}, Test: {test_dirichlet:.4f}")
-
-        return final_metrics['test_acc']
+        print(f"Test Precision: {final_metrics['test_precision']:.4f} | Test Recall: {final_metrics['test_recall']:.4f}")
+        return {
+            'accuracy': final_metrics['test_acc'],
+            'f1': final_metrics['test_f1'],
+            'precision': final_metrics['test_precision'],
+            'recall': final_metrics['test_recall'],
+            'oversmoothing': final_test_oversmoothing if final_test_oversmoothing is not None else {
+                'NumRank': 0.0, 'Erank': 0.0, 'EDir': 0.0,
+                'EDir_traditional': 0.0, 'EProj': 0.0, 'MAD': 0.0
+            }
+        }
 
 
     def get_oversmoothing_history(self):

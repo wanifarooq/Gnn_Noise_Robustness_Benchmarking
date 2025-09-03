@@ -213,7 +213,6 @@ def run_experiment(config, run_id=1):
     # NRGNN Training
     if method == 'nrgnn':
         print(f"Run {run_id}: Using NRGNN")
-
         base_model = get_model(
             model_name=config['model']['name'],
             in_channels=data.num_features,
@@ -223,7 +222,7 @@ def run_experiment(config, run_id=1):
             dropout=config['model'].get('dropout', 0.5),
             self_loop=config['model'].get('self_loop', True)
         )
-
+        
         adj = to_scipy_sparse_matrix(data.edge_index, num_nodes=data.x.size(0))
         features = data.x.cpu().numpy()
         labels = data.y.cpu().numpy()
@@ -251,13 +250,17 @@ def run_experiment(config, run_id=1):
                 self.patience = nrgnn_config.get('patience', 50)
         
         args = Args(nrgnn_config)
-        
         model = NRGNN(args, device, base_model=base_model)
-        
         model.fit(features, adj, labels, idx_train, idx_val)
-        test_acc = model.test(idx_test)
+        test_results = model.test(idx_test)
         
-        return test_acc
+        return {
+            'accuracy': test_results['test_acc'],
+            'f1': test_results['test_f1'],
+            'precision': test_results['test_precision'],
+            'recall': test_results['test_recall'],
+            'oversmoothing': test_results['test_oversmoothing']
+        }
 
     # PI-GNN Training
     if  method == 'pi_gnn':
@@ -299,8 +302,15 @@ def run_experiment(config, run_id=1):
             'self_loop': config['model'].get('self_loop', True)
         }
         
-        test_acc = trainer.fit(model, data, trainer_config, get_model)
-        return test_acc
+        test_results = trainer.fit(model, data, trainer_config, get_model)
+        
+        return {
+            'accuracy': test_results['accuracy'],
+            'f1': test_results['f1'],
+            'precision': test_results['precision'],
+            'recall': test_results['recall'],
+            'oversmoothing': test_results['oversmoothing']
+        }
 
     # CR-GNN Training
     if method == 'cr_gnn':
@@ -343,8 +353,16 @@ def run_experiment(config, run_id=1):
             'self_loop': config['model'].get('self_loop', True)
         }
         
-        test_acc = trainer.fit(base_model, data, trainer_config, get_model)
-        return test_acc
+        test_results = trainer.fit(base_model, data, trainer_config, get_model)
+        
+        return {
+            'accuracy': test_results['accuracy'],
+            'f1': test_results['f1'],
+            'precision': test_results['precision'],
+            'recall': test_results['recall'],
+            'oversmoothing': test_results['oversmoothing']
+        }
+
 
     # LafAK / GradientAttack Training
     if method == 'lafak':
