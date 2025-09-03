@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from sklearn.metrics import f1_score
+from sklearn.metrics import f1_score, precision_score, recall_score
 
 from model.evaluation import OversmoothingMetrics
 
@@ -79,7 +79,6 @@ def train_with_standard_loss(
     optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
 
     criterion = nn.CrossEntropyLoss()
-    
     oversmoothing_evaluator = OversmoothingMetrics(device=device)
 
     best_val_loss = float('inf')
@@ -100,7 +99,7 @@ def train_with_standard_loss(
         with torch.no_grad():
             val_idx = data.val_mask.nonzero(as_tuple=True)[0]
             test_idx = data.test_mask.nonzero(as_tuple=True)[0]
-            
+
             val_loss = criterion(out[val_idx], data.y[val_idx])
 
             pred = out.argmax(dim=1)
@@ -128,21 +127,21 @@ def train_with_standard_loss(
             model.load_state_dict(best_model_state)
             break
 
-        if debug:
+        if debug and epoch % 20 == 0:
             train_de = train_oversmoothing['EDir']
             train_de_traditional = train_oversmoothing['EDir_traditional']
             train_eproj = train_oversmoothing['EProj']
             train_mad = train_oversmoothing['MAD']
             train_num_rank = train_oversmoothing['NumRank']
             train_eff_rank = train_oversmoothing['Erank']
-            
+
             val_de = val_oversmoothing['EDir']
             val_de_traditional = val_oversmoothing['EDir_traditional']
             val_eproj = val_oversmoothing['EProj']
             val_mad = val_oversmoothing['MAD']
             val_num_rank = val_oversmoothing['NumRank']
             val_eff_rank = val_oversmoothing['Erank']
-            
+
             print(f"Epoch {epoch:03d} | Train Acc: {train_acc:.4f}, Val Acc: {val_acc:.4f} | "
                   f"Train F1: {train_f1:.4f}, Val F1: {val_f1:.4f}")
             print(f"Train DE: {train_de:.4f}, Val DE: {val_de:.4f} | "
@@ -159,6 +158,8 @@ def train_with_standard_loss(
         pred = out.argmax(dim=1)
         test_acc = (pred[test_idx] == data.y[test_idx]).sum().item() / len(test_idx)
         test_f1 = f1_score(data.y[test_idx].cpu(), pred[test_idx].cpu(), average='macro')
+        test_precision = precision_score(data.y[test_idx].cpu(), pred[test_idx].cpu(), average='macro')
+        test_recall = recall_score(data.y[test_idx].cpu(), pred[test_idx].cpu(), average='macro')
 
         final_train_oversmoothing = _compute_oversmoothing_for_mask(
             oversmoothing_evaluator, out, data.edge_index, data.train_mask, data.y
@@ -171,22 +172,25 @@ def train_with_standard_loss(
         )
 
     if debug:
-        print(f"Test Loss: {test_loss:.4f} | Test Acc: {test_acc:.4f} | Test F1: {test_f1:.4f}")
+        print(f"Test Loss: {test_loss:.4f} | Test Acc: {test_acc:.4f} | Test F1: {test_f1:.4f} | "
+              f"Precision: {test_precision:.4f}, Recall: {test_recall:.4f}")
         print("Final Oversmoothing Metrics:")
-        
-        print(f"Train: EDir: {final_train_oversmoothing['EDir']:.4f}, EDir_traditional: {final_train_oversmoothing['EDir_traditional']:.4f}, "
-              f"EProj: {final_train_oversmoothing['EProj']:.4f}, MAD: {final_train_oversmoothing['MAD']:.4f}, "
-              f"NumRank: {final_train_oversmoothing['NumRank']:.4f}, Erank: {final_train_oversmoothing['Erank']:.4f}")
-        
-        print(f"Val: EDir: {final_val_oversmoothing['EDir']:.4f}, EDir_traditional: {final_val_oversmoothing['EDir_traditional']:.4f}, "
-              f"EProj: {final_val_oversmoothing['EProj']:.4f}, MAD: {final_val_oversmoothing['MAD']:.4f}, "
-              f"NumRank: {final_val_oversmoothing['NumRank']:.4f}, Erank: {final_val_oversmoothing['Erank']:.4f}")
-        
-        print(f"Test: EDir: {test_oversmoothing['EDir']:.4f}, EDir_traditional: {test_oversmoothing['EDir_traditional']:.4f}, "
-              f"EProj: {test_oversmoothing['EProj']:.4f}, MAD: {test_oversmoothing['MAD']:.4f}, "
-              f"NumRank: {test_oversmoothing['NumRank']:.4f}, Erank: {test_oversmoothing['Erank']:.4f}")
+        print(f"Train: {final_train_oversmoothing}")
+        print(f"Val: {final_val_oversmoothing}")
+        print(f"Test: {test_oversmoothing}")
 
-    return test_acc
+    results = {
+        'accuracy': test_acc,
+        'f1': test_f1,
+        'precision': test_precision,
+        'recall': test_recall,
+        'oversmoothing': {
+            'train': final_train_oversmoothing,
+            'val': final_val_oversmoothing,
+            'test': test_oversmoothing
+        }
+    }
+    return results
 
 
 cross_entropy_val = nn.CrossEntropyLoss
@@ -373,7 +377,7 @@ def train_with_ncod(model, data, noisy_indices, device, lr=0.01, weight_decay=5e
             model.load_state_dict(best_model_state)
             break
 
-        if debug:
+        if debug and epoch%20==0:
             train_de = train_oversmoothing['EDir']
             train_de_traditional = train_oversmoothing['EDir_traditional']
             train_eproj = train_oversmoothing['EProj']
@@ -443,4 +447,12 @@ def train_with_ncod(model, data, noisy_indices, device, lr=0.01, weight_decay=5e
               f"EProj: {test_oversmoothing['EProj']:.4f}, MAD: {test_oversmoothing['MAD']:.4f}, "
               f"NumRank: {test_oversmoothing['NumRank']:.4f}, Erank: {test_oversmoothing['Erank']:.4f}")
 
-    return test_acc
+    results = {
+        'test_acc': test_acc,
+        'test_f1': test_f1,
+        'test_loss': test_loss.item(),
+        'train_oversmoothing': final_train_oversmoothing,
+        'val_oversmoothing': final_val_oversmoothing,
+        'test_oversmoothing': test_oversmoothing
+    }
+    return results

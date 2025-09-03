@@ -262,29 +262,30 @@ class InnerProductTrainer:
             if val_oversmoothing is not None:
                 self.oversmoothing_history['val'].append(val_oversmoothing)
 
-            train_edir = train_oversmoothing['EDir'] if train_oversmoothing else 0.0
-            train_edir_trad = train_oversmoothing['EDir_traditional'] if train_oversmoothing else 0.0
-            train_eproj = train_oversmoothing['EProj'] if train_oversmoothing else 0.0
-            train_mad = train_oversmoothing['MAD'] if train_oversmoothing else 0.0
-            train_num_rank = train_oversmoothing['NumRank'] if train_oversmoothing else 0.0
-            train_eff_rank = train_oversmoothing['Erank'] if train_oversmoothing else 0.0
-            
-            val_edir = val_oversmoothing['EDir'] if val_oversmoothing else 0.0
-            val_edir_trad = val_oversmoothing['EDir_traditional'] if val_oversmoothing else 0.0
-            val_eproj = val_oversmoothing['EProj'] if val_oversmoothing else 0.0
-            val_mad = val_oversmoothing['MAD'] if val_oversmoothing else 0.0
-            val_num_rank = val_oversmoothing['NumRank'] if val_oversmoothing else 0.0
-            val_eff_rank = val_oversmoothing['Erank'] if val_oversmoothing else 0.0
+            if epoch%20 == 0:
+                train_edir = train_oversmoothing['EDir'] if train_oversmoothing else 0.0
+                train_edir_trad = train_oversmoothing['EDir_traditional'] if train_oversmoothing else 0.0
+                train_eproj = train_oversmoothing['EProj'] if train_oversmoothing else 0.0
+                train_mad = train_oversmoothing['MAD'] if train_oversmoothing else 0.0
+                train_num_rank = train_oversmoothing['NumRank'] if train_oversmoothing else 0.0
+                train_eff_rank = train_oversmoothing['Erank'] if train_oversmoothing else 0.0
+                
+                val_edir = val_oversmoothing['EDir'] if val_oversmoothing else 0.0
+                val_edir_trad = val_oversmoothing['EDir_traditional'] if val_oversmoothing else 0.0
+                val_eproj = val_oversmoothing['EProj'] if val_oversmoothing else 0.0
+                val_mad = val_oversmoothing['MAD'] if val_oversmoothing else 0.0
+                val_num_rank = val_oversmoothing['NumRank'] if val_oversmoothing else 0.0
+                val_eff_rank = val_oversmoothing['Erank'] if val_oversmoothing else 0.0
 
-            print(f"Epoch {epoch:03d} | Train Loss: {metrics['train_loss']:.4f}, Val Loss: {metrics['val_loss']:.4f} | "
-                  f"Train Acc: {metrics['train_acc']:.4f}, Val Acc: {metrics['val_acc']:.4f} | "
-                  f"Train F1: {metrics['train_f1']:.4f}, Val F1: {metrics['val_f1']:.4f}")
-            print(f"Train DE: {train_edir:.4f}, Val DE: {val_edir:.4f} | "
-                  f"Train DE_trad: {train_edir_trad:.4f}, Val DE_trad: {val_edir_trad:.4f} | "
-                  f"Train EProj: {train_eproj:.4f}, Val EProj: {val_eproj:.4f} | "
-                  f"Train MAD: {train_mad:.4f}, Val MAD: {val_mad:.4f} | "
-                  f"Train NumRank: {train_num_rank:.4f}, Val NumRank: {val_num_rank:.4f} | "
-                  f"Train Erank: {train_eff_rank:.4f}, Val Erank: {val_eff_rank:.4f}")
+                print(f"Epoch {epoch:03d} | Train Loss: {metrics['train_loss']:.4f}, Val Loss: {metrics['val_loss']:.4f} | "
+                      f"Train Acc: {metrics['train_acc']:.4f}, Val Acc: {metrics['val_acc']:.4f} | "
+                      f"Train F1: {metrics['train_f1']:.4f}, Val F1: {metrics['val_f1']:.4f}")
+                print(f"Train DE: {train_edir:.4f}, Val DE: {val_edir:.4f} | "
+                      f"Train DE_trad: {train_edir_trad:.4f}, Val DE_trad: {val_edir_trad:.4f} | "
+                      f"Train EProj: {train_eproj:.4f}, Val EProj: {val_eproj:.4f} | "
+                      f"Train MAD: {train_mad:.4f}, Val MAD: {val_mad:.4f} | "
+                      f"Train NumRank: {train_num_rank:.4f}, Val NumRank: {val_num_rank:.4f} | "
+                      f"Train Erank: {train_eff_rank:.4f}, Val Erank: {val_eff_rank:.4f}")
 
             if metrics['val_loss'] < best_val_loss - self.delta:
                 best_val_loss = metrics['val_loss']
@@ -302,37 +303,41 @@ class InnerProductTrainer:
             model.load_state_dict(best_model_state)
 
         results = self.compute_final_test_metrics(model, data)
-        final_metrics, final_train_de, final_val_de, final_test_de = results[:4]
-        final_train_oversmoothing, final_val_oversmoothing, final_test_oversmoothing = results[4:]
-        
+        final_metrics, final_train_oversmoothing, final_val_oversmoothing, final_test_oversmoothing = results
+
         if final_test_oversmoothing is not None:
             self.oversmoothing_history['test'].append(final_test_oversmoothing)
-        
+
         total_time = time.time() - start_time
-        
+
         print(f"\nTraining completed in {total_time:.2f}s")
         print(f"Test Loss: {final_metrics['test_loss']:.4f} | Test Acc: {final_metrics['test_acc']:.4f} | Test F1: {final_metrics['test_f1']:.4f}")
 
         print("Final Oversmoothing Metrics:")
-        
+
         if final_train_oversmoothing is not None:
             print(f"Train: EDir: {final_train_oversmoothing['EDir']:.4f}, EDir_traditional: {final_train_oversmoothing['EDir_traditional']:.4f}, "
                   f"EProj: {final_train_oversmoothing['EProj']:.4f}, MAD: {final_train_oversmoothing['MAD']:.4f}, "
                   f"NumRank: {final_train_oversmoothing['NumRank']:.4f}, Erank: {final_train_oversmoothing['Erank']:.4f}")
-        
+
         if final_val_oversmoothing is not None:
             print(f"Val: EDir: {final_val_oversmoothing['EDir']:.4f}, EDir_traditional: {final_val_oversmoothing['EDir_traditional']:.4f}, "
                   f"EProj: {final_val_oversmoothing['EProj']:.4f}, MAD: {final_val_oversmoothing['MAD']:.4f}, "
                   f"NumRank: {final_val_oversmoothing['NumRank']:.4f}, Erank: {final_val_oversmoothing['Erank']:.4f}")
-        
+
         if final_test_oversmoothing is not None:
             print(f"Test: EDir: {final_test_oversmoothing['EDir']:.4f}, EDir_traditional: {final_test_oversmoothing['EDir_traditional']:.4f}, "
                   f"EProj: {final_test_oversmoothing['EProj']:.4f}, MAD: {final_test_oversmoothing['MAD']:.4f}, "
                   f"NumRank: {final_test_oversmoothing['NumRank']:.4f}, Erank: {final_test_oversmoothing['Erank']:.4f}")
-        
-        print(f"Final Dirichlet Energy - Train: {final_train_de:.4f}, Val: {final_val_de:.4f}, Test: {final_test_de:.4f}")
+
+        train_dirichlet = final_train_oversmoothing.get('EDir', 0.0) if final_train_oversmoothing else 0.0
+        val_dirichlet = final_val_oversmoothing.get('EDir', 0.0) if final_val_oversmoothing else 0.0
+        test_dirichlet = final_test_oversmoothing.get('EDir', 0.0) if final_test_oversmoothing else 0.0
+
+        print(f"Final Dirichlet Energy - Train: {train_dirichlet:.4f}, Val: {val_dirichlet:.4f}, Test: {test_dirichlet:.4f}")
 
         return final_metrics['test_acc']
+
 
     def get_oversmoothing_history(self):
         return self.oversmoothing_history

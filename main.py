@@ -84,6 +84,20 @@ def run_experiment(config, run_id=1):
             weight_decay=weight_decay,
             patience=patience
         )
+        test_acc = result['accuracy']
+        test_f1 = result['f1']
+        test_precision = result['precision']
+        test_recall = result['recall']
+        test_oversmoothing = result['oversmoothing']
+
+        return {
+            'accuracy': test_acc,
+            'f1': test_f1,
+            'precision': test_precision,
+            'recall': test_recall,
+            'oversmoothing': test_oversmoothing
+        }
+
 
     elif method == 'ncod':
         trainer_params = config.get('training', {})
@@ -115,6 +129,20 @@ def run_experiment(config, run_id=1):
             lambda_dir=lambda_dir,
             patience=patience
         )
+        test_acc = result['accuracy']
+        test_f1 = result['f1']
+        test_precision = result['precision']
+        test_recall = result['recall']
+        test_oversmoothing = result['oversmoothing']
+
+        return {
+            'accuracy': test_acc,
+            'f1': test_f1,
+            'precision': test_precision,
+            'recall': test_recall,
+            'oversmoothing': test_oversmoothing
+        }
+
 
     elif method == 'positive_eigenvalues':
 
@@ -726,80 +754,90 @@ def run_experiment(config, run_id=1):
         raise ValueError(
             f"Run {run_id}: Training method '{method}' not implemented. "
             "Please choose one of the implemented methods: "
-            "[standard, dirichlet, ncod, positive_eigenvalues, gcod, nrgnn, pi_gnn, cr_gnn, lafak, rtgnn, graphcleaner, unionnet, gnn_cleaner, erase, gnnguard]"
+            "[standard, ncod, positive_eigenvalues, gcod, nrgnn, pi_gnn, cr_gnn, lafak, rtgnn, graphcleaner, unionnet, gnn_cleaner, erase, gnnguard]"
         )
 
 if __name__ == "__main__":
     print("\n" + "-"*50)
-    print("Multi-run experiment: 10 runs")
+    print("Multi-run experiment: 5 runs")
     print("-"*50)
     
     with open("config.yaml", "r") as f:
         config = yaml.safe_load(f)
     print("Loaded configuration file")
 
-    method_name = config['training'].get('supplementary_gnn', config['training']['method'])
+    method_name = config['training']['method']
     dataset_name = config['dataset']['name']
     noise_rate = config['noise']['rate']
     
     print(f"Dataset: {dataset_name}")
     print(f"Method: {method_name}")
     print(f"Noise Rate: {noise_rate}")
-    print(f"Running 10 experiments")
+    print(f"Running 5 experiments")
     print("-"*50)
     
     test_accuracies = []
-    
-    for run in range(1, 11):
+    test_f1s = []
+    test_precisions = []
+    test_recalls = []
+
+    oversmoothing_metrics = {
+        'NumRank': [],
+        'Erank': [],
+        'EDir': [],
+        'EDir_traditional': [],
+        'EProj': [],
+        'MAD': []
+    }
+
+    for run in range(1, 6):
         try:
-            print(f"\nRun {run}/10:")
-            test_acc = run_experiment(config, run_id=run)
-            
-            if isinstance(test_acc, dict):
-                if 'test_acc' in test_acc:
-                    acc_value = test_acc['test_acc']
-                elif 'test' in test_acc:
-                    acc_value = test_acc['test']
-                else:
-                    acc_value = list(test_acc.values())[0]
-            else:
-                acc_value = test_acc
-            
-            test_accuracies.append(acc_value)
-            print(f"Run {run} completed - Test Accuracy: {acc_value:.4f}")
+            print(f"\nRun {run}/5:")
+            test_metrics = run_experiment(config, run_id=run)
+            test_acc = test_metrics['accuracy']
+            test_f1 = test_metrics['f1']
+            test_precision = test_metrics['precision']
+            test_recall = test_metrics['recall']
+            test_overs = test_metrics['oversmoothing']
+
+            test_accuracies.append(test_acc)
+            test_f1s.append(test_f1)
+            test_precisions.append(test_precision)
+            test_recalls.append(test_recall)
+
+            for key in oversmoothing_metrics:
+                oversmoothing_metrics[key].append(test_overs[key])
+
+            print(f"Run {run} completed - Test Acc: {test_acc:.4f}, F1: {test_f1:.4f}, "
+                  f"Precision: {test_precision:.4f}, Recall: {test_recall:.4f}")
             
         except Exception as e:
             print(f"Run {run} failed with error: {str(e)}")
-            print("Continuing with remaining runs")
             continue
+
+        print("-"*50)
     
     if test_accuracies:
-        mean_acc = np.mean(test_accuracies)
-        std_acc = np.std(test_accuracies)
-        min_acc = np.min(test_accuracies)
-        max_acc = np.max(test_accuracies)
-        
+        mean_std_dict = {
+            'Accuracy': (np.mean(test_accuracies), np.std(test_accuracies)),
+            'F1': (np.mean(test_f1s), np.std(test_f1s)),
+            'Precision': (np.mean(test_precisions), np.std(test_precisions)),
+            'Recall': (np.mean(test_recalls), np.std(test_recalls))
+        }
+
         print("\n" + "-"*50)
         print("Final results")
         print("-"*50)
-        print(f"Method: {method_name}")
-        print(f"Dataset: {dataset_name}")
-        print(f"Noise Rate: {noise_rate}")
-        print(f"Completed Runs: {len(test_accuracies)}/10")
-        print("-"*50)
-        print(f"Mean Test Accuracy: {mean_acc:.4f}")
-        print(f"Std Test Accuracy: {std_acc:.4f}")
-        print(f"Min Test Accuracy: {min_acc:.4f}")
-        print(f"Max Test Accuracy: {max_acc:.4f}")
-        print("-"*50)
-        print("Individual Run Results:")
-        for i, acc in enumerate(test_accuracies, 1):
-            print(f"  Run {i:2d}: {acc:.4f}")
+        for metric, (mean_val, std_val) in mean_std_dict.items():
+            print(f"{metric}: {mean_val:.4f} ± {std_val:.4f}")
         
-        print(f"\nFormatted Result: {mean_acc:.4f} ± {std_acc:.4f}")
+        print("\nOversmoothing Metrics:")
+        for key in oversmoothing_metrics:
+            mean_val = np.mean(oversmoothing_metrics[key])
+            std_val = np.std(oversmoothing_metrics[key])
+            print(f"{key}: {mean_val:.4f} ± {std_val:.4f}")
+
         print("-"*50)
-        
     else:
-        print("\n" + "-"*50)
-        print("ERROR: No successful runs completed!")
+        print("\nERROR: No successful runs completed!")
         print("-"*50)
