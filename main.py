@@ -4,8 +4,11 @@ from torch_geometric.utils import to_scipy_sparse_matrix
 import scipy.sparse as sp
 import yaml
 
-from utilities import setup_seed_device, load_dataset, get_model, train
+from utilities import setup_seed_device, load_dataset, get_model
 from utilities import label_process
+from model.Baseline_loss import train_with_standard_loss, train_with_ncod
+from model.Positive_Eigenvalues import train_with_positive_eigenvalues
+from model.GCOD_loss import train_with_gcod
 from model.NRGNN import NRGNN
 from model.PI_GNN import InnerProductTrainer, Net, InnerProductDecoder
 from model.CR_GNN import CRGNNTrainer
@@ -53,11 +56,134 @@ def run_experiment(config, run_id=1):
     
     print(f"Run {run_id}: Applied noise to {len(relative_noisy_indices)} training samples out of {train_mask.sum().item()}")
     
-    supp_gnn = config['training'].get('supplementary_gnn', "")
     method = config['training']['method']
+
+    if method == 'standard':
+        trainer_params = config.get('training', {})
+        lr = float(trainer_params.get('lr', 0.01))
+        weight_decay = float(trainer_params.get('weight_decay', 5e-4))
+        epochs = int(trainer_params.get('epochs'))
+        patience = int(trainer_params.get('patience', 100))
+
+        model_params = {k: v for k, v in config['model'].items() if k not in ['name', 'hidden_channels', 'n_layers', 'dropout', 'self_loop']}
+        base_model = get_model(
+            model_name=config['model']['name'],
+            in_channels=data.num_features,
+            hidden_channels=config['model'].get('hidden_channels', 64),
+            out_channels=num_classes,
+            n_layers=config['model'].get('n_layers', 2),
+            dropout=config['model'].get('dropout', 0.5),
+            self_loop=config['model'].get('self_loop', True),
+            **model_params
+        )
+
+        result = train_with_standard_loss(
+            base_model, data, global_noisy_indices, device,
+            total_epochs=epochs,
+            lr=lr,
+            weight_decay=weight_decay,
+            patience=patience
+        )
+
+    elif method == 'ncod':
+        trainer_params = config.get('training', {})
+        lr = float(trainer_params.get('lr', 0.01))
+        weight_decay = float(trainer_params.get('weight_decay', 5e-4))
+        epochs = int(trainer_params.get('epochs'))
+        patience = int(trainer_params.get('patience', 100))
+
+        trainer_params_method = config.get('ncod_params', {})
+        lambda_dir = float(trainer_params_method.get('lambda_dir', 0.1))
+
+        model_params = {k: v for k, v in config['model'].items() if k not in ['name', 'hidden_channels', 'n_layers', 'dropout', 'self_loop']}
+        base_model = get_model(
+            model_name=config['model']['name'],
+            in_channels=data.num_features,
+            hidden_channels=config['model'].get('hidden_channels', 64),
+            out_channels=num_classes,
+            n_layers=config['model'].get('n_layers', 2),
+            dropout=config['model'].get('dropout', 0.5),
+            self_loop=config['model'].get('self_loop', True),
+            **model_params
+        )
+
+        result = train_with_ncod(
+            base_model, data, global_noisy_indices, device,
+            total_epochs=epochs,
+            lr=lr,
+            weight_decay=weight_decay,
+            lambda_dir=lambda_dir,
+            patience=patience
+        )
+
+    elif method == 'positive_eigenvalues':
+
+        trainer_params = config.get('training', {})
+        lr = float(trainer_params.get('lr', 0.01))
+        weight_decay = float(trainer_params.get('weight_decay', 5e-4))
+        epochs = int(trainer_params.get('epochs'))
+        patience = int(trainer_params.get('patience', 100))
+
+        trainer_params_method = config.get('positive_eigenvalues_params', {})
+        batch_size = int(trainer_params_method.get('batch_size', 32))
+
+        model_params = {k: v for k, v in config['model'].items() if k not in ['name', 'hidden_channels', 'n_layers', 'dropout', 'self_loop']}
+        base_model = get_model(
+            model_name=config['model']['name'],
+            in_channels=data.num_features,
+            hidden_channels=config['model'].get('hidden_channels', 64),
+            out_channels=num_classes,
+            n_layers=config['model'].get('n_layers', 2),
+            dropout=config['model'].get('dropout', 0.5),
+            self_loop=config['model'].get('self_loop', True),
+            **model_params
+        )
+
+        result = train_with_positive_eigenvalues(
+            base_model, data, global_noisy_indices, device,
+            epochs=epochs,
+            lr=lr,
+            weight_decay=weight_decay,
+            batch_size=batch_size,
+            patience=patience
+        )
+
+    elif method == 'gcod':
+
+        trainer_params = config.get('training', {})
+        lr = float(trainer_params.get('lr', 0.01))
+        weight_decay = float(trainer_params.get('weight_decay', 5e-4))
+        epochs = int(trainer_params.get('epochs'))
+        patience = int(trainer_params.get('patience', 100))
+
+        trainer_params_method = config.get('gcod_params', {})
+        batch_size = int(trainer_params_method.get('batch_size', 32))
+        u_lr = float(trainer_params_method.get('u_lr', 1.0))
+
+        model_params = {k: v for k, v in config['model'].items() if k not in ['name', 'hidden_channels', 'n_layers', 'dropout', 'self_loop']}
+        base_model = get_model(
+            model_name=config['model']['name'],
+            in_channels=data.num_features,
+            hidden_channels=config['model'].get('hidden_channels', 64),
+            out_channels=num_classes,
+            n_layers=config['model'].get('n_layers', 2),
+            dropout=config['model'].get('dropout', 0.5),
+            self_loop=config['model'].get('self_loop', True),
+            **model_params
+        )
+
+        result = train_with_gcod(
+            base_model, data, global_noisy_indices, device,
+            epochs=epochs,
+            lr=lr,
+            weight_decay=weight_decay,
+            batch_size=batch_size,
+            u_lr=u_lr,
+            patience=patience
+        )
     
     # NRGNN Training
-    if supp_gnn == 'nrgnn' or method == 'nrgnn':
+    if method == 'nrgnn':
         print(f"Run {run_id}: Using NRGNN")
 
         base_model = get_model(
@@ -106,7 +232,7 @@ def run_experiment(config, run_id=1):
         return test_acc
 
     # PI-GNN Training
-    if supp_gnn in ['pi_gnn'] or method == 'pi_gnn':
+    if  method == 'pi_gnn':
         print(f"Run {run_id}: Using PI-GNN")
         trainer_params = config.get('pi_gnn_params', {})
         trainer = InnerProductTrainer(
@@ -149,7 +275,7 @@ def run_experiment(config, run_id=1):
         return test_acc
 
     # CR-GNN Training
-    if supp_gnn in ['cr_gnn'] or method == 'cr_gnn':
+    if method == 'cr_gnn':
         print(f"Run {run_id}: Using CR-GNN")
         trainer_params = config.get('cr_gnn_params', {})
         trainer = CRGNNTrainer(
@@ -193,7 +319,7 @@ def run_experiment(config, run_id=1):
         return test_acc
 
     # LafAK / GradientAttack Training
-    if supp_gnn in ['lafak'] or method == 'lafak':
+    if method == 'lafak':
         print("Using LafAK / GradientAttack")
         data_for_lafak = data.clone()
         data_for_lafak.y = data.y_original
@@ -346,7 +472,7 @@ def run_experiment(config, run_id=1):
             }
 
     # RTGNN Training
-    if supp_gnn in ['rtgnn'] or method == 'rtgnn':
+    if method == 'rtgnn':
         print(f"Run {run_id}: Using RTGNN")
         
         class RTGNNConfig:
@@ -405,7 +531,7 @@ def run_experiment(config, run_id=1):
         return test_acc
     
     # GraphCleaner Training
-    if supp_gnn in ['graphcleaner'] or method == 'graphcleaner':
+    if method == 'graphcleaner':
         print(f"Run {run_id}: Using GraphCleaner")
         
         data_for_detection = data.clone()
@@ -451,7 +577,7 @@ def run_experiment(config, run_id=1):
         return detection_results.get('accuracy', 0.0)
     
     # UnionNET Training
-    if supp_gnn in ['unionnet'] or method == 'unionnet':
+    if method == 'unionnet':
         print(f"Run {run_id}: Using UnionNET")
         
         gnn_model = get_model(
@@ -484,7 +610,7 @@ def run_experiment(config, run_id=1):
         return result['test']
 
     # GNN Cleaner Training
-    if supp_gnn in ['gnn_cleaner'] or method == 'gnn_cleaner':
+    if method == 'gnn_cleaner':
         print(f"Run {run_id}: Using GNN Cleaner")
         gnn_model = get_model(
             model_name=config['model']['name'],
@@ -514,7 +640,7 @@ def run_experiment(config, run_id=1):
         return result['test']
     
     # ERASE Training
-    if supp_gnn in ['erase'] or method == 'erase':
+    if method == 'erase':
         print(f"Run {run_id}: Using ERASE")
         
         erase_config = {
@@ -548,7 +674,7 @@ def run_experiment(config, run_id=1):
         return result['test']
     
     # GNNGuard Training
-    if supp_gnn in ['gnnguard'] or method == 'gnnguard':
+    if method == 'gnnguard':
         print(f"Run {run_id}: Using GNNGuard")
         
         gnnguard_args = {
@@ -595,18 +721,13 @@ def run_experiment(config, run_id=1):
         
         test_acc, test_f1 = gnnguard_model.test(idx_test)
         return test_acc
-
-    model_params = {k: v for k, v in config['model'].items() if k not in ['name']}
-    print(f"Run {run_id}: Using {config['model']['name']} with method {config['training']['method']}")
-    model = get_model(
-        model_name=config['model']['name'],
-        in_channels=data.num_features,
-        out_channels=num_classes,
-        **model_params
-    ).to(device)
     
-    result = train(model, data, global_noisy_indices, device, config)
-    return result
+    else:
+        raise ValueError(
+            f"Run {run_id}: Training method '{method}' not implemented. "
+            "Please choose one of the implemented methods: "
+            "[standard, dirichlet, ncod, positive_eigenvalues, gcod, nrgnn, pi_gnn, cr_gnn, lafak, rtgnn, graphcleaner, unionnet, gnn_cleaner, erase, gnnguard]"
+        )
 
 if __name__ == "__main__":
     print("\n" + "-"*50)

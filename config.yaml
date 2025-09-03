@@ -1,5 +1,4 @@
 seed: 42
-
 device: cuda
 
 dataset:
@@ -16,43 +15,34 @@ model:
   hidden_channels: 256
   n_layers: 2
   dropout: 0.5
-  # GCN specific parameters
   self_loop: true
-  # GIN specific parameters
   mlp_layers: 1
   train_eps: false
-  # GAT/GATv2 specific parameters
   heads: 8
   concat: true
   
 training:
-  # Methods:
-  # - standard: Basic cross-entropy loss
-  # - dirichlet: Dirichlet regularization
-  # - ncod: NCOD method
-  # - nrgnn: use NRGNN as main method
-  # - pi_gnn: use PI-GNN as main method
-  # - cr_gnn: use CR-GNN as main method
-  # - lafak: use LafAK as main method
-  # - rtgnn: use RTGNN as main method
-  # - gnn_cleaner: use GNN Cleaner as main method
-  # - gnnguard: use GNNGuard as main method
-  method: graphcleaner # standard, dirichlet, ncod, positive_eigenvalues, gcod, nrgnn, pi_gnn, cr_gnn, lafak, rtgnn, graphcleaner, unionnet, gnn_cleaner, erase, gnnguard
-  total_epochs: 1000
-  
-  # Supplementary GNN options
-  # - None: No supplementary GNN
-  # - nrgnn: use NRGNN
-  # - pi_gnn: use PI-GNN  
-  # - cr_gnn: use CR-GNN
-  # - lafak: use LafAK
-  # - rtgnn: use RTGNN
-  # - graphcleaner: use GraphCleaner
-  # - unionnet: use UnionNET
-  # - gnn_cleaner: use GNN Cleaner
-  # - erase: use ERASE
-  # - gnnguard: use GNNGuard
-  supplementary_gnn: graphcleaner # None, nrgnn, pi_gnn, cr_gnn, lafak, rtgnn, graphcleaner, unionnet, gnn_cleaner, erase, gnnguard
+  method: gcod # standard, ncod, positive_eigenvalues, gcod, nrgnn, pi_gnn, cr_gnn, lafak, rtgnn, graphcleaner, unionnet, gnn_cleaner, erase, gnnguard
+  lr: 0.01
+  weight_decay: 5e-4
+  epochs: 1000
+  patience: 100
+
+# Standard training parameters
+#standard_params:
+
+# NCOD parameters
+ncod_params:
+  lambda_dir: 0.1
+
+# Positive Eigenvalues parameters
+positive_eigenvalues_params:
+  batch_size: 32
+
+# GCOD parameters
+gcod_params:
+  batch_size: 32
+  u_lr: 1.0
 
 # NRGNN parameters
 nrgnn_params:
@@ -130,11 +120,11 @@ graphcleaner_params:
 
 # UnionNET parameters
 unionnet_params:
-  k: 10 # Cora and Citeseer: 10 and Pubmed: 4
+  k: 10
   alpha: 0.5
   beta: 1
   feat_norm: True
-  lr: 0.01 #GCN and GIN: 0.01. GAT and GATv2: 0.005.
+  lr: 0.01
   weight_decay: 5e-4
   patience: 10
 

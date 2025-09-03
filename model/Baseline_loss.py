@@ -66,9 +66,18 @@ def _compute_oversmoothing_for_mask(oversmoothing_evaluator, embeddings, edge_in
             'MAD': 0.0
         }
 
-def train_with_standard_loss(model, data, noisy_indices, device, total_epochs=200, patience=20, debug=True):
+def train_with_standard_loss(
+    model, data, noisy_indices, device,
+    total_epochs=200,
+    lr=0.01,
+    weight_decay=5e-4,
+    patience=20,
+    debug=True
+):
+
     model.to(device)
-    optimizer = optim.Adam(model.parameters(), lr=0.01, weight_decay=5e-4)
+    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+
     criterion = nn.CrossEntropyLoss()
     
     oversmoothing_evaluator = OversmoothingMetrics(device=device)
@@ -277,11 +286,12 @@ class ncodLoss(nn.Module):
         with torch.no_grad():
             return torch.zeros(len(x), self.num_classes).to(self.device).scatter_(1, x.argmax(dim=1).view(-1, 1), 1)
         
-def train_with_ncod(model, data, noisy_indices, device, total_epochs=200, lambda_dir=0.1, num_classes=None, patience=20, debug=True):
+def train_with_ncod(model, data, noisy_indices, device, lr=0.01, weight_decay=5e-4, total_epochs=200, lambda_dir=0.1, num_classes=None, patience=20, debug=True):
     if num_classes is None:
         num_classes = int(data.y.max().item()) + 1
 
-    optimizer = optim.Adam(model.parameters(), lr=0.01, weight_decay=5e-4)
+    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+
     sample_labels = data.y.cpu().numpy()
 
     oversmoothing_evaluator = OversmoothingMetrics(device=device)

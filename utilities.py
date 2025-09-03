@@ -9,9 +9,6 @@ from scipy import stats
 from numpy.testing import assert_array_almost_equal
 
 from model.GNNs import GCN, GIN, GAT, GATv2
-from model.Baseline_loss import train_with_standard_loss, train_with_ncod
-from model.Positive_Eigenvalues import train_with_positive_eigenvalues
-from model.GCOD_loss import train_with_gcod
 
 # Noises
 def simple_uniform_noise(labels, n_classes, noise_rate, random_seed):
@@ -268,56 +265,3 @@ def get_model(model_name, in_channels, hidden_channels, out_channels, **kwargs):
     model_cls, valid_params = model_registry[model_name]
     filtered_kwargs = {k: v for k, v in kwargs.items() if k in valid_params}
     return model_cls(in_channels, hidden_channels, out_channels, **filtered_kwargs)
-
-def train(model, data, noisy_indices, device, config):
-    method = config['training']['method'].lower()
-    supplementary_gnn = (config['training'].get('supplementary_gnn') or "").lower()
-
-    supplementary_registry = {
-        "nrgnn": "Using NRGNN training",
-        "pi_gnn": "Using PI-GNN training",
-        "cr_gnn": "Using CR-GNN training",
-        "lafak": "Using LafAK training",
-        "rtgnn": "Using RTGNN training",
-        "graphcleaner": "Using GraphCleaner training",
-        "unionnet": "Using UnionNET training",
-        "gnn_cleaner": "Using GNN Cleaner training",
-        "erase": "Using ERASE training",
-        "gnnguard": "Using GNNGuard training",
-    }
-
-    if supplementary_gnn in supplementary_registry:
-        print(supplementary_registry[supplementary_gnn])
-        return
-
-    method_registry = {
-        "standard": train_with_standard_loss,
-        "ncod": train_with_ncod,
-        "positive_eigenvalues": train_with_positive_eigenvalues,
-        "gcod": train_with_gcod,
-    }
-
-    if method not in method_registry:
-        raise ValueError(f"Training method '{method}' not recognized.")
-
-    if method == "standard":
-        return method_registry[method](model, data, noisy_indices, device,
-                                total_epochs=config['training']['total_epochs'])
-
-    elif method == "ncod":
-        return method_registry[method](model, data, noisy_indices, device,
-                                      total_epochs=config['training']['total_epochs'],
-                                      lambda_dir=config['training'].get('lambda_dir', 0.1))
-
-    elif method == "positive_eigenvalues":
-        return method_registry[method](model, data, noisy_indices, device,
-                                      epochs=config['training']['total_epochs'],
-                                      lambda_dir=config['training'].get('lambda_dir', 0.1))
-
-    elif method == "gcod":
-        return method_registry[method](model, data, noisy_indices, device,
-                                      epochs=config['training']['total_epochs'],
-                                      lambda_dir=config['training'].get('lambda_dir', 0.1))
-
-    else:
-        raise ValueError("Error in utilities file: train function")

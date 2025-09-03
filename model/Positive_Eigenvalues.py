@@ -76,7 +76,7 @@ def enforce_positive_eigenvalues(weight_matrix):
         reconstructed = positive_eigenvectors @ torch.diag(positive_eigenvalues) @ positive_eigenvectors.T
         return reconstructed
 
-def train_with_positive_eigenvalues(model, data, noisy_indices=None, device='cuda', epochs=200, 
+def train_with_positive_eigenvalues(model, data, noisy_indices=None, device='cuda', lr=0.01, weight_decay=5e-4, epochs=200, 
                                   patience=20, lambda_dir=0.1, config=None, batch_size=32):
 
     oversmoothing_evaluator = OversmoothingMetrics(device=device)
@@ -89,7 +89,7 @@ def train_with_positive_eigenvalues(model, data, noisy_indices=None, device='cud
     model.to(device)
     data = data.to(device)
     
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.01, weight_decay=5e-4)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
     
     train_idx = data.train_mask.nonzero(as_tuple=True)[0]
     val_idx = data.val_mask.nonzero(as_tuple=True)[0]

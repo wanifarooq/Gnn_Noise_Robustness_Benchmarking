@@ -117,8 +117,7 @@ class GCODLoss(nn.Module):
         
         return total_loss, L1, L2, L3
 
-
-def train_with_gcod(model, data, noisy_indices=None, device='cuda', epochs=500, 
+def train_with_gcod(model, data, noisy_indices=None, device='cuda', lr=0.01, weight_decay=5e-4, u_lr=1, epochs=500, 
                    patience=100, lambda_dir=0.1, config=None, batch_size=32):
 
     model.to(device)
@@ -128,7 +127,7 @@ def train_with_gcod(model, data, noisy_indices=None, device='cuda', epochs=500,
     
     num_classes = int(data.y.max().item()) + 1
     
-    model_optimizer = torch.optim.Adam(model.parameters(), lr=0.01, weight_decay=5e-4)
+    model_optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
     
     gcod_loss_fn = GCODLoss(
         num_classes=num_classes,
@@ -137,7 +136,7 @@ def train_with_gcod(model, data, noisy_indices=None, device='cuda', epochs=500,
         encoder_features=num_classes
     ).to(device)
     
-    u_optimizer = torch.optim.SGD([gcod_loss_fn.u], lr=1)
+    u_optimizer = torch.optim.SGD([gcod_loss_fn.u], lr=u_lr)
     
     train_idx = data.train_mask.nonzero(as_tuple=True)[0]
     val_idx = data.val_mask.nonzero(as_tuple=True)[0]
