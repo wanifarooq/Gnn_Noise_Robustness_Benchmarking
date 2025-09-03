@@ -10,10 +10,7 @@ from torch_geometric.utils import from_scipy_sparse_matrix, to_undirected, negat
 from torch_geometric.nn import GCNConv
 from sklearn.metrics import f1_score
 
-def dirichlet_energy(x, edge_index):
-    row, col = edge_index
-    diff = x[row] - x[col]
-    return (diff ** 2).sum(dim=1).mean()
+from model.evaluation import OversmoothingMetrics
 
 def accuracy(output, labels):
 
@@ -165,6 +162,65 @@ class NRGNN:
         self.idx_add = []
         self.idx_unlabel = None
 
+        self.oversmoothing_evaluator = OversmoothingMetrics(device=device)
+        self.oversmoothing_history = {
+            'train': [],
+            'val': [],
+            'test': []
+        }
+
+    def _compute_oversmoothing_for_mask(self, embeddings, edge_index, mask_indices):
+        try:
+            if isinstance(mask_indices, np.ndarray):
+                mask_indices = torch.tensor(mask_indices, device=self.device)
+            elif not isinstance(mask_indices, torch.Tensor):
+                mask_indices = torch.tensor(list(mask_indices), device=self.device)
+            
+            mask_embeddings = embeddings[mask_indices]
+            
+            mask_set = set(mask_indices.cpu().numpy())
+            edge_mask = torch.tensor([
+                src.item() in mask_set and tgt.item() in mask_set
+                for src, tgt in edge_index.t()
+            ], device=edge_index.device)
+            
+            if not edge_mask.any():
+                return {
+                    'NumRank': float(min(mask_embeddings.shape)),
+                    'Erank': float(min(mask_embeddings.shape)),
+                    'EDir': 0.0,
+                    'EDir_traditional': 0.0,
+                    'EProj': 0.0,
+                    'MAD': 0.0
+                }
+            
+            masked_edges = edge_index[:, edge_mask]
+            node_mapping = {orig_idx.item(): local_idx for local_idx, orig_idx in enumerate(mask_indices)}
+            
+            remapped_edges = torch.stack([
+                torch.tensor([node_mapping[src.item()] for src in masked_edges[0]], device=edge_index.device),
+                torch.tensor([node_mapping[tgt.item()] for tgt in masked_edges[1]], device=edge_index.device)
+            ])
+            
+            graphs_in_class = [{
+                'X': mask_embeddings,
+                'edge_index': remapped_edges,
+                'edge_weight': None
+            }]
+            
+            return self.oversmoothing_evaluator.compute_all_metrics(
+                X=mask_embeddings,
+                edge_index=remapped_edges,
+                graphs_in_class=graphs_in_class
+            )
+            
+        except Exception as e:
+            print(f"Warning: Could not compute oversmoothing metrics: {e}")
+            return {
+                'NumRank': 0.0, 'Erank': 0.0, 'EDir': 0.0,
+                'EDir_traditional': 0.0, 'EProj': 0.0, 'MAD': 0.0
+            }
+
     def fit(self, features, adj, labels, idx_train, idx_val):
         args = self.args
         
@@ -182,33 +238,6 @@ class NRGNN:
 
         total_time = time.time() - t_total
         print(f"\nTraining completed in {total_time:.2f}s")
-        
-        self.model.eval()
-        with torch.no_grad():
-            if self.best_graph is not None and self.best_model_index is not None:
-                final_output = self.model(self.features, self.best_model_index, self.best_graph)
-                
-                idx_train_tensor = torch.tensor(idx_train, device=self.device) if isinstance(idx_train, np.ndarray) else idx_train
-                idx_val_tensor = torch.tensor(idx_val, device=self.device) if isinstance(idx_val, np.ndarray) else idx_val
-                
-                train_mask = ((self.best_model_index[0].unsqueeze(1) == idx_train_tensor.unsqueeze(0)).any(1) | 
-                            (self.best_model_index[1].unsqueeze(1) == idx_train_tensor.unsqueeze(0)).any(1))
-                
-                if train_mask.sum() > 0:
-                    final_train_de = dirichlet_energy(final_output, self.best_model_index[:, train_mask]).item()
-                else:
-                    final_train_de = 0.0
-                
-                val_mask = ((self.best_model_index[0].unsqueeze(1) == idx_val_tensor.unsqueeze(0)).any(1) | 
-                          (self.best_model_index[1].unsqueeze(1) == idx_val_tensor.unsqueeze(0)).any(1))
-                
-                if val_mask.sum() > 0:
-                    final_val_de = dirichlet_energy(final_output, self.best_model_index[:, val_mask]).item()
-                else:
-                    final_val_de = 0.0
-                
-                self.final_train_de = final_train_de
-                self.final_val_de = final_val_de
         
         self._load_best_models()
 
@@ -403,24 +432,13 @@ class NRGNN:
             train_f1 = f1_score(self.labels[idx_train].cpu(), model_output[idx_train].argmax(dim=1).cpu(), average='macro')
             val_f1 = f1_score(self.labels[idx_val].cpu(), model_output[idx_val].argmax(dim=1).cpu(), average='macro')
 
-            idx_train_tensor = torch.tensor(idx_train, device=self.device) if isinstance(idx_train, np.ndarray) else idx_train
-            idx_val_tensor = torch.tensor(idx_val, device=self.device) if isinstance(idx_val, np.ndarray) else idx_val
+            train_oversmoothing = self._compute_oversmoothing_for_mask(model_output, model_edge_index, idx_train)
+            val_oversmoothing = self._compute_oversmoothing_for_mask(model_output, model_edge_index, idx_val)
             
-            train_mask = ((model_edge_index[0].unsqueeze(1) == idx_train_tensor.unsqueeze(0)).any(1) | 
-                        (model_edge_index[1].unsqueeze(1) == idx_train_tensor.unsqueeze(0)).any(1))
-            
-            if train_mask.sum() > 0:
-                train_de = dirichlet_energy(model_output, model_edge_index[:, train_mask]).item()
-            else:
-                train_de = 0.0
-            
-            val_mask = ((model_edge_index[0].unsqueeze(1) == idx_val_tensor.unsqueeze(0)).any(1) | 
-                      (model_edge_index[1].unsqueeze(1) == idx_val_tensor.unsqueeze(0)).any(1))
-            
-            if val_mask.sum() > 0:
-                val_de = dirichlet_energy(model_output, model_edge_index[:, val_mask]).item()
-            else:
-                val_de = 0.0
+            if train_oversmoothing is not None:
+                self.oversmoothing_history['train'].append(train_oversmoothing)
+            if val_oversmoothing is not None:
+                self.oversmoothing_history['val'].append(val_oversmoothing)
 
             metrics = {
                 'train_acc': train_acc,
@@ -431,13 +449,31 @@ class NRGNN:
             }
 
             if self.args.debug:
+                train_edir = train_oversmoothing['EDir'] if train_oversmoothing else 0.0
+                train_edir_trad = train_oversmoothing['EDir_traditional'] if train_oversmoothing else 0.0
+                train_eproj = train_oversmoothing['EProj'] if train_oversmoothing else 0.0
+                train_mad = train_oversmoothing['MAD'] if train_oversmoothing else 0.0
+                train_num_rank = train_oversmoothing['NumRank'] if train_oversmoothing else 0.0
+                train_eff_rank = train_oversmoothing['Erank'] if train_oversmoothing else 0.0
+                
+                val_edir = val_oversmoothing['EDir'] if val_oversmoothing else 0.0
+                val_edir_trad = val_oversmoothing['EDir_traditional'] if val_oversmoothing else 0.0
+                val_eproj = val_oversmoothing['EProj'] if val_oversmoothing else 0.0
+                val_mad = val_oversmoothing['MAD'] if val_oversmoothing else 0.0
+                val_num_rank = val_oversmoothing['NumRank'] if val_oversmoothing else 0.0
+                val_eff_rank = val_oversmoothing['Erank'] if val_oversmoothing else 0.0
+                
                 print(f"Epoch {epoch:03d} | Train Loss: {train_loss:.4f}, Val Loss: {metrics['val_loss']:.4f} | "
                       f"Train Acc: {metrics['train_acc']:.4f}, Val Acc: {metrics['val_acc']:.4f} | "
-                      f"Train F1: {metrics['train_f1']:.4f}, Val F1: {metrics['val_f1']:.4f} | "
-                      f"Train DE: {train_de:.4f}, Val DE: {val_de:.4f} | "
+                      f"Train F1: {metrics['train_f1']:.4f}, Val F1: {metrics['val_f1']:.4f}")
+                print(f"Train DE: {train_edir:.4f}, Val DE: {val_edir:.4f} | "
+                      f"Train DE_trad: {train_edir_trad:.4f}, Val DE_trad: {val_edir_trad:.4f} | "
+                      f"Train EProj: {train_eproj:.4f}, Val EProj: {val_eproj:.4f} | "
+                      f"Train MAD: {train_mad:.4f}, Val MAD: {val_mad:.4f} | "
+                      f"Train NumRank: {train_num_rank:.4f}, Val NumRank: {val_num_rank:.4f} | "
+                      f"Train Erank: {train_eff_rank:.4f}, Val Erank: {val_eff_rank:.4f}")
+                print(f"  Pred Val Acc: {acc_pred_val:.4f} | Add Nodes: {len(self.idx_add)} | "
                       f"Time: {time.time() - start_time:.2f}s")
-                
-                print(f"  Pred Val Acc: {acc_pred_val:.4f} | Add Nodes: {len(self.idx_add)}")
 
             if acc_pred_val > self.best_acc_pred_val:
                 self.best_acc_pred_val = acc_pred_val
@@ -495,15 +531,9 @@ class NRGNN:
                 y_pred = model_output[idx_test].argmax(dim=1).cpu().numpy()
                 f1_test = f1_score(y_true, y_pred, average='macro')
                 
-                idx_test_tensor = torch.tensor(idx_test, device=self.device) if isinstance(idx_test, np.ndarray) else idx_test
-                
-                test_mask = ((self.best_model_index[0].unsqueeze(1) == idx_test_tensor.unsqueeze(0)).any(1) | 
-                            (self.best_model_index[1].unsqueeze(1) == idx_test_tensor.unsqueeze(0)).any(1))
-                
-                if test_mask.sum() > 0:
-                    final_test_de = dirichlet_energy(model_output, self.best_model_index[:, test_mask]).item()
-                else:
-                    final_test_de = 0.0
+                test_oversmoothing = self._compute_oversmoothing_for_mask(model_output, self.best_model_index, idx_test)
+                if test_oversmoothing is not None:
+                    self.oversmoothing_history['test'].append(test_oversmoothing)
                 
                 final_metrics = {
                     'test_loss': model_loss,
@@ -512,8 +542,30 @@ class NRGNN:
                 }
                 
                 print(f"Test Loss: {final_metrics['test_loss']:.4f} | Test Acc: {final_metrics['test_acc']:.4f} | Test F1: {final_metrics['test_f1']:.4f}")
-                print(f"Final Dirichlet Energy - Train: {self.final_train_de:.4f}, Val: {self.final_val_de:.4f}, Test: {final_test_de:.4f}")
+                
+                print("Final Oversmoothing Metrics:")
+                
+                if hasattr(self, 'final_train_de') and hasattr(self, 'final_val_de'):
+                    if self.oversmoothing_history['train']:
+                        final_train_oversmoothing = self.oversmoothing_history['train'][-1]
+                        print(f"Train: EDir: {final_train_oversmoothing['EDir']:.4f}, EDir_traditional: {final_train_oversmoothing['EDir_traditional']:.4f}, "
+                            f"EProj: {final_train_oversmoothing['EProj']:.4f}, MAD: {final_train_oversmoothing['MAD']:.4f}, "
+                            f"NumRank: {final_train_oversmoothing['NumRank']:.4f}, Erank: {final_train_oversmoothing['Erank']:.4f}")
+                    
+                    if self.oversmoothing_history['val']:
+                        final_val_oversmoothing = self.oversmoothing_history['val'][-1]
+                        print(f"Val: EDir: {final_val_oversmoothing['EDir']:.4f}, EDir_traditional: {final_val_oversmoothing['EDir_traditional']:.4f}, "
+                            f"EProj: {final_val_oversmoothing['EProj']:.4f}, MAD: {final_val_oversmoothing['MAD']:.4f}, "
+                            f"NumRank: {final_val_oversmoothing['NumRank']:.4f}, Erank: {final_val_oversmoothing['Erank']:.4f}")
+                
+                if test_oversmoothing is not None:
+                    print(f"Test: EDir: {test_oversmoothing['EDir']:.4f}, EDir_traditional: {test_oversmoothing['EDir_traditional']:.4f}, "
+                        f"EProj: {test_oversmoothing['EProj']:.4f}, MAD: {test_oversmoothing['MAD']:.4f}, "
+                        f"NumRank: {test_oversmoothing['NumRank']:.4f}, Erank: {test_oversmoothing['Erank']:.4f}")
                 
                 return float(model_acc)
         
         return 0.0
+
+    def get_oversmoothing_history(self):
+        return self.oversmoothing_history

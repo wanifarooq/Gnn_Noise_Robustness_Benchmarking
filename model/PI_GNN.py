@@ -7,35 +7,7 @@ from sklearn.metrics import f1_score
 from copy import deepcopy
 import time
 
-def dirichlet_energy(x, edge_index):
-    row, col = edge_index
-    diff = x[row] - x[col]
-    return (diff ** 2).sum(dim=1).mean()
-
-def compute_dirichlet_energy_for_nodes(predictions, edge_index, node_mask):
-
-    if predictions.dim() > 1 and predictions.size(1) > 1:
-        probs = F.softmax(predictions, dim=1)
-    else:
-        probs = predictions
-
-    device = predictions.device
-    node_mask = node_mask.to(device)
-
-    row, col = edge_index
-    
-    mask_edges = node_mask[row] | node_mask[col]
-    
-    if mask_edges.sum() == 0:
-        return 0.0
-    
-    filtered_row = row[mask_edges]
-    filtered_col = col[mask_edges]
-    
-    diff = probs[filtered_row] - probs[filtered_col]
-    energy = (diff ** 2).sum(dim=1).mean()
-    
-    return energy.item()
+from model.evaluation import OversmoothingMetrics
 
 class InnerProductDecoder(nn.Module):
     def __init__(self, act=lambda x: x):
@@ -59,8 +31,8 @@ class Net(nn.Module):
 
 class InnerProductTrainer:
     def __init__(self, device, epochs=400, start_epoch=200, miself=False, 
-                 lr_main=0.01, lr_mi=0.01, weight_decay=5e-4, norm=None, 
-                 vanilla=False, patience=50, delta=1e-4):
+                lr_main=0.01, lr_mi=0.01, weight_decay=5e-4, norm=None, 
+                vanilla=False, patience=50, delta=1e-4):
         self.device = device
         self.epochs = epochs
         self.start_epoch = start_epoch
@@ -72,6 +44,61 @@ class InnerProductTrainer:
         self.vanilla = vanilla
         self.patience = patience
         self.delta = delta
+        
+        self.oversmoothing_evaluator = OversmoothingMetrics(device=device)
+        self.oversmoothing_history = {
+            'train': [],
+            'val': [],
+            'test': []
+        }
+
+    def _compute_oversmoothing_for_mask(self, embeddings, edge_index, mask):
+        try:
+            mask_indices = torch.where(mask)[0]
+            mask_embeddings = embeddings[mask_indices]
+            
+            mask_set = set(mask_indices.cpu().numpy())
+            edge_mask = torch.tensor([
+                src.item() in mask_set and tgt.item() in mask_set
+                for src, tgt in edge_index.t()
+            ], device=edge_index.device)
+            
+            if not edge_mask.any():
+                return {
+                    'NumRank': float(min(mask_embeddings.shape)),
+                    'Erank': float(min(mask_embeddings.shape)),
+                    'EDir': 0.0,
+                    'EDir_traditional': 0.0,
+                    'EProj': 0.0,
+                    'MAD': 0.0
+                }
+            
+            masked_edges = edge_index[:, edge_mask]
+            node_mapping = {orig_idx.item(): local_idx for local_idx, orig_idx in enumerate(mask_indices)}
+            
+            remapped_edges = torch.stack([
+                torch.tensor([node_mapping[src.item()] for src in masked_edges[0]], device=edge_index.device),
+                torch.tensor([node_mapping[tgt.item()] for tgt in masked_edges[1]], device=edge_index.device)
+            ])
+            
+            graphs_in_class = [{
+                'X': mask_embeddings,
+                'edge_index': remapped_edges,
+                'edge_weight': None
+            }]
+            
+            return self.oversmoothing_evaluator.compute_all_metrics(
+                X=mask_embeddings,
+                edge_index=remapped_edges,
+                graphs_in_class=graphs_in_class
+            )
+            
+        except Exception as e:
+            print(f"Warning: Could not compute oversmoothing metrics: {e}")
+            return {
+                'NumRank': 0.0, 'Erank': 0.0, 'EDir': 0.0,
+                'EDir_traditional': 0.0, 'EProj': 0.0, 'MAD': 0.0
+            }
 
     def get_model_lr(self, config, model_name):
         if model_name.lower() in ['gat', 'gatv2']:
@@ -94,14 +121,14 @@ class InnerProductTrainer:
             metrics['val_loss'] = F.nll_loss(out_train[data.val_mask], data.y[data.val_mask]).item()
             metrics['val_acc'] = pred_train[data.val_mask].eq(data.y[data.val_mask]).sum().item() / data.val_mask.sum().item()
             metrics['val_f1'] = f1_score(data.y[data.val_mask].cpu(), pred_train[data.val_mask].cpu(), average='micro')
+
+            hidden_embeddings = model.gnn(data)
+            train_oversmoothing = self._compute_oversmoothing_for_mask(hidden_embeddings, data.edge_index, data.train_mask)
+            val_oversmoothing = self._compute_oversmoothing_for_mask(hidden_embeddings, data.edge_index, data.val_mask)
             
-            train_de = compute_dirichlet_energy_for_nodes(out_train, data.edge_index, data.train_mask)
-            val_de = compute_dirichlet_energy_for_nodes(out_train, data.edge_index, data.val_mask)
-            
-            return metrics, train_de, val_de
+            return metrics, train_oversmoothing, val_oversmoothing
 
     def compute_final_test_metrics(self, model, data):
-
         model.eval()
         with torch.no_grad():
             out_test, _ = model(data)
@@ -120,12 +147,14 @@ class InnerProductTrainer:
             final_metrics['test_loss'] = F.nll_loss(out_test[data.test_mask], data.y[data.test_mask]).item()
             final_metrics['test_acc'] = pred_test[data.test_mask].eq(data.y[data.test_mask]).sum().item() / data.test_mask.sum().item()
             final_metrics['test_f1'] = f1_score(data.y[data.test_mask].cpu(), pred_test[data.test_mask].cpu(), average='micro')
+
+            hidden_embeddings = model.gnn(data)
+            final_train_oversmoothing = self._compute_oversmoothing_for_mask(hidden_embeddings, data.edge_index, data.train_mask)
+            final_val_oversmoothing = self._compute_oversmoothing_for_mask(hidden_embeddings, data.edge_index, data.val_mask)
+            final_test_oversmoothing = self._compute_oversmoothing_for_mask(hidden_embeddings, data.edge_index, data.test_mask)
             
-            final_train_de = compute_dirichlet_energy_for_nodes(out_test, data.edge_index, data.train_mask)
-            final_val_de = compute_dirichlet_energy_for_nodes(out_test, data.edge_index, data.val_mask)
-            final_test_de = compute_dirichlet_energy_for_nodes(out_test, data.edge_index, data.test_mask)
-            
-            return final_metrics, final_train_de, final_val_de, final_test_de
+            return (final_metrics, final_train_oversmoothing, final_val_oversmoothing, final_test_oversmoothing)
+
 
     def fit(self, model, data, config=None, get_model_func=None):
         start_time = time.time()
@@ -226,12 +255,36 @@ class InnerProductTrainer:
             total_loss.backward()
             optimizer.step()
 
-            metrics, train_de, val_de = self.compute_metrics_and_de(model, data)
+            metrics, train_oversmoothing, val_oversmoothing = self.compute_metrics_and_de(model, data)
+
+            if train_oversmoothing is not None:
+                self.oversmoothing_history['train'].append(train_oversmoothing)
+            if val_oversmoothing is not None:
+                self.oversmoothing_history['val'].append(val_oversmoothing)
+
+            train_edir = train_oversmoothing['EDir'] if train_oversmoothing else 0.0
+            train_edir_trad = train_oversmoothing['EDir_traditional'] if train_oversmoothing else 0.0
+            train_eproj = train_oversmoothing['EProj'] if train_oversmoothing else 0.0
+            train_mad = train_oversmoothing['MAD'] if train_oversmoothing else 0.0
+            train_num_rank = train_oversmoothing['NumRank'] if train_oversmoothing else 0.0
+            train_eff_rank = train_oversmoothing['Erank'] if train_oversmoothing else 0.0
+            
+            val_edir = val_oversmoothing['EDir'] if val_oversmoothing else 0.0
+            val_edir_trad = val_oversmoothing['EDir_traditional'] if val_oversmoothing else 0.0
+            val_eproj = val_oversmoothing['EProj'] if val_oversmoothing else 0.0
+            val_mad = val_oversmoothing['MAD'] if val_oversmoothing else 0.0
+            val_num_rank = val_oversmoothing['NumRank'] if val_oversmoothing else 0.0
+            val_eff_rank = val_oversmoothing['Erank'] if val_oversmoothing else 0.0
 
             print(f"Epoch {epoch:03d} | Train Loss: {metrics['train_loss']:.4f}, Val Loss: {metrics['val_loss']:.4f} | "
                   f"Train Acc: {metrics['train_acc']:.4f}, Val Acc: {metrics['val_acc']:.4f} | "
-                  f"Train F1: {metrics['train_f1']:.4f}, Val F1: {metrics['val_f1']:.4f} | "
-                  f"Train DE: {train_de:.4f}, Val DE: {val_de:.4f}")
+                  f"Train F1: {metrics['train_f1']:.4f}, Val F1: {metrics['val_f1']:.4f}")
+            print(f"Train DE: {train_edir:.4f}, Val DE: {val_edir:.4f} | "
+                  f"Train DE_trad: {train_edir_trad:.4f}, Val DE_trad: {val_edir_trad:.4f} | "
+                  f"Train EProj: {train_eproj:.4f}, Val EProj: {val_eproj:.4f} | "
+                  f"Train MAD: {train_mad:.4f}, Val MAD: {val_mad:.4f} | "
+                  f"Train NumRank: {train_num_rank:.4f}, Val NumRank: {val_num_rank:.4f} | "
+                  f"Train Erank: {train_eff_rank:.4f}, Val Erank: {val_eff_rank:.4f}")
 
             if metrics['val_loss'] < best_val_loss - self.delta:
                 best_val_loss = metrics['val_loss']
@@ -248,12 +301,38 @@ class InnerProductTrainer:
         if best_model_state is not None:
             model.load_state_dict(best_model_state)
 
-        final_metrics, final_train_de, final_val_de, final_test_de = self.compute_final_test_metrics(model, data)
+        results = self.compute_final_test_metrics(model, data)
+        final_metrics, final_train_de, final_val_de, final_test_de = results[:4]
+        final_train_oversmoothing, final_val_oversmoothing, final_test_oversmoothing = results[4:]
+        
+        if final_test_oversmoothing is not None:
+            self.oversmoothing_history['test'].append(final_test_oversmoothing)
         
         total_time = time.time() - start_time
         
         print(f"\nTraining completed in {total_time:.2f}s")
         print(f"Test Loss: {final_metrics['test_loss']:.4f} | Test Acc: {final_metrics['test_acc']:.4f} | Test F1: {final_metrics['test_f1']:.4f}")
+
+        print("Final Oversmoothing Metrics:")
+        
+        if final_train_oversmoothing is not None:
+            print(f"Train: EDir: {final_train_oversmoothing['EDir']:.4f}, EDir_traditional: {final_train_oversmoothing['EDir_traditional']:.4f}, "
+                  f"EProj: {final_train_oversmoothing['EProj']:.4f}, MAD: {final_train_oversmoothing['MAD']:.4f}, "
+                  f"NumRank: {final_train_oversmoothing['NumRank']:.4f}, Erank: {final_train_oversmoothing['Erank']:.4f}")
+        
+        if final_val_oversmoothing is not None:
+            print(f"Val: EDir: {final_val_oversmoothing['EDir']:.4f}, EDir_traditional: {final_val_oversmoothing['EDir_traditional']:.4f}, "
+                  f"EProj: {final_val_oversmoothing['EProj']:.4f}, MAD: {final_val_oversmoothing['MAD']:.4f}, "
+                  f"NumRank: {final_val_oversmoothing['NumRank']:.4f}, Erank: {final_val_oversmoothing['Erank']:.4f}")
+        
+        if final_test_oversmoothing is not None:
+            print(f"Test: EDir: {final_test_oversmoothing['EDir']:.4f}, EDir_traditional: {final_test_oversmoothing['EDir_traditional']:.4f}, "
+                  f"EProj: {final_test_oversmoothing['EProj']:.4f}, MAD: {final_test_oversmoothing['MAD']:.4f}, "
+                  f"NumRank: {final_test_oversmoothing['NumRank']:.4f}, Erank: {final_test_oversmoothing['Erank']:.4f}")
+        
         print(f"Final Dirichlet Energy - Train: {final_train_de:.4f}, Val: {final_val_de:.4f}, Test: {final_test_de:.4f}")
 
         return final_metrics['test_acc']
+
+    def get_oversmoothing_history(self):
+        return self.oversmoothing_history

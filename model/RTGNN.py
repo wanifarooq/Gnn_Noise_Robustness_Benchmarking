@@ -13,33 +13,7 @@ import scipy.sparse as sp
 from sklearn.metrics import f1_score
 
 from model.GNNs import GCN, GIN, GAT, GATv2
-
-def dirichlet_energy(x, edge_index):
-    row, col = edge_index
-    diff = x[row] - x[col]
-    return (diff ** 2).sum(dim=1).mean()
-
-def compute_dirichlet_energy_for_nodes(predictions, edge_index, node_mask):
-
-    if predictions.dim() > 1 and predictions.size(1) > 1:
-        probs = F.softmax(predictions, dim=1)
-    else:
-        probs = predictions
-    
-    row, col = edge_index
-    
-    mask_edges = node_mask[row] | node_mask[col]
-    
-    if mask_edges.sum() == 0:
-        return 0.0
-    
-    filtered_row = row[mask_edges]
-    filtered_col = col[mask_edges]
-    
-    diff = probs[filtered_row] - probs[filtered_col]
-    energy = (diff ** 2).sum(dim=1).mean()
-    
-    return energy.item()
+from model.evaluation import OversmoothingMetrics
 
 class DualGNN(nn.Module):
     def __init__(self, gnn_type: str, nfeat: int, nhid: int, nclass: int,
@@ -66,7 +40,7 @@ class DualGNN(nn.Module):
                 return GATv2(nfeat, nhid, nclass, n_layers=n_layers or 3,
                             heads=heads, dropout=dropout, self_loop=self.self_loop)
             else:
-                raise ValueError(f"GNN type {gnn_type} not supported")
+                raise ValueError(f"GNN type {self.gnn_type} not supported")
 
         self.branch1 = create_gnn()
         self.branch2 = create_gnn()
@@ -249,8 +223,55 @@ class RTGNN(nn.Module):
         
         self.best_val_acc = 0
         self.best_state = None
+
+        self.oversmoothing_evaluator = OversmoothingMetrics(device=device)
         
         print(f"Initialized RTGNN with {self.gnn_type.upper()} backbone")
+    
+    def _compute_oversmoothing_for_mask(self, embeddings, edge_index, mask, labels=None):
+        try:
+            mask_indices = torch.where(mask)[0]
+            mask_embeddings = embeddings[mask]
+            
+            mask_set = set(mask_indices.cpu().numpy())
+            edge_mask = torch.tensor([
+                src.item() in mask_set and tgt.item() in mask_set
+                for src, tgt in edge_index.t()
+            ], device=edge_index.device)
+            
+            if not edge_mask.any():
+                return {
+                    'NumRank': float(min(mask_embeddings.shape)),
+                    'Erank': float(min(mask_embeddings.shape)),
+                    'EDir': 0.0,
+                    'EDir_traditional': 0.0,
+                    'EProj': 0.0,
+                    'MAD': 0.0
+                }
+            
+            masked_edges = edge_index[:, edge_mask]
+            node_mapping = {orig_idx.item(): local_idx for local_idx, orig_idx in enumerate(mask_indices)}
+            
+            remapped_edges = torch.stack([
+                torch.tensor([node_mapping[src.item()] for src in masked_edges[0]], device=edge_index.device),
+                torch.tensor([node_mapping[tgt.item()] for tgt in masked_edges[1]], device=edge_index.device)
+            ])
+            
+            graphs_in_class = [{
+                'X': mask_embeddings,
+                'edge_index': remapped_edges,
+                'edge_weight': None
+            }]
+            
+            return self.oversmoothing_evaluator.compute_all_metrics(
+                X=mask_embeddings,
+                edge_index=remapped_edges,
+                graphs_in_class=graphs_in_class
+            )
+            
+        except Exception as e:
+            print(f"Warning: Could not compute oversmoothing metrics for mask: {e}")
+            return None
         
     def _get_gnn_kwargs(self):
         base = {'n_layers': getattr(self.args, 'n_layers', 2)}
@@ -266,14 +287,25 @@ class RTGNN(nn.Module):
 
     def forward(self, x, edge_index, edge_weight=None):
         return self.predictor(x, edge_index, edge_weight)
-    
+        
     def compute_metrics_and_de(self, features, final_edges, final_weights, labels, 
                               idx_train, idx_val, idx_test=None):
         self.eval()
         with torch.no_grad():
             output1, output2 = self.predictor(features, final_edges, final_weights)
-            
             output_avg = (output1 + output2) / 2
+            
+            data = Data(x=features, edge_index=final_edges)
+            if final_weights is not None:
+                data.edge_attr = final_weights.unsqueeze(-1) if final_weights.dim() == 1 else final_weights
+            data = data.to(self.device)
+
+            try:
+                h1 = self.predictor.branch1.get_embeddings(data) if hasattr(self.predictor.branch1, 'get_embeddings') else self.predictor.branch1(data)
+                h2 = self.predictor.branch2.get_embeddings(data) if hasattr(self.predictor.branch2, 'get_embeddings') else self.predictor.branch2(data)
+                h_avg = (h1 + h2) / 2
+            except:
+                h_avg = output_avg
             
             metrics = {}
             
@@ -298,8 +330,8 @@ class RTGNN(nn.Module):
             val_mask = torch.zeros(features.size(0), dtype=torch.bool, device=self.device)
             val_mask[idx_val] = True
             
-            train_de = compute_dirichlet_energy_for_nodes(output_avg, final_edges, train_mask)
-            val_de = compute_dirichlet_energy_for_nodes(output_avg, final_edges, val_mask)
+            train_oversmoothing = self._compute_oversmoothing_for_mask(h_avg, final_edges, train_mask, labels)
+            val_oversmoothing = self._compute_oversmoothing_for_mask(h_avg, final_edges, val_mask, labels)
 
             if idx_test is not None:
                 test_loss1 = F.cross_entropy(output1[idx_test], labels[idx_test])
@@ -312,11 +344,11 @@ class RTGNN(nn.Module):
                 
                 test_mask = torch.zeros(features.size(0), dtype=torch.bool, device=self.device)
                 test_mask[idx_test] = True
-                test_de = compute_dirichlet_energy_for_nodes(output_avg, final_edges, test_mask)
+                test_oversmoothing = self._compute_oversmoothing_for_mask(h_avg, final_edges, test_mask, labels)
                 
-                return metrics, train_de, val_de, test_de
+                return metrics, train_oversmoothing, val_oversmoothing, test_oversmoothing
             
-            return metrics, train_de, val_de
+            return metrics, train_oversmoothing, val_oversmoothing
 
     def fit(self, features, adj, labels, idx_train, idx_val, idx_test=None, 
             noise_idx=None, clean_idx=None):
@@ -382,14 +414,32 @@ class RTGNN(nn.Module):
             total_loss.backward()
             optimizer.step()
 
-            metrics, train_de, val_de = self.compute_metrics_and_de(
+            metrics, train_oversmoothing, val_oversmoothing = self.compute_metrics_and_de(
                 features, final_edges, final_weights, labels, idx_train, idx_val
             )
 
-            print(f"Epoch {epoch:03d} | Train Loss: {metrics['train_loss']:.4f}, Val Loss: {metrics['val_loss']:.4f} | "
-                  f"Train Acc: {metrics['train_acc']:.4f}, Val Acc: {metrics['val_acc']:.4f} | "
-                  f"Train F1: {metrics['train_f1']:.4f}, Val F1: {metrics['val_f1']:.4f} | "
-                  f"Train DE: {train_de:.4f}, Val DE: {val_de:.4f}")
+            train_de_edir = train_oversmoothing['EDir'] if train_oversmoothing else 0.0
+            train_de_traditional = train_oversmoothing['EDir_traditional'] if train_oversmoothing else 0.0
+            train_eproj = train_oversmoothing['EProj'] if train_oversmoothing else 0.0
+            train_mad = train_oversmoothing['MAD'] if train_oversmoothing else 0.0
+            train_num_rank = train_oversmoothing['NumRank'] if train_oversmoothing else 0.0
+            train_eff_rank = train_oversmoothing['Erank'] if train_oversmoothing else 0.0
+
+            val_de_edir = val_oversmoothing['EDir'] if val_oversmoothing else 0.0
+            val_de_traditional = val_oversmoothing['EDir_traditional'] if val_oversmoothing else 0.0
+            val_eproj = val_oversmoothing['EProj'] if val_oversmoothing else 0.0
+            val_mad = val_oversmoothing['MAD'] if val_oversmoothing else 0.0
+            val_num_rank = val_oversmoothing['NumRank'] if val_oversmoothing else 0.0
+            val_eff_rank = val_oversmoothing['Erank'] if val_oversmoothing else 0.0
+
+            print(f"Epoch {epoch:03d} | Train Acc: {metrics['train_acc']:.4f}, Val Acc: {metrics['val_acc']:.4f} | "
+                  f"Train F1: {metrics['train_f1']:.4f}, Val F1: {metrics['val_f1']:.4f}")
+            print(f"Train DE: {train_de_edir:.4f}, Val DE: {val_de_edir:.4f} | "
+                  f"Train DE_trad: {train_de_traditional:.4f}, Val DE_trad: {val_de_traditional:.4f} | "
+                  f"Train EProj: {train_eproj:.4f}, Val EProj: {val_eproj:.4f} | "
+                  f"Train MAD: {train_mad:.4f}, Val MAD: {val_mad:.4f} | "
+                  f"Train NumRank: {train_num_rank:.4f}, Val NumRank: {val_num_rank:.4f} | "
+                  f"Train Erank: {train_eff_rank:.4f}, Val Erank: {val_eff_rank:.4f}")
 
             if epoch == 0:
                 best_val_f1 = metrics['val_f1']
@@ -419,28 +469,35 @@ class RTGNN(nn.Module):
         total_time = time.time() - start_time
         
         if idx_test is not None:
-            final_metrics, final_train_de, final_val_de, final_test_de = self.compute_metrics_and_de(
+            final_metrics, final_train_oversmoothing, final_val_oversmoothing, final_test_oversmoothing = self.compute_metrics_and_de(
                 features, self.best_state['edges'], self.best_state['weights'], 
                 labels, idx_train, idx_val, idx_test
             )
             
             print(f"\nTraining completed in {total_time:.2f}s")
             print(f"Test Loss: {final_metrics['test_loss']:.4f} | Test Acc: {final_metrics['test_acc']:.4f} | Test F1: {final_metrics['test_f1']:.4f}")
-            print(f"Final Dirichlet Energy - Train: {final_train_de:.4f}, Val: {final_val_de:.4f}, Test: {final_test_de:.4f}")
-        else:
-            final_metrics, final_train_de, final_val_de = self.compute_metrics_and_de(
-                features, self.best_state['edges'], self.best_state['weights'], 
-                labels, idx_train, idx_val
-            )
+            print("Final Oversmoothing Metrics:")
             
-            print(f"\nTraining completed in {total_time:.2f}s")
-            print(f"Final Dirichlet Energy - Train: {final_train_de:.4f}, Val: {final_val_de:.4f}")
+            if final_train_oversmoothing is not None:
+                print(f"Train: EDir: {final_train_oversmoothing['EDir']:.4f}, EDir_traditional: {final_train_oversmoothing['EDir_traditional']:.4f}, "
+                      f"EProj: {final_train_oversmoothing['EProj']:.4f}, MAD: {final_train_oversmoothing['MAD']:.4f}, "
+                      f"NumRank: {final_train_oversmoothing['NumRank']:.4f}, Erank: {final_train_oversmoothing['Erank']:.4f}")
+            
+            if final_val_oversmoothing is not None:
+                print(f"Val: EDir: {final_val_oversmoothing['EDir']:.4f}, EDir_traditional: {final_val_oversmoothing['EDir_traditional']:.4f}, "
+                      f"EProj: {final_val_oversmoothing['EProj']:.4f}, MAD: {final_val_oversmoothing['MAD']:.4f}, "
+                      f"NumRank: {final_val_oversmoothing['NumRank']:.4f}, Erank: {final_val_oversmoothing['Erank']:.4f}")
+            
+            if final_test_oversmoothing is not None:
+                print(f"Test: EDir: {final_test_oversmoothing['EDir']:.4f}, EDir_traditional: {final_test_oversmoothing['EDir_traditional']:.4f}, "
+                      f"EProj: {final_test_oversmoothing['EProj']:.4f}, MAD: {final_test_oversmoothing['MAD']:.4f}, "
+                      f"NumRank: {final_test_oversmoothing['NumRank']:.4f}, Erank: {final_test_oversmoothing['Erank']:.4f}")
             
         print(f"Training completed! Best validation F1: {best_val_f1:.4f}")
 
     def test(self, features, labels, idx_test):
         if self.best_state is None:
-            print("Model not trained yet!")
+            print("Model not trained yet.")
             return 0.0
 
         self.eval()
@@ -462,7 +519,26 @@ class RTGNN(nn.Module):
             test_acc = (test_pred.argmax(dim=1) == labels[idx_test]).float().mean().item()
             test_f1 = f1_score(labels[idx_test].cpu(), test_pred.argmax(dim=1).cpu(), average='macro')
 
+            test_mask = torch.zeros(features.size(0), dtype=torch.bool, device=self.device)
+            test_mask[idx_test] = True
+            
+            data = Data(x=features, edge_index=self.best_state['edges'])
+            if self.best_state['weights'] is not None:
+                data.edge_attr = self.best_state['weights'].unsqueeze(-1) if self.best_state['weights'].dim() == 1 else self.best_state['weights']
+            data = data.to(self.device)
+            
+            h1 = self.predictor.branch1.get_embeddings(data) if hasattr(self.predictor.branch1, 'get_embeddings') else self.predictor.branch1(data)
+            h2 = self.predictor.branch2.get_embeddings(data) if hasattr(self.predictor.branch2, 'get_embeddings') else self.predictor.branch2(data)
+            h_avg = (h1 + h2) / 2
+
+            test_oversmoothing = self._compute_oversmoothing_for_mask(h_avg, self.best_state['edges'], test_mask, labels)
+
             print(f"Test Loss: {test_loss:.4f} | Test Acc: {test_acc:.4f} | Test F1: {test_f1:.4f}")
+            
+            if test_oversmoothing is not None:
+                print(f"Test: EDir: {test_oversmoothing['EDir']:.4f}, EDir_traditional: {test_oversmoothing['EDir_traditional']:.4f}, "
+                      f"EProj: {test_oversmoothing['EProj']:.4f}, MAD: {test_oversmoothing['MAD']:.4f}, "
+                      f"NumRank: {test_oversmoothing['NumRank']:.4f}, Erank: {test_oversmoothing['Erank']:.4f}")
             
             return test_acc
 
