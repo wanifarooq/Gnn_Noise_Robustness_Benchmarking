@@ -108,13 +108,6 @@ def train_with_standard_loss(
             train_f1 = f1_score(data.y[train_idx].cpu(), pred[train_idx].cpu(), average='macro')
             val_f1 = f1_score(data.y[val_idx].cpu(), pred[val_idx].cpu(), average='macro')
 
-            train_oversmoothing = _compute_oversmoothing_for_mask(
-                oversmoothing_evaluator, out, data.edge_index, data.train_mask, data.y
-            )
-            val_oversmoothing = _compute_oversmoothing_for_mask(
-                oversmoothing_evaluator, out, data.edge_index, data.val_mask, data.y
-            )
-
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             best_model_state = model.state_dict()
@@ -128,6 +121,14 @@ def train_with_standard_loss(
             break
 
         if debug and epoch % 20 == 0:
+
+            train_oversmoothing = _compute_oversmoothing_for_mask(
+                oversmoothing_evaluator, out, data.edge_index, data.train_mask, data.y
+            )
+            val_oversmoothing = _compute_oversmoothing_for_mask(
+                oversmoothing_evaluator, out, data.edge_index, data.val_mask, data.y
+            )
+
             train_de = train_oversmoothing['EDir']
             train_de_traditional = train_oversmoothing['EDir_traditional']
             train_eproj = train_oversmoothing['EProj']
@@ -150,7 +151,6 @@ def train_with_standard_loss(
                   f"Train MAD: {train_mad:.4f}, Val MAD: {val_mad:.4f} | "
                   f"Train NumRank: {train_num_rank:.4f}, Val NumRank: {val_num_rank:.4f} | "
                   f"Train Erank: {train_eff_rank:.4f}, Val Erank: {val_eff_rank:.4f}")
-
     model.eval()
     with torch.no_grad():
         test_idx = data.test_mask.nonzero(as_tuple=True)[0]
@@ -171,27 +171,34 @@ def train_with_standard_loss(
             oversmoothing_evaluator, out, data.edge_index, data.test_mask, data.y
         )
 
+    expected_keys = ['NumRank', 'Erank', 'EDir', 'EDir_traditional', 'EProj', 'MAD']
+
+    def normalize_metrics(d):
+        if d is None:
+            return {k: 0.0 for k in expected_keys}
+        return {k: d.get(k, 0.0) for k in expected_keys}
+
+    final_train_oversmoothing = normalize_metrics(final_train_oversmoothing)
+    final_val_oversmoothing = normalize_metrics(final_val_oversmoothing)
+    final_test_oversmoothing = normalize_metrics(test_oversmoothing)
+
     if debug:
         print(f"Test Loss: {test_loss:.4f} | Test Acc: {test_acc:.4f} | Test F1: {test_f1:.4f} | "
               f"Precision: {test_precision:.4f}, Recall: {test_recall:.4f}")
         print("Final Oversmoothing Metrics:")
         print(f"Train: {final_train_oversmoothing}")
         print(f"Val: {final_val_oversmoothing}")
-        print(f"Test: {test_oversmoothing}")
+        print(f"Test: {final_test_oversmoothing}")
 
     results = {
-        'accuracy': test_acc,
-        'f1': test_f1,
-        'precision': test_precision,
-        'recall': test_recall,
-        'oversmoothing': {
-            'train': final_train_oversmoothing,
-            'val': final_val_oversmoothing,
-            'test': test_oversmoothing
-        }
+        'accuracy': torch.tensor(test_acc),
+        'f1': torch.tensor(test_f1),
+        'precision': torch.tensor(test_precision),
+        'recall': torch.tensor(test_recall),
+        'oversmoothing': final_test_oversmoothing
     }
-    return results
 
+    return results
 
 cross_entropy_val = nn.CrossEntropyLoss
 mean = 1e-8
