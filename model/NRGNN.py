@@ -157,7 +157,7 @@ class NRGNN:
         negative_edges = negative_sampling(
             edge_index, num_nodes=num_nodes, 
             num_neg_samples=self.negative_samples_ratio * num_nodes
-        )
+        ).to(self.device)
         
         negative_edges = negative_edges[:, negative_edges[0] < negative_edges[1]]
         positive_edges = edge_index[:, edge_index[0] < edge_index[1]]
@@ -239,21 +239,27 @@ class NRGNN:
             }
 
     def prepare_training_data(self, features, adjacency_matrix, labels, train_indices):
-        #Convert adjacency matrix to edge index
         self.original_edge_index, _ = from_scipy_sparse_matrix(adjacency_matrix)
         self.original_edge_index = self.original_edge_index.to(self.device)
         
-        #Convert features
         if sp.issparse(features):
             features = self.convert_sparse_to_torch_tensor(features).to_dense()
         else:
-            features = torch.FloatTensor(np.array(features))
+            if sp.issparse(features):
+                features = self.convert_sparse_to_torch_tensor(features).to_dense()
+            else:
+                if isinstance(features, torch.Tensor):
+                    features = features.float()
+                else:
+                    features = torch.FloatTensor(np.array(features))
+
         self.node_features = features.to(self.device)
-        
-        #Convert labels
-        self.node_labels = torch.LongTensor(np.array(labels)).to(self.device)
-        
-        #Find unlabeled nodes
+
+        if isinstance(labels, torch.Tensor):
+            self.node_labels = labels.long().to(self.device)
+        else:
+            self.node_labels = torch.LongTensor(np.array(labels)).to(self.device)
+
         all_node_indices = set(range(self.node_features.shape[0]))
         train_node_set = set(train_indices.tolist() if isinstance(train_indices, np.ndarray) else train_indices)
         unlabeled_nodes = list(all_node_indices - train_node_set)
@@ -380,7 +386,7 @@ class NRGNN:
         if self.best_predictions is None:
             with torch.no_grad():
                 prediction_probs = F.softmax(predictor_logits, dim=1)
-                self.best_predictions = prediction_probs.detach()
+                self.best_predictions = prediction_probs.detach().to(self.device)
                 self.confident_edge_index, self.confident_node_indices = self.identify_confident_edges(self.best_predictions)
         
         if self.confident_edge_index is not None and self.confident_edge_index.shape[1] > 0:
@@ -446,38 +452,40 @@ class NRGNN:
             # Compute metrics
             train_loss = F.cross_entropy(main_model_output[train_indices], self.node_labels[train_indices]).item()
             validation_loss = F.cross_entropy(main_model_output[validation_indices], self.node_labels[validation_indices]).item()
-            
+
             train_accuracy = self.compute_accuracy(main_model_output[train_indices], self.node_labels[train_indices])
             validation_accuracy = self.compute_accuracy(main_model_output[validation_indices], self.node_labels[validation_indices])
             predictor_validation_accuracy = self.compute_accuracy(predictor_probabilities[validation_indices], self.node_labels[validation_indices])
+                
             
-            train_f1 = f1_score(self.node_labels[train_indices].cpu(), main_model_output[train_indices].argmax(dim=1).cpu(), average='macro')
-            validation_f1 = f1_score(self.node_labels[validation_indices].cpu(), main_model_output[validation_indices].argmax(dim=1).cpu(), average='macro')
-
-            # Compute oversmoothing metrics
-            train_oversmoothing = self.compute_oversmoothing_for_node_set(main_model_output, main_model_edges, train_indices)
-            validation_oversmoothing = self.compute_oversmoothing_for_node_set(main_model_output, main_model_edges, validation_indices)
-            
-            if train_oversmoothing is not None:
-                self.oversmoothing_metrics_history['train'].append(train_oversmoothing)
-            if validation_oversmoothing is not None:
-                self.oversmoothing_metrics_history['val'].append(validation_oversmoothing)
-
             if self.debug_mode and epoch%20 == 0:
+
+                train_f1 = f1_score(self.node_labels[train_indices].cpu(), main_model_output[train_indices].argmax(dim=1).cpu(), average='macro')
+                validation_f1 = f1_score(self.node_labels[validation_indices].cpu(), main_model_output[validation_indices].argmax(dim=1).cpu(), average='macro')
+
+                # Compute oversmoothing metrics
+                train_oversmoothing = self.compute_oversmoothing_for_node_set(main_model_output, main_model_edges, train_indices)
+                validation_oversmoothing = self.compute_oversmoothing_for_node_set(main_model_output, main_model_edges, validation_indices)
+                
+                if train_oversmoothing is not None:
+                    self.oversmoothing_metrics_history['train'].append(train_oversmoothing)
+                if validation_oversmoothing is not None:
+                    self.oversmoothing_metrics_history['val'].append(validation_oversmoothing)
+
                 train_metrics = train_oversmoothing if train_oversmoothing else {}
                 val_metrics = validation_oversmoothing if validation_oversmoothing else {}
-                
+                    
                 print(f"Epoch {epoch:03d} | Train Loss: {train_loss:.4f}, Val Loss: {validation_loss:.4f} | "
-                      f"Train Acc: {train_accuracy:.4f}, Val Acc: {validation_accuracy:.4f} | "
-                      f"Train F1: {train_f1:.4f}, Val F1: {validation_f1:.4f}")
+                        f"Train Acc: {train_accuracy:.4f}, Val Acc: {validation_accuracy:.4f} | "
+                        f"Train F1: {train_f1:.4f}, Val F1: {validation_f1:.4f}")
                 print(f"Train DE: {train_metrics.get('EDir', 0.0):.4f}, Val DE: {val_metrics.get('EDir', 0.0):.4f} | "
-                      f"Train DE_trad: {train_metrics.get('EDir_traditional', 0.0):.4f}, Val DE_trad: {val_metrics.get('EDir_traditional', 0.0):.4f} | "
-                      f"Train EProj: {train_metrics.get('EProj', 0.0):.4f}, Val EProj: {val_metrics.get('EProj', 0.0):.4f} | "
-                      f"Train MAD: {train_metrics.get('MAD', 0.0):.4f}, Val MAD: {val_metrics.get('MAD', 0.0):.4f} | "
-                      f"Train NumRank: {train_metrics.get('NumRank', 0.0):.4f}, Val NumRank: {val_metrics.get('NumRank', 0.0):.4f} | "
-                      f"Train Erank: {train_metrics.get('Erank', 0.0):.4f}, Val Erank: {val_metrics.get('Erank', 0.0):.4f}")
+                        f"Train DE_trad: {train_metrics.get('EDir_traditional', 0.0):.4f}, Val DE_trad: {val_metrics.get('EDir_traditional', 0.0):.4f} | "
+                        f"Train EProj: {train_metrics.get('EProj', 0.0):.4f}, Val EProj: {val_metrics.get('EProj', 0.0):.4f} | "
+                        f"Train MAD: {train_metrics.get('MAD', 0.0):.4f}, Val MAD: {val_metrics.get('MAD', 0.0):.4f} | "
+                        f"Train NumRank: {train_metrics.get('NumRank', 0.0):.4f}, Val NumRank: {val_metrics.get('NumRank', 0.0):.4f} | "
+                        f"Train Erank: {train_metrics.get('Erank', 0.0):.4f}, Val Erank: {val_metrics.get('Erank', 0.0):.4f}")
                 print(f"  Pred Val Acc: {predictor_validation_accuracy:.4f} | Add Nodes: {len(self.confident_node_indices)} | "
-                      f"Time: {time.time() - start_time:.2f}s")
+                        f"Time: {time.time() - start_time:.2f}s")
 
             # Update best models
             if predictor_validation_accuracy > self.best_predictor_accuracy:

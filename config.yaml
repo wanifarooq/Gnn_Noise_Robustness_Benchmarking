@@ -22,11 +22,11 @@ model:
   concat: true
   
 training:
-  method: nrgnn # standard, ncod, positive_eigenvalues, gcod, nrgnn, pi_gnn, cr_gnn, lafak, rtgnn, graphcleaner, unionnet, gnn_cleaner, erase, gnnguard
+  method: pi_gnn # standard, ncod, positive_eigenvalues, gcod, nrgnn, pi_gnn, cr_gnn, lafak, rtgnn, graphcleaner, unionnet, gnn_cleaner, erase, gnnguard
   lr: 0.001
   weight_decay: 5e-4
-  epochs: 1000
-  patience: 100
+  epochs: 5000
+  patience: 200
 
 # Standard training parameters
 #standard_params:
@@ -53,19 +53,15 @@ nrgnn_params:
   beta: 1.0
   t_small: 0.1
   n_n: 50
-  debug: True
 
 # PI-GNN parameters
 pi_gnn_params:
-  epochs: 400
   start_epoch: 50
   miself: false
   lr_main: 0.01
   lr_mi: 0.01
-  weight_decay: 5e-4
   norm: null
   vanilla: false
-  patience: 30
 
 # CR-GNN parameters
 cr_gnn_params:

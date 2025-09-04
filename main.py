@@ -10,7 +10,7 @@ from model.Baseline_loss import train_with_standard_loss, train_with_ncod
 from model.Positive_Eigenvalues import train_with_positive_eigenvalues
 from model.GCOD_loss import train_with_gcod
 from model.NRGNN import NRGNN
-from model.PI_GNN import InnerProductTrainer, Net, InnerProductDecoder
+from model.PI_GNN import PiGnnModel, PiGnnTrainer, GraphLinkDecoder
 from model.CR_GNN import CRGNNTrainer
 from model.LafAK import Attack, prepare_simpledata_attrs, resetBinaryClass_init, CommunityDefense
 from model.RTGNN import RTGNN
@@ -27,6 +27,7 @@ def run_experiment(config, run_id=1):
     seed = config['seed'] + run_id * 100
     setup_seed_device(seed)
     device = torch.device(config['device'] if torch.cuda.is_available() else 'cpu')
+    print()
     data, num_classes = load_dataset(config['dataset']['name'], root=config['dataset'].get('root', './data'))
     data = data.to(device)
     
@@ -225,8 +226,8 @@ def run_experiment(config, run_id=1):
         )
         
         adj = to_scipy_sparse_matrix(data.edge_index, num_nodes=data.x.size(0))
-        features = data.x.cpu().numpy()
-        labels = data.y.cpu().numpy()
+        features = data.x.to(device)
+        labels = data.y.to(device)
         idx_train = train_mask.nonzero(as_tuple=True)[0].cpu().numpy()
         idx_val = val_mask.nonzero(as_tuple=True)[0].cpu().numpy()
         idx_test = test_mask.nonzero(as_tuple=True)[0].cpu().numpy()
@@ -253,34 +254,39 @@ def run_experiment(config, run_id=1):
         }
 
     # PI-GNN Training
-    if  method == 'pi_gnn':
+    if method == 'pi_gnn':
         print(f"Run {run_id}: Using PI-GNN")
-        trainer_params = config.get('pi_gnn_params', {})
-        trainer = InnerProductTrainer(
+
+        pi_gnn_config = config.get('pi_gnn_params', {})
+        training_config = config.get('training', {})
+        
+        trainer = PiGnnTrainer(
             device=device,
-            epochs=int(trainer_params.get('epochs', 400)),
-            start_epoch=int(trainer_params.get('start_epoch', 200)),
-            miself=bool(trainer_params.get('miself', False)),
-            lr_main=float(trainer_params.get('lr_main', 0.01)),
-            lr_mi=float(trainer_params.get('lr_mi', 0.01)),
-            weight_decay=float(trainer_params.get('weight_decay', 5e-4)),
-            patience=float(trainer_params.get('patience', 20)),
-            norm=trainer_params.get('norm', None),
-            vanilla=bool(trainer_params.get('vanilla', False)),
+            epochs=int(training_config.get('epochs', 400)),
+            mutual_info_start_epoch=int(pi_gnn_config.get('start_epoch', 200)),
+            use_self_mi=bool(pi_gnn_config.get('miself', False)),
+            main_learning_rate=float(pi_gnn_config.get('lr_main', 0.01)),
+            mi_learning_rate=float(pi_gnn_config.get('lr_mi', 0.01)),
+            weight_decay=float(training_config.get('weight_decay', 5e-4)),
+            early_stopping_patience=int(training_config.get('patience', 50)),
+            normalization_factor=pi_gnn_config.get('norm', None),
+            use_vanilla_training=bool(pi_gnn_config.get('vanilla', False)),
         )
         
-        model_params = {k: v for k, v in config['model'].items() if k not in ['name']}
-        base_model = get_model(
+        model_parameters = {k: v for k, v in config['model'].items() if k not in ['name']}
+        
+        base_gnn_model = get_model(
             model_name=config['model']['name'],
             in_channels=data.num_features,
             out_channels=num_classes,
-            **model_params
+            **model_parameters
         )
         
-        decoder = InnerProductDecoder()
-        model = Net(gnn_model=base_model, supplementary_gnn=decoder)
+        link_decoder = GraphLinkDecoder()
         
-        trainer_config = {
+        pi_gnn_model = PiGnnModel(backbone_gnn=base_gnn_model, supplementary_decoder=link_decoder)
+        
+        trainer_model_config = {
             'model_name': config['model']['name'],
             'hidden_channels': config['model'].get('hidden_channels', 64),
             'n_layers': config['model'].get('n_layers', 2),
@@ -292,13 +298,13 @@ def run_experiment(config, run_id=1):
             'self_loop': config['model'].get('self_loop', True)
         }
         
-        test_results = trainer.fit(model, data, trainer_config, get_model)
+        test_results = trainer.train_model(pi_gnn_model, data, trainer_model_config, get_model)
         
         return {
-            'accuracy': test_results['accuracy'],
-            'f1': test_results['f1'],
-            'precision': test_results['precision'],
-            'recall': test_results['recall'],
+            'accuracy': torch.tensor(test_results['accuracy']),
+            'f1': torch.tensor(test_results['f1']),
+            'precision': torch.tensor(test_results['precision']),
+            'recall': torch.tensor(test_results['recall']),
             'oversmoothing': test_results['oversmoothing']
         }
 
@@ -805,6 +811,11 @@ if __name__ == "__main__":
     print(f"Dataset: {dataset_name}")
     print(f"Method: {method_name}")
     print(f"Noise Rate: {noise_rate}")
+    device_str = config['device'] if torch.cuda.is_available() else 'cpu'
+    print(f"Using device: {device_str}")
+    if torch.cuda.is_available():
+        print(f"CUDA device name: {torch.cuda.get_device_name(torch.device(device_str))}")
+
     print(f"Running 5 experiments")
     print("-"*50)
     
@@ -832,10 +843,10 @@ if __name__ == "__main__":
             test_recall = test_metrics['recall']
             test_overs = test_metrics['oversmoothing']
 
-            test_accuracies.append(test_acc)
-            test_f1s.append(test_f1)
-            test_precisions.append(test_precision)
-            test_recalls.append(test_recall)
+            test_accuracies.append(test_acc.item())
+            test_f1s.append(test_f1.item())
+            test_precisions.append(test_precision.item())
+            test_recalls.append(test_recall.item())
 
             for key in oversmoothing_metrics:
                 oversmoothing_metrics[key].append(test_overs[key])
@@ -848,7 +859,7 @@ if __name__ == "__main__":
             continue
 
         print("-"*50)
-    
+        
     if test_accuracies:
         mean_std_dict = {
             'Accuracy': (np.mean(test_accuracies), np.std(test_accuracies)),
