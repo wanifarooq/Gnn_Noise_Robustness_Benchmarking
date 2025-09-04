@@ -646,29 +646,35 @@ def run_experiment(config, run_id=1):
             in_channels=data.num_features,
             hidden_channels=config['model'].get('hidden_channels', 64),
             out_channels=num_classes,
-            mlp_layers=config.get('mlp_layers', 2),
-            train_eps=config.get('train_eps', True),
-            heads=config.get('heads', 8),
+            mlp_layers=config['model'].get('mlp_layers', 2),
+            train_eps=config['model'].get('train_eps', True),
+            heads=config['model'].get('heads', 8),
             n_layers=config['model'].get('n_layers', 2),
             dropout=config['model'].get('dropout', 0.5),
             self_loop=config['model'].get('self_loop', True)
         ).to(device)
         
         unionnet_config = {
-            'n_epochs': config.get('total_epochs', 200),
-            'lr': config.get('lr', 0.01),
-            'weight_decay': config.get('weight_decay', 5e-4),
-            'patience': config.get('patience', 10),
-            'k': config.get('k', 5),
-            'alpha': config.get('alpha', 0.5),
-            'beta': config.get('alpha', 1),
-            'feat_norm': config.get('feat_norm', True)
+            'n_epochs': config['training'].get('epochs', 200),
+            'lr': config['training'].get('lr', 0.01),
+            'weight_decay': config['training'].get('weight_decay', 5e-4),
+            'patience': config['training'].get('patience', 10),
+            'k': config['unionnet_params'].get('k', 5),
+            'alpha': config['unionnet_params'].get('alpha', 0.5),
+            'beta': config['unionnet_params'].get('beta', 1.0),
+            'feat_norm': config['unionnet_params'].get('feat_norm', True)
         }
+
+        unionnet_trainer = UnionNET(gnn_model, data, num_classes, unionnet_config)
+        test_results = unionnet_trainer.train_model(enable_debug=True)
         
-        unionnet = UnionNET(gnn_model, data, num_classes, unionnet_config)
-        result = unionnet.train(debug=True)
-        
-        return result
+        return {
+            'accuracy': torch.tensor(test_results['accuracy']),
+            'f1': torch.tensor(test_results['f1']),
+            'precision': torch.tensor(test_results['precision']),
+            'recall': torch.tensor(test_results['recall']),
+            'oversmoothing': test_results['oversmoothing']
+        }
 
     # GNN Cleaner Training
     if method == 'gnn_cleaner':

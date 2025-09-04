@@ -6,323 +6,330 @@ from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_sc
 
 from model.evaluation import OversmoothingMetrics
 
-def normalize_features(features):
-    row_sum = torch.sum(features, dim=1, keepdim=True)
-    row_sum = torch.where(row_sum == 0, torch.ones_like(row_sum), row_sum)
-    return features / row_sum
-
-def construct_support_set(features, train_mask, labels, edge_index, k):
-    device = features.device
-    n_nodes = features.size(0)
-    feat_dim = features.size(1)
-    
-    support_set = torch.zeros(n_nodes, k, feat_dim, device=device)
-    support_labels = torch.zeros(n_nodes, k, dtype=torch.long, device=device)
-    
-    for i in range(n_nodes):
-        if train_mask[i]:
-            neighbors = edge_index[1][edge_index[0] == i]
-            
-            if len(neighbors) >= k:
-                anchor = features[i].unsqueeze(0)
-                similarities = torch.mm(features[neighbors], anchor.T).squeeze()
-                _, topk_indices = torch.topk(similarities, k=k)
-                
-                support_set[i] = features[neighbors[topk_indices]]
-                support_labels[i] = labels[neighbors[topk_indices]]
-    
-    return support_set, support_labels
-
-def label_aggregation(support_features, support_labels, node_features, n_classes):
-    device = node_features.device
-    n_nodes = node_features.size(0)
-    class_prob = torch.zeros(n_nodes, n_classes, device=device)
-    
-    for i in range(n_nodes):
-        if torch.sum(support_features[i]) != 0:
-            similarities = torch.exp(torch.mm(support_features[i], node_features[i:i+1].T)).squeeze()
-            weights = similarities / torch.sum(similarities)
-            
-            for j, label in enumerate(support_labels[i]):
-                class_prob[i, label] += weights[j]
-    
-    return class_prob
-
-def create_adjacency_matrix(edge_index, n_nodes, device):
-    adj = torch.sparse_coo_tensor(
-        edge_index,
-        torch.ones(edge_index.shape[1], device=device),
-        [n_nodes, n_nodes]
-    ).coalesce()
-
-    eye = torch.eye(n_nodes, device=device).to_sparse()
-    return (adj + eye).coalesce()
-
-def kl_divergence_loss(logits, labels_one_hot):
-    log_probs = F.log_softmax(logits, dim=1)
-    probs = F.softmax(logits, dim=1)
-    kl_loss = F.kl_div(log_probs, labels_one_hot.float(), reduction='batchmean')
-    return kl_loss
 
 class UnionNET:
     
-    def __init__(self, model, data, dataset, config):
-        self.model = model.to(data.x.device)
-        self.data = data
-        self.device = data.x.device
-        
-        self.n_epochs = config.get('n_epochs', 200)
-        self.lr = config.get('lr', 0.01)
-        self.weight_decay = config.get('weight_decay', 5e-4)
-        self.patience = config.get('patience', 100)
-        
-        self.k = config.get('k', 5)
-        self.alpha = config.get('alpha', 0.5)
-        self.beta = config.get('beta', 1.0)
-        
-        self.n_nodes = data.x.shape[0]
-        self.n_features = data.x.shape[1]
-        self.n_classes = dataset
+    def __init__(self, gnn_model, graph_data, num_classes, training_config):
 
-        self.features = data.x.to(torch.float)
-        if config.get('feat_norm', True):
-            self.features = normalize_features(self.features)
+        self.gnn_model = gnn_model.to(graph_data.x.device)
+        self.graph_data = graph_data
+        self.device = graph_data.x.device
+        
+        # Training hyperparameters
+        self.num_epochs = training_config.get('n_epochs', 200)
+        self.learning_rate = training_config.get('lr', 0.01)
+        self.weight_decay_coef = float(training_config.get('weight_decay', 5e-4))
+        self.early_stop_patience = training_config.get('patience', 100)
+        
+        # UnionNET specific parameters
+        self.support_size_k = training_config.get('k', 5)
+        self.reweight_alpha = training_config.get('alpha', 0.5)
+        self.kl_beta = training_config.get('beta', 1.0)
+        
+        self.num_nodes = graph_data.x.shape[0]
+        self.feature_dim = graph_data.x.shape[1]
+        self.num_classes = num_classes
 
-        self.clean_labels = data.y
-        self.noisy_labels = data.y_noisy
+        self.node_features = graph_data.x.to(torch.float)
+        if training_config.get('feat_norm', True):
+            self.node_features = self._normalize_node_features(self.node_features)
 
-        self.edge_index = data.edge_index
-        self.adj = create_adjacency_matrix(data.edge_index, self.n_nodes, self.device)
+        self.clean_node_labels = graph_data.y
+        self.noisy_node_labels = graph_data.y_noisy
+
+        self.edge_connections = graph_data.edge_index
+        self.adjacency_matrix = self._build_adjacency_matrix(
+            graph_data.edge_index, self.num_nodes, self.device
+        )
  
-        self.train_mask = data.train_mask
-        self.val_mask = data.val_mask
-        self.test_mask = data.test_mask
+        self.train_node_mask = graph_data.train_mask
+        self.val_node_mask = graph_data.val_mask
+        self.test_node_mask = graph_data.test_mask
 
         self.optimizer = torch.optim.Adam(
-            self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay
+            self.gnn_model.parameters(), 
+            lr=self.learning_rate, 
+            weight_decay=self.weight_decay_coef
         )
-        self.best_loss = float('inf')
-        self.wait = 0
-        self.best_weights = None
-        self.results = {'train': -1, 'val': -1, 'test': -1}
-        
-        self._print_stats()
+        self.best_validation_loss = float('inf')
+        self.patience_counter = 0
+        self.best_model_weights = None
+        self.training_results = {'train': -1, 'val': -1, 'test': -1}
 
-        self.smooth_metrics = OversmoothingMetrics(device=self.device)
+        self.oversmoothing_evaluator = OversmoothingMetrics(device=self.device)
     
-    def _print_stats(self):
-        print("UnionNET Dataset Statistics")
-        print(f"Nodes: {self.n_nodes}")
-        print(f"Features: {self.n_features}")
-        print(f"Classes: {self.n_classes}")
-        print(f"Edges: {self.edge_index.shape[1] // 2}")
-        print(f"Train/Val/Test: {self.train_mask.sum()}/{self.val_mask.sum()}/{self.test_mask.sum()}")
-        
-        n_changed = (self.clean_labels != self.noisy_labels).sum().item()
-        if n_changed > 0:
-            actual_rate = n_changed / len(self.clean_labels)
-            print(f"Label noise rate: {actual_rate:.3f} ({n_changed} labels changed)")
-    
-    def _forward(self, mask=None, use_clean=False):
-        if mask != 'train':
-            self.model.eval()
-        else:
-            self.model.train()
-        
-        context = torch.no_grad() if mask != 'train' else torch.enable_grad()
-        with context:
-            output = self.model(self.data)
+    def _normalize_node_features(self, features):
+        row_sum = torch.sum(features, dim=1, keepdim=True)
+        row_sum = torch.where(row_sum == 0, torch.ones_like(row_sum), row_sum)
+        return features / row_sum
 
-            if mask is not None:
-                labels = self.clean_labels if use_clean else self.noisy_labels
-                mask_tensor = getattr(self, f'{mask}_mask')
+    def _build_support_set_for_nodes(self, features, train_mask, labels, edge_index, k):
+        #Construct support sets for each node using k most similar neighbors.
+        device = features.device
+        n_nodes = features.size(0)
+        feat_dim = features.size(1)
+        
+        support_features = torch.zeros(n_nodes, k, feat_dim, device=device)
+        support_node_labels = torch.zeros(n_nodes, k, dtype=torch.long, device=device)
+        
+        for node_idx in range(n_nodes):
+            if train_mask[node_idx]:
+                neighbor_nodes = edge_index[1][edge_index[0] == node_idx]
                 
-                loss = F.cross_entropy(output[mask_tensor], labels[mask_tensor])
-                y_true = labels[mask_tensor].cpu().numpy()
-                y_pred = output[mask_tensor].detach().cpu().numpy().argmax(1)
-                acc = accuracy_score(y_true, y_pred)
-                return output, loss, acc
+                if len(neighbor_nodes) >= k:
+                    anchor_feature = features[node_idx].unsqueeze(0)
+                    similarity_scores = torch.mm(features[neighbor_nodes], anchor_feature.T).squeeze()
+                    _, top_k_indices = torch.topk(similarity_scores, k=k)
+                    
+                    support_features[node_idx] = features[neighbor_nodes[top_k_indices]]
+                    support_node_labels[node_idx] = labels[neighbor_nodes[top_k_indices]]
         
-        return output
+        return support_features, support_node_labels
 
+    def _aggregate_labels_from_support(self, support_features, support_labels, node_features, n_classes):
+        #Aggregate labels from support set using similarity-based weighting.
+
+        device = node_features.device
+        n_nodes = node_features.size(0)
+        class_probabilities = torch.zeros(n_nodes, n_classes, device=device)
+        
+        for node_idx in range(n_nodes):
+            if torch.sum(support_features[node_idx]) != 0:
+                similarity_scores = torch.exp(torch.mm(
+                    support_features[node_idx], 
+                    node_features[node_idx:node_idx+1].T
+                )).squeeze()
+                similarity_weights = similarity_scores / torch.sum(similarity_scores)
+                
+                for support_idx, class_label in enumerate(support_labels[node_idx]):
+                    class_probabilities[node_idx, class_label] += similarity_weights[support_idx]
+        
+        return class_probabilities
+
+    def _build_adjacency_matrix(self, edge_index, n_nodes, device):
+        adj = torch.sparse_coo_tensor(
+            edge_index,
+            torch.ones(edge_index.shape[1], device=device),
+            [n_nodes, n_nodes]
+        ).coalesce()
+
+        identity_matrix = torch.eye(n_nodes, device=device).to_sparse()
+        return (adj + identity_matrix).coalesce()
+
+    def _compute_kl_divergence_loss(self, logits, one_hot_labels):
+        #Compute KL divergence loss between predictions and labels
+        log_probabilities = F.log_softmax(logits, dim=1)
+        kl_loss = F.kl_div(log_probabilities, one_hot_labels.float(), reduction='batchmean')
+        return kl_loss
     
-    def _compute_unionnet_loss(self, output):
-        support_features, support_labels = construct_support_set(
-            self.features, self.train_mask, self.noisy_labels,
-            self.edge_index, self.k
-        )
+    def _forward_pass(self, data_split=None, use_clean_labels=False):
 
-        train_features = self.features[self.train_mask]
-        train_noisy_labels = self.noisy_labels[self.train_mask]
-
-        class_probs = label_aggregation(
-            support_features[self.train_mask], support_labels[self.train_mask], 
-            train_features, self.n_classes
-        )
-
-        weights = class_probs[range(len(train_noisy_labels)), train_noisy_labels]
-        reweight_loss = F.cross_entropy(output[self.train_mask], train_noisy_labels, reduction='none')
-        reweight_loss = torch.mean(weights * reweight_loss)
-
-        correction_loss = F.cross_entropy(output[self.train_mask], train_noisy_labels)
-
-        one_hot_labels = F.one_hot(train_noisy_labels, num_classes=self.n_classes).to(self.device)
-        kl_loss = kl_divergence_loss(output[self.train_mask], one_hot_labels)
-
-        return self.alpha * reweight_loss + (1 - self.alpha) * correction_loss + self.beta * kl_loss
-
-    def train(self, debug=True):
-        start_time = time.time()
+        if data_split != 'train':
+            self.gnn_model.eval()
+        else:
+            self.gnn_model.train()
         
-        for epoch in range(self.n_epochs):
-            self.model.train()
+        context = torch.no_grad() if data_split != 'train' else torch.enable_grad()
+        with context:
+            model_output = self.gnn_model(self.graph_data)
+
+            if data_split is not None:
+                target_labels = self.clean_node_labels if use_clean_labels else self.noisy_node_labels
+                split_mask = getattr(self, f'{data_split}_node_mask')
+                
+                loss = F.cross_entropy(model_output[split_mask], target_labels[split_mask])
+                true_labels = target_labels[split_mask].cpu().numpy()
+                predicted_labels = model_output[split_mask].detach().cpu().numpy().argmax(1)
+                accuracy = accuracy_score(true_labels, predicted_labels)
+                return model_output, loss, accuracy
+        
+        return model_output
+    
+    def _compute_unionnet_training_loss(self, model_output):
+
+        support_node_features, support_node_labels = self._build_support_set_for_nodes(
+            self.node_features, self.train_node_mask, self.noisy_node_labels,
+            self.edge_connections, self.support_size_k
+        )
+
+        train_node_features = self.node_features[self.train_node_mask]
+        train_noisy_labels = self.noisy_node_labels[self.train_node_mask]
+
+        class_probabilities = self._aggregate_labels_from_support(
+            support_node_features[self.train_node_mask], 
+            support_node_labels[self.train_node_mask], 
+            train_node_features, 
+            self.num_classes
+        )
+
+        confidence_weights = class_probabilities[range(len(train_noisy_labels)), train_noisy_labels]
+        instance_losses = F.cross_entropy(
+            model_output[self.train_node_mask], 
+            train_noisy_labels, 
+            reduction='none'
+        )
+        reweighted_loss = torch.mean(confidence_weights * instance_losses)
+
+        # Standard correction loss component
+        correction_loss = F.cross_entropy(model_output[self.train_node_mask], train_noisy_labels)
+
+        # KL divergence loss component
+        one_hot_train_labels = F.one_hot(train_noisy_labels, num_classes=self.num_classes).to(self.device)
+        kl_regularization_loss = self._compute_kl_divergence_loss(
+            model_output[self.train_node_mask], 
+            one_hot_train_labels
+        )
+
+        # Combine all loss components
+        combined_loss = (
+            self.reweight_alpha * reweighted_loss + 
+            (1 - self.reweight_alpha) * correction_loss + 
+            self.kl_beta * kl_regularization_loss
+        )
+        
+        return combined_loss
+
+    def train_model(self, enable_debug=True):
+
+        training_start_time = time.time()
+        
+        for current_epoch in range(self.num_epochs):
+            self.gnn_model.train()
             self.optimizer.zero_grad()
             
-            output = self.model(self.data)
-            loss_train = self._compute_unionnet_loss(output)
-            loss_train.backward()
+            model_predictions = self.gnn_model(self.graph_data)
+            training_loss = self._compute_unionnet_training_loss(model_predictions)
+            training_loss.backward()
             self.optimizer.step()
             
-            train_labels = self.noisy_labels[self.train_mask].cpu().numpy()
-            train_preds = output[self.train_mask].detach().cpu().numpy().argmax(1)
-            train_acc = accuracy_score(train_labels, train_preds)
-            train_f1 = f1_score(train_labels, train_preds, average='macro')
+            train_true_labels = self.noisy_node_labels[self.train_node_mask].cpu().numpy()
+            train_pred_labels = model_predictions[self.train_node_mask].detach().cpu().numpy().argmax(1)
+            train_accuracy = accuracy_score(train_true_labels, train_pred_labels)
+            train_f1_score = f1_score(train_true_labels, train_pred_labels, average='macro')
             
-            train_metrics = self.compute_oversmoothing_metrics(output, mask=self.train_mask)
-            train_de = train_metrics['EDir']
-            train_de_traditional = train_metrics['EDir_traditional']
-            train_num_rank = train_metrics['NumRank']
-            train_eff_rank = train_metrics['Erank']
-            train_eproj = train_metrics['EProj']
-            train_mad = train_metrics['MAD']
+            _, validation_loss, _ = self._forward_pass('val')
+            val_true_labels = self.noisy_node_labels[self.val_node_mask].cpu().numpy()
+            val_pred_labels = model_predictions[self.val_node_mask].detach().cpu().numpy().argmax(1)
+            val_accuracy = accuracy_score(val_true_labels, val_pred_labels)
+            val_f1_score = f1_score(val_true_labels, val_pred_labels, average='macro')
             
-            _, val_loss, _ = self._forward('val')
-            val_labels = self.noisy_labels[self.val_mask].cpu().numpy()
-            val_preds = output[self.val_mask].detach().cpu().numpy().argmax(1)
-            val_acc = accuracy_score(val_labels, val_preds)
-            val_f1 = f1_score(val_labels, val_preds, average='macro')
-            
-            val_metrics = self.compute_oversmoothing_metrics(output, mask=self.val_mask)
-            val_de = val_metrics['EDir']
-            val_de_traditional = val_metrics['EDir_traditional']
-            val_num_rank = val_metrics['NumRank']
-            val_eff_rank = val_metrics['Erank']
-            val_eproj = val_metrics['EProj']
-            val_mad = val_metrics['MAD']
-            
-            metrics = {
-                'train_acc': train_acc,
-                'val_acc': val_acc,
-                'train_f1': train_f1,
-                'val_f1': val_f1,
-                'val_loss': val_loss.item()
-            }
-            
-            if val_loss.item() < self.best_loss:
-                self.best_loss = val_loss.item()
-                self.wait = 0
-                self.results['train'] = train_acc
-                self.results['val'] = val_acc
-                self.best_weights = deepcopy(self.model.state_dict())
+            # Compute oversmoothing metrics
+            if current_epoch % 20 == 0:
+                train_oversmooth_metrics = self._evaluate_oversmoothing_metrics(
+                    model_predictions, mask=self.train_node_mask
+                )
+                val_oversmooth_metrics = self._evaluate_oversmoothing_metrics(
+                    model_predictions, mask=self.val_node_mask
+                )
+                
+                if enable_debug:
+                    print(f"Epoch {current_epoch+1:03d} | Train Acc: {train_accuracy:.4f}, Val Acc: {val_accuracy:.4f} | "
+                          f"Train F1: {train_f1_score:.4f}, Val F1: {val_f1_score:.4f}")
+                    print(f"Train EDir: {train_oversmooth_metrics['EDir']:.4f}, Val EDir: {val_oversmooth_metrics['EDir']:.4f} | "
+                          f"Train EDir_trad: {train_oversmooth_metrics['EDir_traditional']:.4f}, Val EDir_trad: {val_oversmooth_metrics['EDir_traditional']:.4f} | "
+                          f"Train EProj: {train_oversmooth_metrics['EProj']:.4f}, Val EProj: {val_oversmooth_metrics['EProj']:.4f} | "
+                          f"Train MAD: {train_oversmooth_metrics['MAD']:.4f}, Val MAD: {val_oversmooth_metrics['MAD']:.4f} | "
+                          f"Train NumRank: {train_oversmooth_metrics['NumRank']:.4f}, Val NumRank: {val_oversmooth_metrics['NumRank']:.4f} | "
+                          f"Train Erank: {train_oversmooth_metrics['Erank']:.4f}, Val Erank: {val_oversmooth_metrics['Erank']:.4f}")
             else:
-                self.wait += 1
+                if enable_debug and current_epoch % 5 == 0:
+                    print(f"Epoch {current_epoch+1:03d} | Train Acc: {train_accuracy:.4f}, Val Acc: {val_accuracy:.4f} | "
+                          f"Train F1: {train_f1_score:.4f}, Val F1: {val_f1_score:.4f}")
+            
+            # Early stopping
+            if validation_loss.item() < self.best_validation_loss:
+                self.best_validation_loss = validation_loss.item()
+                self.patience_counter = 0
+                self.training_results['train'] = train_accuracy
+                self.training_results['val'] = val_accuracy
+                self.best_model_weights = deepcopy(self.gnn_model.state_dict())
+            else:
+                self.patience_counter += 1
 
-            if debug:
-                print(f"Epoch {epoch+1:03d} | Train Acc: {train_acc:.4f}, Val Acc: {val_acc:.4f} | "
-                      f"Train F1: {train_f1:.4f}, Val F1: {val_f1:.4f}")
-                print(f"Train DE: {train_de:.4f}, Val DE: {val_de:.4f} | "
-                      f"Train DE_trad: {train_de_traditional:.4f}, Val DE_trad: {val_de_traditional:.4f} | "
-                      f"Train EProj: {train_eproj:.4f}, Val EProj: {val_eproj:.4f} | "
-                      f"Train MAD: {train_mad:.4f}, Val MAD: {val_mad:.4f} | "
-                      f"Train NumRank: {train_num_rank:.4f}, Val NumRank: {val_num_rank:.4f} | "
-                      f"Train Erank: {train_eff_rank:.4f}, Val Erank: {val_eff_rank:.4f}")
-
-            if self.patience and self.wait >= self.patience:
-                if debug:
-                    print(f"Early stopping at epoch {epoch}")
+            if self.early_stop_patience and self.patience_counter >= self.early_stop_patience:
+                if enable_debug:
+                    print(f"Early stopping at epoch {current_epoch}")
                 break
         
-        if self.best_weights is not None:
-            self.model.load_state_dict(self.best_weights)
+        if self.best_model_weights is not None:
+            self.gnn_model.load_state_dict(self.best_model_weights)
 
-        self.model.eval()
+        self.gnn_model.eval()
         with torch.no_grad():
-            output = self.model(self.data)
+            final_predictions = self.gnn_model(self.graph_data)
 
-            test_labels = self.clean_labels[self.test_mask].cpu().numpy()
-            test_preds = output[self.test_mask].cpu().numpy().argmax(1)
-            test_acc = accuracy_score(test_labels, test_preds)
-            test_f1 = f1_score(test_labels, test_preds, average='macro')
+            test_true_labels = self.clean_node_labels[self.test_node_mask].cpu().numpy()
+            test_pred_labels = final_predictions[self.test_node_mask].cpu().numpy().argmax(1)
+            test_accuracy = accuracy_score(test_true_labels, test_pred_labels)
+            test_f1_score = f1_score(test_true_labels, test_pred_labels, average='macro')
+            test_precision = precision_score(test_true_labels, test_pred_labels, average='macro')
+            test_recall = recall_score(test_true_labels, test_pred_labels, average='macro')
             
-            test_precision = precision_score(test_labels, test_preds, average='macro')
-            test_recall = recall_score(test_labels, test_preds, average='macro')
-            
-            test_loss = F.cross_entropy(output[self.test_mask], self.clean_labels[self.test_mask])
-            test_metrics = self.compute_oversmoothing_metrics(output, mask=self.test_mask)
+            test_loss = F.cross_entropy(
+                final_predictions[self.test_node_mask], 
+                self.clean_node_labels[self.test_node_mask]
+            )
+            test_oversmooth_metrics = self._evaluate_oversmoothing_metrics(
+                final_predictions, mask=self.test_node_mask
+            )
 
-        total_time = time.time() - start_time
+        total_training_time = time.time() - training_start_time
         
-        if debug:
+        if enable_debug:
             print(f"\nUnionNET Training completed!")
-            print(f"Test Accuracy: {test_acc:.4f}")
-            print(f"Test F1: {test_f1:.4f}")
+            print(f"Test Accuracy: {test_accuracy:.4f}")
+            print(f"Test F1: {test_f1_score:.4f}")
             print(f"Test Precision: {test_precision:.4f}")
             print(f"Test Recall: {test_recall:.4f}")
-            print(f"Training completed in {total_time:.2f}s")
+            print(f"Training completed in {total_training_time:.2f}s")
             print("Final Oversmoothing Metrics:")
-            if train_metrics:
-                print(f"Train: EDir: {train_metrics['EDir']:.4f}, EDir_traditional: {train_metrics['EDir_traditional']:.4f}, "
-                      f"EProj: {train_metrics['EProj']:.4f}, MAD: {train_metrics['MAD']:.4f}, "
-                      f"NumRank: {train_metrics['NumRank']:.4f}, Erank: {train_metrics['Erank']:.4f}")
-            if val_metrics:
-                print(f"Val: EDir: {val_metrics['EDir']:.4f}, EDir_traditional: {val_metrics['EDir_traditional']:.4f}, "
-                      f"EProj: {val_metrics['EProj']:.4f}, MAD: {val_metrics['MAD']:.4f}, "
-                      f"NumRank: {val_metrics['NumRank']:.4f}, Erank: {val_metrics['Erank']:.4f}")
-            if test_metrics:
-                print(f"Test: EDir: {test_metrics['EDir']:.4f}, EDir_traditional: {test_metrics['EDir_traditional']:.4f}, "
-                      f"EProj: {test_metrics['EProj']:.4f}, MAD: {test_metrics['MAD']:.4f}, "
-                      f"NumRank: {test_metrics['NumRank']:.4f}, Erank: {test_metrics['Erank']:.4f}")
+            if test_oversmooth_metrics:
+                print(f"Test: EDir: {test_oversmooth_metrics['EDir']:.4f}, EDir_traditional: {test_oversmooth_metrics['EDir_traditional']:.4f}, "
+                      f"EProj: {test_oversmooth_metrics['EProj']:.4f}, MAD: {test_oversmooth_metrics['MAD']:.4f}, "
+                      f"NumRank: {test_oversmooth_metrics['NumRank']:.4f}, Erank: {test_oversmooth_metrics['Erank']:.4f}")
 
         return {
-            'accuracy': test_acc,
-            'f1': test_f1,
+            'accuracy': test_accuracy,
+            'f1': test_f1_score,
             'precision': test_precision,
             'recall': test_recall,
-            'oversmoothing': test_metrics
+            'oversmoothing': test_oversmooth_metrics
         }
 
-    def compute_oversmoothing_metrics(self, embeddings, mask=None):
+    def _evaluate_oversmoothing_metrics(self, node_embeddings, mask=None):
         if mask is not None:
-
-            X_masked = embeddings[mask]
+            masked_embeddings = node_embeddings[mask]
             
-            edge_mask = mask[self.edge_index[0]] & mask[self.edge_index[1]]
-            edge_index_masked = self.edge_index[:, edge_mask]
+            # Filter edges to only include masked nodes
+            edge_mask = mask[self.edge_connections[0]] & mask[self.edge_connections[1]]
+            masked_edge_index = self.edge_connections[:, edge_mask]
             
-            idx_map = torch.full((mask.size(0),), -1, device=edge_index_masked.device)
-            idx_map[mask] = torch.arange(mask.sum(), device=edge_index_masked.device)
-            edge_index_masked = idx_map[edge_index_masked]
+            # Remap node indices for masked subgraph
+            index_mapping = torch.full((mask.size(0),), -1, device=masked_edge_index.device)
+            index_mapping[mask] = torch.arange(mask.sum(), device=masked_edge_index.device)
+            masked_edge_index = index_mapping[masked_edge_index]
 
-            graphs_in_class = [{
-                'X': X_masked, 
-                'edge_index': edge_index_masked,
+            subgraph_list = [{
+                'X': masked_embeddings, 
+                'edge_index': masked_edge_index,
                 'edge_weight': None
             }]
             
-            return self.smooth_metrics.compute_all_metrics(
-                X=X_masked,
-                edge_index=edge_index_masked,
-                graphs_in_class=graphs_in_class
+            return self.oversmoothing_evaluator.compute_all_metrics(
+                X=masked_embeddings,
+                edge_index=masked_edge_index,
+                graphs_in_class=subgraph_list
             )
         else:
-            graphs_in_class = [{
-                'X': embeddings, 
-                'edge_index': self.edge_index,
+            full_graph_list = [{
+                'X': node_embeddings, 
+                'edge_index': self.edge_connections,
                 'edge_weight': None
             }]
             
-            return self.smooth_metrics.compute_all_metrics(
-                X=embeddings,
-                edge_index=self.edge_index,
-                graphs_in_class=graphs_in_class
+            return self.oversmoothing_evaluator.compute_all_metrics(
+                X=node_embeddings,
+                edge_index=self.edge_connections,
+                graphs_in_class=full_graph_list
             )
+        

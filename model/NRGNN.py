@@ -19,7 +19,7 @@ class NRGNN:
         self.config = config
         self.base_model_class = base_model
         
-        # Training parameters from config
+        # Training parameters
         self.learning_rate = config.get('lr', 0.01)
         self.weight_decay = float(config.get('weight_decay', 5e-4))
         self.max_epochs = config.get('epochs', 1000)
@@ -43,7 +43,6 @@ class NRGNN:
         self.adjacency_estimator = None
         self.optimizer = None
         
-        # Training state
         self.best_validation_loss = float('inf')
         self.best_predictor_accuracy = 0.0
         self.early_stopping_counter = 0
@@ -56,14 +55,12 @@ class NRGNN:
         self.best_predictor_edge_weights = None
         self.best_edge_indices = None
         
-        # Graph structure
         self.original_edge_index = None
         self.potential_edge_index = None
         self.confident_edge_index = None
         self.confident_node_indices = []
         self.unlabeled_node_indices = None
-        
-        # Data
+
         self.node_features = None
         self.node_labels = None
         
@@ -83,7 +80,6 @@ class NRGNN:
         return correct_predictions.sum() / len(true_labels)
 
     def convert_sparse_to_torch_tensor(self, sparse_matrix):
-        #Convert scipy sparse matrix to PyTorch sparse tensor
         sparse_matrix = sparse_matrix.tocoo().astype(np.float32)
         indices = torch.from_numpy(
             np.vstack((sparse_matrix.row, sparse_matrix.col)).astype(np.int64)
@@ -113,7 +109,6 @@ class NRGNN:
         return estimator
 
     def create_gnn_wrapper(self, base_model):
-        #Create wrapper for base GNN model
         wrapper = nn.Module()
         wrapper.base_gnn_model = base_model
         
@@ -487,7 +482,6 @@ class NRGNN:
                 print(f"  Pred Val Acc: {predictor_validation_accuracy:.4f} | Add Nodes: {len(self.confident_node_indices)} | "
                         f"Time: {time.time() - start_time:.2f}s")
 
-            # Update best models
             if predictor_validation_accuracy > self.best_predictor_accuracy:
                 self.best_predictor_accuracy = predictor_validation_accuracy
                 self.best_predictor_edge_weights = predictor_weights.detach()
@@ -505,7 +499,7 @@ class NRGNN:
             else:
                 self.early_stopping_counter += 1
 
-            # Check early stopping
+            # Early stopping
             if self.early_stopping_counter >= self.patience:
                 if self.debug_mode:
                     print(f"Early stopping at epoch {epoch+1}, best val loss: {self.best_validation_loss:.4f}")
@@ -521,13 +515,10 @@ class NRGNN:
 
     def fit(self, features, adjacency_matrix, labels, train_indices, validation_indices):
 
-        # Prepare data
         self.prepare_training_data(features, adjacency_matrix, labels, train_indices)
-        
-        # Initialize models
+
         self.initialize_model_components()
         
-        # Training loop
         start_time = time.time()
         try:
             for epoch in range(self.max_epochs):
@@ -539,16 +530,13 @@ class NRGNN:
         total_training_time = time.time() - start_time
         print(f"\nTraining completed in {total_training_time:.2f}s")
         
-        # Load best models
         self.load_best_model_weights()
 
     def test(self, test_indices):
-
         self.main_model.eval()
         self.node_predictor.eval()
         
         with torch.no_grad():
-
             if self.best_predictor_edge_weights is not None and self.potential_edge_index is not None:
                 predictor_edges = torch.cat([self.original_edge_index, self.potential_edge_index], dim=1)
                 predictor_output = self.node_predictor.forward(self.node_features, predictor_edges, self.best_predictor_edge_weights)
@@ -563,53 +551,56 @@ class NRGNN:
 
             if self.best_edge_weights is not None and self.best_edge_indices is not None:
                 main_model_output = self.main_model.forward(self.node_features, self.best_edge_indices, self.best_edge_weights)
-                
                 test_loss = F.cross_entropy(main_model_output[test_indices], self.node_labels[test_indices]).item()
                 test_accuracy = self.compute_accuracy(main_model_output[test_indices], self.node_labels[test_indices])
-                
                 y_true = self.node_labels[test_indices].cpu().numpy()
                 y_pred = main_model_output[test_indices].argmax(dim=1).cpu().numpy()
                 test_f1 = f1_score(y_true, y_pred, average='macro')
                 test_precision = precision_score(y_true, y_pred, average='macro', zero_division=0)
                 test_recall = recall_score(y_true, y_pred, average='macro', zero_division=0)
-                
                 test_oversmoothing = self.compute_oversmoothing_for_node_set(main_model_output, self.best_edge_indices, test_indices)
+                
                 if test_oversmoothing is not None:
                     self.oversmoothing_metrics_history['test'].append(test_oversmoothing)
                 
+                def ensure_tensor(value):
+                    if not hasattr(value, 'item'):
+                        return torch.tensor(value, dtype=torch.float32)
+                    else:
+                        return value
+                
                 final_test_metrics = {
                     'test_loss': test_loss,
-                    'test_acc': test_accuracy,
-                    'test_f1': test_f1,
-                    'test_precision': test_precision,
-                    'test_recall': test_recall,
+                    'test_acc': ensure_tensor(test_accuracy),
+                    'test_f1': ensure_tensor(test_f1),
+                    'test_precision': ensure_tensor(test_precision),
+                    'test_recall': ensure_tensor(test_recall),
                     'test_oversmoothing': test_oversmoothing if test_oversmoothing is not None else {
                         'NumRank': 0.0, 'Erank': 0.0, 'EDir': 0.0,
                         'EDir_traditional': 0.0, 'EProj': 0.0, 'MAD': 0.0
                     }
                 }
                 
-                print(f"Test Loss: {final_test_metrics['test_loss']:.4f} | Test Acc: {final_test_metrics['test_acc']:.4f} | Test F1: {final_test_metrics['test_f1']:.4f}")
-                print(f"Test Precision: {final_test_metrics['test_precision']:.4f} | Test Recall: {final_test_metrics['test_recall']:.4f}")
-                
+                print(f"Test Loss: {final_test_metrics['test_loss']:.4f} | Test Acc: {final_test_metrics['test_acc'].item():.4f} | Test F1: {final_test_metrics['test_f1'].item():.4f}")
+                print(f"Test Precision: {final_test_metrics['test_precision'].item():.4f} | Test Recall: {final_test_metrics['test_recall'].item():.4f}")
                 print("Test Oversmoothing Metrics:")
                 if test_oversmoothing is not None:
                     print(f"Test: EDir: {test_oversmoothing['EDir']:.4f}, EDir_traditional: {test_oversmoothing['EDir_traditional']:.4f}, "
-                        f"EProj: {test_oversmoothing['EProj']:.4f}, MAD: {test_oversmoothing['MAD']:.4f}, "
-                        f"NumRank: {test_oversmoothing['NumRank']:.4f}, Erank: {test_oversmoothing['Erank']:.4f}")
+                          f"EProj: {test_oversmoothing['EProj']:.4f}, MAD: {test_oversmoothing['MAD']:.4f}, "
+                          f"NumRank: {test_oversmoothing['NumRank']:.4f}, Erank: {test_oversmoothing['Erank']:.4f}")
                 
                 return final_test_metrics
-        
-        return {
-            'test_acc': 0.0,
-            'test_f1': 0.0,
-            'test_precision': 0.0,
-            'test_recall': 0.0,
-            'test_oversmoothing': {
-                'NumRank': 0.0, 'Erank': 0.0, 'EDir': 0.0,
-                'EDir_traditional': 0.0, 'EProj': 0.0, 'MAD': 0.0
+
+            return {
+                'test_acc': torch.tensor(0.0, dtype=torch.float32),
+                'test_f1': torch.tensor(0.0, dtype=torch.float32),
+                'test_precision': torch.tensor(0.0, dtype=torch.float32),
+                'test_recall': torch.tensor(0.0, dtype=torch.float32),
+                'test_oversmoothing': {
+                    'NumRank': 0.0, 'Erank': 0.0, 'EDir': 0.0,
+                    'EDir_traditional': 0.0, 'EProj': 0.0, 'MAD': 0.0
+                }
             }
-        }
 
     def get_oversmoothing_metrics_history(self):
         return self.oversmoothing_metrics_history
