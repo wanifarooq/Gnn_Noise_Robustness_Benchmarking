@@ -213,6 +213,7 @@ def run_experiment(config, run_id=1):
     # NRGNN Training
     if method == 'nrgnn':
         print(f"Run {run_id}: Using NRGNN")
+        
         base_model = get_model(
             model_name=config['model']['name'],
             in_channels=data.num_features,
@@ -229,30 +230,19 @@ def run_experiment(config, run_id=1):
         idx_train = train_mask.nonzero(as_tuple=True)[0].cpu().numpy()
         idx_val = val_mask.nonzero(as_tuple=True)[0].cpu().numpy()
         idx_test = test_mask.nonzero(as_tuple=True)[0].cpu().numpy()
+
+        nrgnn_config = {
+            'lr': config['training'].get('lr', 0.01),
+            'weight_decay': config['training'].get('weight_decay', 5e-4),
+            'epochs': config['training'].get('epochs', 1000),
+            'patience': config['training'].get('patience', 100),
+            'nrgnn_params': config['training'].get('nrgnn_params', {})
+        }
         
-        nrgnn_config = config.get('nrgnn_params', {})
+        nrgnn_model = NRGNN(nrgnn_config, device, base_model=base_model)
+        nrgnn_model.fit(features, adj, labels, idx_train, idx_val)
         
-        class Args:
-            def __init__(self, nrgnn_config):
-                self.hidden = nrgnn_config.get('hidden', 64)
-                self.edge_hidden = nrgnn_config.get('edge_hidden', 32)
-                self.dropout = nrgnn_config.get('dropout', 0.5)
-                self.lr = nrgnn_config.get('lr', 0.01)
-                self.weight_decay = nrgnn_config.get('weight_decay', 5e-4)
-                self.epochs = nrgnn_config.get('epochs', 400)
-                self.n_p = nrgnn_config.get('n_p', 10)
-                self.alpha = nrgnn_config.get('alpha', 1.0)
-                self.beta = nrgnn_config.get('beta', 1.0)
-                self.p_u = nrgnn_config.get('p_u', 0.7)
-                self.t_small = nrgnn_config.get('t_small', 0.1)
-                self.n_n = nrgnn_config.get('n_n', 1)
-                self.debug = True
-                self.patience = nrgnn_config.get('patience', 50)
-        
-        args = Args(nrgnn_config)
-        model = NRGNN(args, device, base_model=base_model)
-        model.fit(features, adj, labels, idx_train, idx_val)
-        test_results = model.test(idx_test)
+        test_results = nrgnn_model.test(idx_test)
         
         return {
             'accuracy': test_results['test_acc'],
