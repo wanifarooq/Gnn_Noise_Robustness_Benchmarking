@@ -11,4 +11,4 @@ scikit-learn==1.2.2
 networkx==3.5
 nni==3.0
 cleanlab==2.7.1
-json-tricks==3.18.0
+json-tricks==3.17.3

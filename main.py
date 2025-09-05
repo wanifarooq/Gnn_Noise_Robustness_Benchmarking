@@ -23,6 +23,29 @@ from model.GNNGuard import GNNGuard
 from torch_geometric.utils import from_scipy_sparse_matrix
 from torch_geometric.data import Data as PyGData
 
+def prepare_data_for_method(data, train_mask, val_mask, test_mask, noisy_train_labels, method_name):
+
+    data_for_method = data.clone()
+
+    data_for_method.y = data.y_original.clone()
+    data_for_method.y[train_mask] = noisy_train_labels
+    
+    return data_for_method
+
+def verify_label_distribution(data, train_mask, val_mask, test_mask, run_id, method_name):
+
+    print(f"[DEBUG Run {run_id}] {method_name} - Label distribution:")
+    
+    if hasattr(data, 'y_original'):
+
+        train_corrupted = (data.y[train_mask] != data.y_original[train_mask]).sum()
+        print(f"  Training labels corrupted: {train_corrupted}/{train_mask.sum()} nodes")
+        
+        val_clean = (data.y[val_mask] == data.y_original[val_mask]).all()
+        test_clean = (data.y[test_mask] == data.y_original[test_mask]).all()
+        print(f"  Val labels clean: {val_clean}")
+        print(f"  Test labels clean: {test_clean}")
+
 def run_experiment(config, run_id=1):
     seed = config['seed'] + run_id * 100
     setup_seed_device(seed)
@@ -52,12 +75,18 @@ def run_experiment(config, run_id=1):
     )
     
     global_noisy_indices = train_indices[relative_noisy_indices]
+
+    data.y_original = data.y.clone()
     data.y_noisy = data.y.clone()
-    data.y[train_mask] = noisy_train_labels
-    
+    data.y_noisy[train_mask] = noisy_train_labels
+
     print(f"Run {run_id}: Applied noise to {len(relative_noisy_indices)} training samples out of {train_mask.sum().item()}")
     
     method = config['training']['method']
+    
+    data_for_training = prepare_data_for_method(data, train_mask, val_mask, test_mask, noisy_train_labels, method)
+    
+    verify_label_distribution(data_for_training, train_mask, val_mask, test_mask, run_id, method)
 
     if method == 'standard':
         trainer_params = config.get('training', {})
@@ -79,26 +108,20 @@ def run_experiment(config, run_id=1):
         )
 
         result = train_with_standard_loss(
-            base_model, data, global_noisy_indices, device,
+            base_model, data_for_training, global_noisy_indices, device,
             total_epochs=epochs,
             lr=lr,
             weight_decay=weight_decay,
             patience=patience
         )
-        test_acc = result['accuracy']
-        test_f1 = result['f1']
-        test_precision = result['precision']
-        test_recall = result['recall']
-        test_oversmoothing = result['oversmoothing']
-
+        
         return {
-            'accuracy': test_acc,
-            'f1': test_f1,
-            'precision': test_precision,
-            'recall': test_recall,
-            'oversmoothing': test_oversmoothing
+            'accuracy': result['accuracy'],
+            'f1': result['f1'],
+            'precision': result['precision'],
+            'recall': result['recall'],
+            'oversmoothing': result['oversmoothing']
         }
-
 
     elif method == 'ncod':
         trainer_params = config.get('training', {})
@@ -123,30 +146,23 @@ def run_experiment(config, run_id=1):
         )
 
         result = train_with_ncod(
-            base_model, data, global_noisy_indices, device,
+            base_model, data_for_training, global_noisy_indices, device,
             total_epochs=epochs,
             lr=lr,
             weight_decay=weight_decay,
             lambda_dir=lambda_dir,
             patience=patience
         )
-        test_acc = result['accuracy']
-        test_f1 = result['f1']
-        test_precision = result['precision']
-        test_recall = result['recall']
-        test_oversmoothing = result['oversmoothing']
-
+        
         return {
-            'accuracy': test_acc,
-            'f1': test_f1,
-            'precision': test_precision,
-            'recall': test_recall,
-            'oversmoothing': test_oversmoothing
+            'accuracy': result['accuracy'],
+            'f1': result['f1'],
+            'precision': result['precision'],
+            'recall': result['recall'],
+            'oversmoothing': result['oversmoothing']
         }
 
-
     elif method == 'positive_eigenvalues':
-
         trainer_params = config.get('training', {})
         lr = float(trainer_params.get('lr', 0.01))
         weight_decay = float(trainer_params.get('weight_decay', 5e-4))
@@ -169,16 +185,23 @@ def run_experiment(config, run_id=1):
         )
 
         result = train_with_positive_eigenvalues(
-            base_model, data, global_noisy_indices, device,
+            base_model, data_for_training, global_noisy_indices, device,
             epochs=epochs,
             lr=lr,
             weight_decay=weight_decay,
             batch_size=batch_size,
             patience=patience
         )
+        
+        return {
+            'accuracy': result['accuracy'],
+            'f1': result['f1'],
+            'precision': result['precision'],
+            'recall': result['recall'],
+            'oversmoothing': result['oversmoothing']
+        }
 
     elif method == 'gcod':
-
         trainer_params = config.get('training', {})
         lr = float(trainer_params.get('lr', 0.01))
         weight_decay = float(trainer_params.get('weight_decay', 5e-4))
@@ -202,7 +225,7 @@ def run_experiment(config, run_id=1):
         )
 
         result = train_with_gcod(
-            base_model, data, global_noisy_indices, device,
+            base_model, data_for_training, global_noisy_indices, device,
             epochs=epochs,
             lr=lr,
             weight_decay=weight_decay,
@@ -210,9 +233,17 @@ def run_experiment(config, run_id=1):
             u_lr=u_lr,
             patience=patience
         )
+        
+        return {
+            'accuracy': result['accuracy'],
+            'f1': result['f1'],
+            'precision': result['precision'],
+            'recall': result['recall'],
+            'oversmoothing': result['oversmoothing']
+        }
     
     # NRGNN Training
-    if method == 'nrgnn':
+    elif method == 'nrgnn':
         print(f"Run {run_id}: Using NRGNN")
         
         base_model = get_model(
@@ -225,9 +256,9 @@ def run_experiment(config, run_id=1):
             self_loop=config['model'].get('self_loop', True)
         )
         
-        adj = to_scipy_sparse_matrix(data.edge_index, num_nodes=data.x.size(0))
-        features = data.x.to(device)
-        labels = data.y.to(device)
+        adj = to_scipy_sparse_matrix(data_for_training.edge_index, num_nodes=data_for_training.x.size(0))
+        features = data_for_training.x.to(device)
+        labels = data_for_training.y.to(device)
         idx_train = train_mask.nonzero(as_tuple=True)[0].cpu().numpy()
         idx_val = val_mask.nonzero(as_tuple=True)[0].cpu().numpy()
         idx_test = test_mask.nonzero(as_tuple=True)[0].cpu().numpy()
@@ -254,7 +285,7 @@ def run_experiment(config, run_id=1):
         }
 
     # PI-GNN Training
-    if method == 'pi_gnn':
+    elif method == 'pi_gnn':
         print(f"Run {run_id}: Using PI-GNN")
 
         pi_gnn_config = config.get('pi_gnn_params', {})
@@ -298,7 +329,7 @@ def run_experiment(config, run_id=1):
             'self_loop': config['model'].get('self_loop', True)
         }
         
-        test_results = trainer.train_model(pi_gnn_model, data, trainer_model_config, get_model)
+        test_results = trainer.train_model(pi_gnn_model, data_for_training, trainer_model_config, get_model)
         
         return {
             'accuracy': torch.tensor(test_results['accuracy']),
@@ -309,7 +340,7 @@ def run_experiment(config, run_id=1):
         }
 
     # CR-GNN Training
-    if method == 'cr_gnn':
+    elif method == 'cr_gnn':
         print(f"Run {run_id}: Using CR-GNN")
         trainer_params = config.get('cr_gnn_params', {})
         trainer = CRGNNTrainer(
@@ -349,7 +380,7 @@ def run_experiment(config, run_id=1):
             'self_loop': config['model'].get('self_loop', True)
         }
         
-        test_results = trainer.fit(base_model, data, trainer_config, get_model)
+        test_results = trainer.fit(base_model, data_for_training, trainer_config, get_model)
         
         return {
             'accuracy': test_results['accuracy'],
@@ -359,9 +390,8 @@ def run_experiment(config, run_id=1):
             'oversmoothing': test_results['oversmoothing']
         }
 
-
     # LafAK / GradientAttack Training
-    if method == 'lafak':
+    elif method == 'lafak':
         print("Using LafAK / GradientAttack")
         data_for_lafak = data.clone()
         data_for_lafak.y = data.y_original
@@ -424,7 +454,6 @@ def run_experiment(config, run_id=1):
             print(f"GNN Clean accuracy: {results['gnn_clean_acc']:.4f}")
             print(f"GNN Attacked accuracy: {results['gnn_attacked_acc']:.4f}")
             print(f"GNN Attack success: {results['gnn_attack_success']:.4f}")
-
 
             x = torch.tensor(data_dict["_X_obs"], dtype=torch.float)
             num_nodes = x.size(0)
@@ -517,7 +546,7 @@ def run_experiment(config, run_id=1):
             }
 
     # RTGNN Training
-    if method == 'rtgnn':
+    elif method == 'rtgnn':
         print(f"Run {run_id}: Using RTGNN")
         
         class RTGNNConfig:
@@ -537,10 +566,10 @@ def run_experiment(config, run_id=1):
         
         rtgnn_args = RTGNNConfig(config)
         
-        features = data.x.cpu().numpy()
-        labels = data.y_noisy.cpu().numpy()
+        features = data_for_training.x.cpu().numpy()
+        labels = data_for_training.y.cpu().numpy()
         
-        adj = to_scipy_sparse_matrix(data.edge_index, num_nodes=data.num_nodes)
+        adj = to_scipy_sparse_matrix(data_for_training.edge_index, num_nodes=data_for_training.num_nodes)
         adj = adj + adj.T
         adj = adj.tolil()
         adj[adj > 1] = 1
@@ -554,12 +583,12 @@ def run_experiment(config, run_id=1):
         features = r_mat_inv.dot(features)
         features = torch.FloatTensor(np.array(features.todense()))
         
-        if hasattr(data, 'train_mask'):
-            idx_train = data.train_mask.nonzero(as_tuple=True)[0].cpu().numpy().tolist()
-            idx_val = data.val_mask.nonzero(as_tuple=True)[0].cpu().numpy().tolist()
-            idx_test = data.test_mask.nonzero(as_tuple=True)[0].cpu().numpy().tolist()
+        if hasattr(data_for_training, 'train_mask'):
+            idx_train = data_for_training.train_mask.nonzero(as_tuple=True)[0].cpu().numpy().tolist()
+            idx_val = data_for_training.val_mask.nonzero(as_tuple=True)[0].cpu().numpy().tolist()
+            idx_test = data_for_training.test_mask.nonzero(as_tuple=True)[0].cpu().numpy().tolist()
         else:
-            num_nodes = data.num_nodes
+            num_nodes = data_for_training.num_nodes
             idx_train = list(range(min(140, num_nodes // 5)))
             idx_val = list(range(len(idx_train), min(len(idx_train) + 500, num_nodes // 2)))
             idx_test = list(range(max(len(idx_train) + len(idx_val), num_nodes // 2), num_nodes))
@@ -569,7 +598,7 @@ def run_experiment(config, run_id=1):
         rtgnn_model = RTGNN(nfeat, nclass, rtgnn_args, device, gnn_type=rtgnn_backbone).to(device)
                 
         rtgnn_model.fit(features, adj, labels, idx_train, idx_val, idx_test)
-        
+
         clean_labels = data.y_original.cpu().numpy()
         test_results = rtgnn_model.test(features, clean_labels, idx_test)
 
@@ -587,10 +616,11 @@ def run_experiment(config, run_id=1):
             'oversmoothing': test_results['oversmoothing']
         }
     
-    # GraphCleaner Training
-    if method == 'graphcleaner':
+    # GraphCleaner Training 
+    elif method == 'graphcleaner':
         print(f"Run {run_id}: Using GraphCleaner")
-        data_for_detection = data.clone()
+        data_for_detection = data_for_training.clone()
+        
         test_labels = data.y_original[data.test_mask]
         test_features = data.x[data.test_mask] if config['noise']['type'] == 'instance' else None
         test_indices = data.test_mask.nonzero(as_tuple=True)[0]
@@ -606,9 +636,7 @@ def run_experiment(config, run_id=1):
             debug=True
         )
         
-        data_for_detection.y_noisy = data.y_noisy.clone()
-        data_for_detection.y_noisy[data.test_mask] = noisy_test_labels
-        data_for_detection.y = data_for_detection.y_noisy.clone()
+        data_for_detection.y[data.test_mask] = noisy_test_labels
         
         global_noisy_test_indices = test_indices[relative_noisy_test_indices]
         all_noisy_indices = torch.cat([global_noisy_indices, global_noisy_test_indices])
@@ -639,7 +667,7 @@ def run_experiment(config, run_id=1):
         return detection_results
     
     # UnionNET Training
-    if method == 'unionnet':
+    elif method == 'unionnet':
         print(f"Run {run_id}: Using UnionNET")
         gnn_model = get_model(
             model_name=config['model']['name'],
@@ -665,7 +693,7 @@ def run_experiment(config, run_id=1):
             'feat_norm': config['unionnet_params'].get('feat_norm', True)
         }
 
-        unionnet_trainer = UnionNET(gnn_model, data, num_classes, unionnet_config)
+        unionnet_trainer = UnionNET(gnn_model, data_for_training, num_classes, unionnet_config)
         test_results = unionnet_trainer.train_model(enable_debug=True)
         
         return {
@@ -677,7 +705,7 @@ def run_experiment(config, run_id=1):
         }
 
     # GNN Cleaner Training
-    if method == 'gnn_cleaner':
+    elif method == 'gnn_cleaner':
         print(f"Run {run_id}: Using GNN Cleaner")
         gnn_model = get_model(
             model_name=config['model']['name'],
@@ -702,13 +730,13 @@ def run_experiment(config, run_id=1):
             'patience': config.get('patience', 10),
         }
         
-        trainer = GNNCleanerTrainer(gnn_cleaner_config, data, device, num_classes, gnn_model)
+        trainer = GNNCleanerTrainer(gnn_cleaner_config, data_for_training, device, num_classes, gnn_model)
         result = trainer.train(debug=True)
         
         return result
     
     # ERASE Training
-    if method == 'erase':
+    elif method == 'erase':
         print(f"Run {run_id}: Using ERASE")
         erase_config = {
             'seed': seed,
@@ -736,12 +764,12 @@ def run_experiment(config, run_id=1):
         }
         
         trainer = ERASETrainer(erase_config, device, num_classes, get_model)
-        result = trainer.train(data, debug=True)
+        result = trainer.train(data_for_training, debug=True)
         
         return result
     
     # GNNGuard Training
-    if method == 'gnnguard':
+    elif method == 'gnnguard':
         print(f"Run {run_id}: Using GNNGuard")
         gnnguard_args = {
             'dropout': config.get('dropout', 0.5),
@@ -761,21 +789,21 @@ def run_experiment(config, run_id=1):
             **gnnguard_args
         ).to(device)
         
-        adj_matrix = to_scipy_sparse_matrix(data.edge_index, num_nodes=data.num_nodes)
-        if hasattr(data, 'train_mask'):
-            idx_train = data.train_mask.nonzero(as_tuple=True)[0].cpu().numpy()
-            idx_val = data.val_mask.nonzero(as_tuple=True)[0].cpu().numpy()
-            idx_test = data.test_mask.nonzero(as_tuple=True)[0].cpu().numpy()
+        adj_matrix = to_scipy_sparse_matrix(data_for_training.edge_index, num_nodes=data_for_training.num_nodes)
+        if hasattr(data_for_training, 'train_mask'):
+            idx_train = data_for_training.train_mask.nonzero(as_tuple=True)[0].cpu().numpy()
+            idx_val = data_for_training.val_mask.nonzero(as_tuple=True)[0].cpu().numpy()
+            idx_test = data_for_training.test_mask.nonzero(as_tuple=True)[0].cpu().numpy()
         else:
-            num_nodes = data.num_nodes
+            num_nodes = data_for_training.num_nodes
             idx_train = np.arange(min(140, num_nodes // 5))
             idx_val = np.arange(len(idx_train), min(len(idx_train) + 500, num_nodes // 2))
             idx_test = np.arange(max(len(idx_train) + len(idx_val), num_nodes // 2), num_nodes)
         
         gnnguard_model.fit(
-            features=data.x,
+            features=data_for_training.x,
             adj=adj_matrix,
-            labels=data.y_noisy,
+            labels=data_for_training.y,
             idx_train=idx_train,
             idx_val=idx_val,
             idx_test=idx_test,

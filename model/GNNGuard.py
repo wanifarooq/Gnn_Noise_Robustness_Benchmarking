@@ -6,7 +6,7 @@ import torch.optim as optim
 from torch_geometric.nn import GCNConv
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.preprocessing import normalize
-from scipy.sparse import lil_matrix, diags
+from scipy.sparse import lil_matrix
 import scipy.sparse as sp
 import numpy as np
 from copy import deepcopy

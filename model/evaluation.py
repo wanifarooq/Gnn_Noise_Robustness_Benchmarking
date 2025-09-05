@@ -3,7 +3,6 @@ import numpy as np
 from torch_geometric.utils import to_dense_adj
 from scipy.linalg import svd
 from scipy.sparse.linalg import eigsh
-import warnings
 
 class OversmoothingMetrics:
     
