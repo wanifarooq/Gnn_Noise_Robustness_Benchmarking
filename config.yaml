@@ -6,8 +6,8 @@ dataset:
   root: /data
 
 noise:
-  type: clean # clean, uniform, uniform_simple, random, pair, random_pair, flip, uniform_mix, instance, deterministic
-  rate: 0
+  type: instance # clean, uniform, uniform_simple, random, pair, random_pair, flip, uniform_mix, instance, deterministic
+  rate: 0.4
   seed: 42
 
 model:
@@ -22,10 +22,10 @@ model:
   concat: true
   
 training:
-  method: nrgnn # standard, ncod, positive_eigenvalues, gcod, nrgnn, pi_gnn, cr_gnn, lafak, rtgnn, graphcleaner, unionnet, gnn_cleaner, erase, gnnguard
+  method: rtgnn # standard, ncod, positive_eigenvalues, gcod, nrgnn, pi_gnn, cr_gnn, lafak, rtgnn, graphcleaner, unionnet, gnn_cleaner, erase, gnnguard
   lr: 0.001
   weight_decay: 5e-4
-  epochs: 5000
+  epochs: 20
   patience: 200
 
 # Standard training parameters
@@ -90,12 +90,7 @@ lafak_defense_params:
 
 # RTGNN parameters
 rtgnn_params:
-  epochs: 200
-  hidden: 128
   edge_hidden: 64
-  dropout: 0.5
-  lr: 0.001
-  weight_decay: 5e-4
   co_lambda: 0.1
   alpha: 0.3
   th: 0.8

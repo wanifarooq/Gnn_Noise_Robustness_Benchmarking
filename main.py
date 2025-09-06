@@ -549,58 +549,96 @@ def run_experiment(config, run_id=1):
     elif method == 'rtgnn':
         print(f"Run {run_id}: Using RTGNN")
         
-        class RTGNNConfig:
+        class RTGNNTrainingConfig:
             def __init__(self, config_dict):
-                self.epochs = config_dict.get('total_epochs', 200)
-                self.hidden = config_dict.get('hidden_channels', 64)
-                self.edge_hidden = config_dict.get('edge_hidden', 64)
-                self.dropout = config_dict.get('dropout', 0.5)
-                self.lr = config_dict.get('lr', 0.01)
-                self.weight_decay = config_dict.get('weight_decay', 5e-4)
-                self.co_lambda = config_dict.get('co_lambda', 0.1)
-                self.alpha = config_dict.get('alpha', 0.5)
-                self.th = config_dict.get('th', 0.8)
-                self.K = config_dict.get('K', 5)
-                self.tau = config_dict.get('tau', 0.1)
-                self.n_neg = config_dict.get('n_neg', 5)
+                rtgnn_params = config_dict.get('rtgnn_params', {})
+                training_params = config_dict.get('training', {})
+                model_params = config_dict.get('model', {})
+                
+                self.epochs = training_params.get('epochs', 200)
+                self.lr = training_params.get('lr', 0.001)  
+                self.weight_decay = float(training_params.get('weight_decay', 5e-4))
+                self.patience = training_params.get('patience', 8)
+                self.dropout = model_params.get('dropout', 0.5)
+
+                self.hidden = model_params.get('hidden', 128)
+                self.edge_hidden = rtgnn_params.get('edge_hidden', 64)
+                self.n_layers = model_params.get('n_layers', 2)
+                self.self_loop = model_params.get('self_loop', True)
+                self.mlp_layers = model_params.get('mlp_layers', 2)
+                self.train_eps = model_params.get('train_eps', True)
+                self.heads = model_params.get('heads', 8)
+                
+                self.co_lambda = rtgnn_params.get('co_lambda', 0.1)
+                self.alpha = rtgnn_params.get('alpha', 0.3)
+                self.th = rtgnn_params.get('th', 0.8)
+                self.K = rtgnn_params.get('K', 50)
+                self.tau = rtgnn_params.get('tau', 0.05)
+                self.n_neg = rtgnn_params.get('n_neg', 100)
         
-        rtgnn_args = RTGNNConfig(config)
+        rtgnn_training_config = RTGNNTrainingConfig(config)
         
-        features = data_for_training.x.cpu().numpy()
-        labels = data_for_training.y.cpu().numpy()
+        node_features = data_for_training.x.cpu().numpy()
+        node_labels = data_for_training.y.cpu().numpy()
         
-        adj = to_scipy_sparse_matrix(data_for_training.edge_index, num_nodes=data_for_training.num_nodes)
-        adj = adj + adj.T
-        adj = adj.tolil()
-        adj[adj > 1] = 1
-        adj.setdiag(0)
+        print(f"[DEBUG] Checking label corruption in RTGNN training:")
+        if hasattr(data_for_training, 'y_original'):
+            corrupted_count = (data_for_training.y[train_mask] != data_for_training.y_original[train_mask]).sum().item()
+            print(f"[DEBUG] Training labels corrupted: {corrupted_count}/{train_mask.sum().item()} nodes")
+            val_clean = (data_for_training.y[val_mask] == data_for_training.y_original[val_mask]).all().item()
+            test_clean = (data_for_training.y[test_mask] == data_for_training.y_original[test_mask]).all().item()
+            print(f"[DEBUG] Validation labels clean: {val_clean}, Test labels clean: {test_clean}")
         
-        features = sp.csr_matrix(features)
-        rowsum = np.array(features.sum(1))
-        r_inv = np.power(rowsum, -1).flatten()
-        r_inv[np.isinf(r_inv)] = 0.
-        r_mat_inv = sp.diags(r_inv)
-        features = r_mat_inv.dot(features)
-        features = torch.FloatTensor(np.array(features.todense()))
+        adjacency_matrix = to_scipy_sparse_matrix(data_for_training.edge_index, num_nodes=data_for_training.num_nodes)
+        adjacency_matrix = adjacency_matrix + adjacency_matrix.T
+        adjacency_matrix = adjacency_matrix.tolil()
+        adjacency_matrix[adjacency_matrix > 1] = 1
+        adjacency_matrix.setdiag(0)
         
+        sparse_features = sp.csr_matrix(node_features)
+        row_sums = np.array(sparse_features.sum(1))
+        reciprocal_row_sums = np.power(row_sums, -1).flatten()
+        reciprocal_row_sums[np.isinf(reciprocal_row_sums)] = 0.
+        row_normalization_matrix = sp.diags(reciprocal_row_sums)
+        normalized_features = row_normalization_matrix.dot(sparse_features)
+        normalized_features = torch.FloatTensor(np.array(normalized_features.todense()))
+
         if hasattr(data_for_training, 'train_mask'):
-            idx_train = data_for_training.train_mask.nonzero(as_tuple=True)[0].cpu().numpy().tolist()
-            idx_val = data_for_training.val_mask.nonzero(as_tuple=True)[0].cpu().numpy().tolist()
-            idx_test = data_for_training.test_mask.nonzero(as_tuple=True)[0].cpu().numpy().tolist()
+            train_node_indices = data_for_training.train_mask.nonzero(as_tuple=True)[0].cpu().numpy().tolist()
+            val_node_indices = data_for_training.val_mask.nonzero(as_tuple=True)[0].cpu().numpy().tolist()
+            test_node_indices = data_for_training.test_mask.nonzero(as_tuple=True)[0].cpu().numpy().tolist()
         else:
             num_nodes = data_for_training.num_nodes
-            idx_train = list(range(min(140, num_nodes // 5)))
-            idx_val = list(range(len(idx_train), min(len(idx_train) + 500, num_nodes // 2)))
-            idx_test = list(range(max(len(idx_train) + len(idx_val), num_nodes // 2), num_nodes))
+            train_node_indices = list(range(min(140, num_nodes // 5)))
+            val_node_indices = list(range(len(train_node_indices), min(len(train_node_indices) + 500, num_nodes // 2)))
+            test_node_indices = list(range(max(len(train_node_indices) + len(val_node_indices), num_nodes // 2), num_nodes))
         
-        nfeat, nclass = features.shape[1], len(np.unique(labels))
-        rtgnn_backbone = config.get('rtgnn_params', {}).get('gnn_type', config['model']['name'].lower())
-        rtgnn_model = RTGNN(nfeat, nclass, rtgnn_args, device, gnn_type=rtgnn_backbone).to(device)
+        num_input_features, num_classes = normalized_features.shape[1], len(np.unique(node_labels))
+        rtgnn_backbone_type = config.get('rtgnn_params', {}).get('gnn_type', config['model']['name'].lower())
+        
+        rtgnn_trainer = RTGNN(
+            input_features=num_input_features, 
+            num_classes=num_classes, 
+            training_config=rtgnn_training_config, 
+            device=device, 
+            gnn_backbone=rtgnn_backbone_type
+        ).to(device)
                 
-        rtgnn_model.fit(features, adj, labels, idx_train, idx_val, idx_test)
-
+        rtgnn_trainer.train_model(
+            node_features=normalized_features, 
+            adjacency_matrix=adjacency_matrix, 
+            node_labels=node_labels,
+            train_indices=train_node_indices, 
+            val_indices=val_node_indices, 
+            test_indices=test_node_indices
+        )
+        
         clean_labels = data.y_original.cpu().numpy()
-        test_results = rtgnn_model.test(features, clean_labels, idx_test)
+        test_results = rtgnn_trainer.evaluate_final_performance(
+            node_features=normalized_features, 
+            node_labels=clean_labels,
+            test_indices=test_node_indices
+        )
 
         print(f"RTGNN Training completed!")
         print(f"Test Accuracy: {test_results['accuracy']:.4f}")
@@ -609,10 +647,10 @@ def run_experiment(config, run_id=1):
         print(f"Test Recall: {test_results['recall']:.4f}")
 
         return {
-            'accuracy': test_results['accuracy'],
-            'f1': test_results['f1'],
-            'precision': test_results['precision'],
-            'recall': test_results['recall'],
+            'accuracy': torch.tensor(test_results['accuracy']),
+            'f1': torch.tensor(test_results['f1']),
+            'precision': torch.tensor(test_results['precision']),
+            'recall': torch.tensor(test_results['recall']),
             'oversmoothing': test_results['oversmoothing']
         }
     
@@ -868,7 +906,7 @@ if __name__ == "__main__":
     }
 
     for run in range(1, 6):
-        try:
+
             print(f"\nRun {run}/5:")
             test_metrics = run_experiment(config, run_id=run)
             test_acc = test_metrics['accuracy']
@@ -888,11 +926,7 @@ if __name__ == "__main__":
             print(f"Run {run} completed - Test Acc: {test_acc:.4f}, F1: {test_f1:.4f}, "
                   f"Precision: {test_precision:.4f}, Recall: {test_recall:.4f}")
             
-        except Exception as e:
-            print(f"Run {run} failed with error: {str(e)}")
-            continue
 
-        print("-"*50)
         
     if test_accuracies:
         mean_std_dict = {
