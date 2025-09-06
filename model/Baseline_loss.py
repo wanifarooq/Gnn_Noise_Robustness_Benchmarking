@@ -1,5 +1,6 @@
 import copy
 import random
+import math
 import numpy as np
 import torch
 import torch.nn as nn
@@ -206,7 +207,6 @@ class NCODLossModule(nn.Module):
                  consistency_ratio=0, balance_ratio=0, feature_dim=64, total_epochs=100):
         super().__init__()
         
-        # Basic configuration
         self.num_classes = num_classes
         self.device = device
         self.num_samples = num_samples
@@ -214,15 +214,16 @@ class NCODLossModule(nn.Module):
         self.consistency_ratio = consistency_ratio
         self.balance_ratio = balance_ratio
         
+
         self.uncertainty_params = nn.Parameter(torch.empty(num_samples, 1, dtype=torch.float32))
         self._initialize_uncertainty_params(mean=1e-8, std=1e-9)
-
+        
         self.is_first_forward = True
         self.previous_features = torch.rand((num_samples, feature_dim), device=device)
         self.class_prototypes = torch.rand((num_classes, feature_dim), device=device)
         self.sample_predictions = torch.zeros((num_samples, 1), device=device)
         self.sample_weights = torch.zeros((num_samples, 1), device=device)
-        
+
         self.sample_labels = sample_labels
         self.class_sample_indices = [np.where(self.sample_labels == i)[0] for i in range(num_classes)]
         self.shuffled_class_indices = copy.deepcopy(self.class_sample_indices)
@@ -230,13 +231,12 @@ class NCODLossModule(nn.Module):
             random.shuffle(class_indices)
 
     def _initialize_uncertainty_params(self, mean=1e-8, std=1e-9):
-        # Initialize uncertainty parameters
+        #Initialize uncertainty parameters
         torch.nn.init.normal_(self.uncertainty_params, mean=mean, std=std)
 
     def forward(self, sample_indices, model_outputs, ground_truth_labels, feature_representations, 
                 training_flag, current_epoch, training_accuracy=None):
 
-        # Handle augmented data
         if len(model_outputs) > len(sample_indices):
             primary_output, augmented_output = torch.chunk(model_outputs, 2)
             primary_features, augmented_features = torch.chunk(feature_representations, 2)
@@ -250,7 +250,9 @@ class NCODLossModule(nn.Module):
 
         if training_flag == 0:
             if self.is_first_forward:
-                self._update_class_prototypes(selection_percentage=100)
+                # Dynamic percentage based on epoch
+                selection_percentage = math.ceil((50 - (50 / self.total_epochs) * current_epoch) + 50)
+                self._update_class_prototypes(selection_percentage=selection_percentage)
             self._prepare_prototype_matrix()
             self.is_first_forward = True
 
@@ -264,20 +266,19 @@ class NCODLossModule(nn.Module):
         
         # Compute MSE reconstruction loss
         mse_loss = self._compute_reconstruction_loss(
-            primary_output, ground_truth_labels, batch_uncertainty, batch_weights
+            primary_output, ground_truth_labels, batch_uncertainty, batch_weights,
+            sample_indices
         )
         
         # Compute KL divergence loss
-        kl_loss = self._compute_kl_loss(primary_output, ground_truth_labels, sample_indices)
+        kl_loss = self._compute_kl_divergence_loss(primary_output, ground_truth_labels, sample_indices)
         
         total_loss = similarity_loss + mse_loss + kl_loss
 
-        # Add balance regularization if specified
         if self.balance_ratio > 0:
             balance_loss = self._compute_balance_loss(primary_output, eps)
             total_loss += self.balance_ratio * balance_loss
 
-        # Add consistency loss for augmented data if specified
         if len(model_outputs) > len(sample_indices) and self.consistency_ratio > 0:
             consistency_loss = self._compute_consistency_loss(primary_output, augmented_output)
             total_loss += self.consistency_ratio * torch.mean(consistency_loss)
@@ -285,12 +286,11 @@ class NCODLossModule(nn.Module):
         return total_loss
 
     def _update_class_prototypes(self, selection_percentage=100):
-        #Update class prototypes using most confident samples
+
         for class_idx in range(len(self.class_sample_indices)):
             class_uncertainties = self.uncertainty_params.detach()[self.class_sample_indices[class_idx]]
             num_samples_to_select = int((len(class_uncertainties) / 100) * selection_percentage)
             
-            # Select samples
             _, selected_indices = torch.topk(class_uncertainties, num_samples_to_select, 
                                            largest=False, dim=0)
             
@@ -314,6 +314,7 @@ class NCODLossModule(nn.Module):
         feature_norms = features.detach().norm(p=2, dim=1, keepdim=True)
         normalized_features = features.detach().div(feature_norms)
         
+        # Compute similarity
         similarities = torch.mm(normalized_features, self.normalized_prototypes_transpose)
         masked_similarities = similarities * labels
         
@@ -332,24 +333,21 @@ class NCODLossModule(nn.Module):
         
         return loss
 
-    def _compute_reconstruction_loss(self, model_outputs, labels, uncertainty, weights):
-        #Compute MSE reconstruction loss
+    def _compute_reconstruction_loss(self, model_outputs, labels, uncertainty, weights, sample_indices):
         hard_predictions = self._convert_soft_to_hard_labels(model_outputs.detach())
         reconstruction_target = hard_predictions + (weights * uncertainty)
         mse_loss = F.mse_loss(reconstruction_target, labels, reduction='sum') / len(labels)
         
-        batch_indices = torch.arange(len(labels))
-        self.sample_predictions[batch_indices] = torch.sum(
+        self.sample_predictions[sample_indices] = torch.sum(
             hard_predictions * labels, dim=1
         ).view(-1, 1)
         
         return mse_loss
 
-    def _compute_kl_loss(self, model_outputs, labels, sample_indices):
-        #Compute KL divergence loss
+    def _compute_kl_divergence_loss(self, model_outputs, labels, sample_indices):
+        # Compute KL divergence loss
         class_predictions = torch.sum(model_outputs * labels, dim=1)
         
-        # Compute KL divergence
         kl_loss = F.kl_div(
             F.log_softmax(class_predictions), 
             F.softmax(-self.uncertainty_params[sample_indices].detach().view(-1))
@@ -358,7 +356,7 @@ class NCODLossModule(nn.Module):
         return kl_loss
 
     def _compute_balance_loss(self, model_outputs, eps):
-        #Compute balance regularization loss
+
         avg_predictions = torch.mean(F.softmax(model_outputs, dim=1), dim=0)
         uniform_prior = torch.ones_like(avg_predictions) / self.num_classes
         
@@ -376,7 +374,6 @@ class NCODLossModule(nn.Module):
         return torch.sum(consistency_kl, dim=1)
 
     def _convert_soft_to_hard_labels(self, predictions):
-
         with torch.no_grad():
             batch_size = len(predictions)
             hard_labels = torch.zeros(batch_size, self.num_classes).to(self.device)
@@ -397,7 +394,6 @@ class NCODTrainer:
         self.device = device
         self.debug = debug
         
-        # Training parameters
         self.learning_rate = learning_rate
         self.weight_decay = weight_decay
         self.total_epochs = total_epochs
@@ -428,7 +424,6 @@ class NCODTrainer:
             total_epochs=total_epochs
         ).to(device)
         
-        # Initialize oversmoothing evaluator
         try:
             self.oversmoothing_evaluator = OversmoothingMetrics(device=device)
             self.compute_oversmoothing = _compute_oversmoothing_for_mask
@@ -437,7 +432,7 @@ class NCODTrainer:
             self.oversmoothing_evaluator = None
             self.compute_oversmoothing = None
         
-        # Initialize Dirichlet energy computation
+        # Initialize Dirichlet energy
         try:
             self.compute_dirichlet_energy = dirichlet_energy
         except ImportError:
@@ -475,6 +470,7 @@ class NCODTrainer:
         dirichlet_loss = self.compute_dirichlet_energy(model_outputs, self.data.edge_index)
         total_loss = ncod_loss + self.dirichlet_lambda * dirichlet_loss
         
+        # Backward pass
         total_loss.backward()
         self.optimizer.step()
         
@@ -504,7 +500,7 @@ class NCODTrainer:
             
             val_dirichlet_loss = self.compute_dirichlet_energy(model_outputs, self.data.edge_index)
             val_total_loss = val_ncod_loss + self.dirichlet_lambda * val_dirichlet_loss
-
+            
             predictions = model_outputs.argmax(dim=1)
             train_indices = self.data.train_mask.nonzero(as_tuple=True)[0]
             
@@ -546,7 +542,7 @@ class NCODTrainer:
         for epoch in range(1, self.total_epochs + 1):
 
             train_loss, ncod_loss, dirichlet_loss = self.train_single_epoch(epoch)
-            
+
             eval_metrics = self.evaluate(epoch)
             
             # Early stopping
@@ -556,7 +552,7 @@ class NCODTrainer:
                 self.epochs_without_improvement = 0
             else:
                 self.epochs_without_improvement += 1
-
+            
             if self.epochs_without_improvement >= self.patience:
                 if self.debug:
                     print(f"Early stopping at epoch {epoch}")
@@ -584,7 +580,6 @@ class NCODTrainer:
                   f"Train Erank: {train_os.get('Erank', 0):.4f}, Val Erank: {val_os.get('Erank', 0):.4f}")
 
     def _final_evaluation(self):
-
         self.model.eval()
         
         with torch.no_grad():

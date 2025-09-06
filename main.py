@@ -11,7 +11,7 @@ from model.Positive_Eigenvalues import train_with_positive_eigenvalues
 from model.GCOD_loss import train_with_gcod
 from model.NRGNN import NRGNN
 from model.PI_GNN import PiGnnModel, PiGnnTrainer, GraphLinkDecoder
-from model.CR_GNN import CRGNNTrainer
+from model.CR_GNN import CRGNNModel
 from model.LafAK import Attack, prepare_simpledata_attrs, resetBinaryClass_init, CommunityDefense
 from model.RTGNN import RTGNN
 from model.GraphCleaner import GraphCleanerDetector, get_noisy_ground_truth
@@ -39,12 +39,12 @@ def verify_label_distribution(data, train_mask, val_mask, test_mask, run_id, met
     if hasattr(data, 'y_original'):
 
         train_corrupted = (data.y[train_mask] != data.y_original[train_mask]).sum()
-        print(f"  Training labels corrupted: {train_corrupted}/{train_mask.sum()} nodes")
+        print(f"Training labels corrupted: {train_corrupted}/{train_mask.sum()} nodes")
         
         val_clean = (data.y[val_mask] == data.y_original[val_mask]).all()
         test_clean = (data.y[test_mask] == data.y_original[test_mask]).all()
-        print(f"  Val labels clean: {val_clean}")
-        print(f"  Test labels clean: {test_clean}")
+        print(f"Val labels clean: {val_clean}")
+        print(f"Test labels clean: {test_clean}")
 
 def run_experiment(config, run_id=1):
     seed = config['seed'] + run_id * 100
@@ -349,20 +349,23 @@ def run_experiment(config, run_id=1):
     # CR-GNN Training
     elif method == 'cr_gnn':
         print(f"Run {run_id}: Using CR-GNN")
-        trainer_params = config.get('cr_gnn_params', {})
-        trainer = CRGNNTrainer(
+        
+        training_params = config['training']
+        cr_gnn_specific_params = config.get('cr_gnn_params', {})
+        
+        combined_params = {
+            'hidden_channels': config['model'].get('hidden_channels', 64),
+            'lr': training_params.get('lr', 0.001),
+            'weight_decay': float(training_params.get('weight_decay', 5e-4)),
+            'epochs': training_params.get('epochs', 200),
+            'patience': training_params.get('patience', 20),
+        }
+        
+        combined_params.update(cr_gnn_specific_params)
+        
+        cr_gnn_model = CRGNNModel(
             device=device,
-            hidden_channels=config['model'].get('hidden_channels', 64),
-            lr=float(trainer_params.get('lr', 0.001)),
-            weight_decay=float(trainer_params.get('weight_decay', 5e-4)),
-            epochs=int(trainer_params.get('epochs', 200)),
-            patience=int(trainer_params.get('patience', 20)),
-            T=float(trainer_params.get('T', 0.5)),
-            tau=float(trainer_params.get('tau', 0.5)),
-            p=float(trainer_params.get('p', 0.5)),
-            alpha=float(trainer_params.get('alpha', 1.0)),
-            beta=float(trainer_params.get('beta', 0.0)),
-            debug=True
+            **combined_params
         )
         
         model_params = {k: v for k, v in config['model'].items() if k not in ['name']}
@@ -375,7 +378,7 @@ def run_experiment(config, run_id=1):
             **model_params
         )
         
-        trainer_config = {
+        training_config = {
             'model_name': config['model']['name'],
             'hidden_channels': config['model'].get('hidden_channels', 64),
             'n_layers': config['model'].get('n_layers', 2),
@@ -387,13 +390,13 @@ def run_experiment(config, run_id=1):
             'self_loop': config['model'].get('self_loop', True)
         }
         
-        test_results = trainer.fit(base_model, data_for_training, trainer_config, get_model)
+        test_results = cr_gnn_model.train_model(base_model, data_for_training, training_config, get_model)
         
         return {
-            'accuracy': test_results['accuracy'],
-            'f1': test_results['f1'],
-            'precision': test_results['precision'],
-            'recall': test_results['recall'],
+            'accuracy': torch.tensor(test_results['accuracy']),
+            'f1': torch.tensor(test_results['f1']),
+            'precision': torch.tensor(test_results['precision']),
+            'recall': torch.tensor(test_results['recall']),
             'oversmoothing': test_results['oversmoothing']
         }
 
@@ -913,7 +916,7 @@ if __name__ == "__main__":
     }
 
     for run in range(1, 6):
-
+        try:
             print(f"\nRun {run}/5:")
             test_metrics = run_experiment(config, run_id=run)
             test_acc = test_metrics['accuracy']
@@ -933,7 +936,11 @@ if __name__ == "__main__":
             print(f"Run {run} completed - Test Acc: {test_acc:.4f}, F1: {test_f1:.4f}, "
                   f"Precision: {test_precision:.4f}, Recall: {test_recall:.4f}")
             
+        except Exception as e:
+            print(f"Run {run} failed with error: {str(e)}")
+            continue
 
+        print("-"*50)
         
     if test_accuracies:
         mean_std_dict = {

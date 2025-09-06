@@ -22,7 +22,7 @@ model:
   concat: true
   
 training:
-  method: rtgnn # standard, ncod, positive_eigenvalues, gcod, nrgnn, pi_gnn, cr_gnn, lafak, rtgnn, graphcleaner, unionnet, gnn_cleaner, erase, gnnguard
+  method: cr_gnn # standard, ncod, positive_eigenvalues, gcod, nrgnn, pi_gnn, cr_gnn, lafak, rtgnn, graphcleaner, unionnet, gnn_cleaner, erase, gnnguard
   lr: 0.001
   weight_decay: 5e-4
   epochs: 20
@@ -65,16 +65,11 @@ pi_gnn_params:
 
 # CR-GNN parameters
 cr_gnn_params:
-  epochs: 400
-  patience: 50
-  lr: 0.01
-  weight_decay: 1e-3
   T: 2
   tau: 0.6
   p: 0.9
   alpha: 0.2
   beta: 0.9
-  debug: true
 
 # LafAK parameters
 lafak_params:
