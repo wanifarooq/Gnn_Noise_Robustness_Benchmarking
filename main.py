@@ -6,7 +6,7 @@ import yaml
 
 from utilities import setup_seed_device, load_dataset, get_model
 from utilities import label_process
-from model.Baseline_loss import train_with_standard_loss, train_with_ncod
+from model.Baseline_loss import train_with_standard_loss, NCODTrainer
 from model.Positive_Eigenvalues import train_with_positive_eigenvalues
 from model.GCOD_loss import train_with_gcod
 from model.NRGNN import NRGNN
@@ -145,14 +145,21 @@ def run_experiment(config, run_id=1):
             **model_params
         )
 
-        result = train_with_ncod(
-            base_model, data_for_training, global_noisy_indices, device,
-            total_epochs=epochs,
-            lr=lr,
+        ncod_trainer = NCODTrainer(
+            model=base_model,
+            data=data_for_training,
+            noisy_indices=global_noisy_indices,
+            device=device,
+            num_classes=num_classes,
+            learning_rate=lr,
             weight_decay=weight_decay,
-            lambda_dir=lambda_dir,
-            patience=patience
+            total_epochs=epochs,
+            dirichlet_lambda=lambda_dir,
+            patience=patience,
+            debug=True
         )
+        
+        result = ncod_trainer.train_full()
         
         return {
             'accuracy': result['accuracy'],

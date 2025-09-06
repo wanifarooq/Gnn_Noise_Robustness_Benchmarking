@@ -200,266 +200,478 @@ def train_with_standard_loss(
 
     return results
 
-cross_entropy_val = nn.CrossEntropyLoss
-mean = 1e-8
-std = 1e-9
+class NCODLossModule(nn.Module):
 
-class ncodLoss(nn.Module):
-    def __init__(self, sample_labels, device, num_examp=50000, num_classes=100, ratio_consistency=0, ratio_balance=0, encoder_features=64, total_epochs=100):
+    def __init__(self, sample_labels, device, num_samples=50000, num_classes=100, 
+                 consistency_ratio=0, balance_ratio=0, feature_dim=64, total_epochs=100):
         super().__init__()
+        
+        # Basic configuration
         self.num_classes = num_classes
         self.device = device
-        self.USE_CUDA = torch.cuda.is_available()
-        self.num_examp = num_examp
+        self.num_samples = num_samples
         self.total_epochs = total_epochs
-        self.ratio_consistency = ratio_consistency
-        self.ratio_balance = ratio_balance
-        self.u = nn.Parameter(torch.empty(num_examp, 1, dtype=torch.float32))
-        self.init_param(mean=mean, std=std)
-        self.beginning = True
-        self.prevSimilarity = torch.rand((num_examp, encoder_features), device=device)
-        self.masterVector = torch.rand((num_classes, encoder_features), device=device)
-        self.take = torch.zeros((num_examp, 1), device=device)
-        self.weight = torch.zeros((num_examp, 1), device=device)
+        self.consistency_ratio = consistency_ratio
+        self.balance_ratio = balance_ratio
+        
+        self.uncertainty_params = nn.Parameter(torch.empty(num_samples, 1, dtype=torch.float32))
+        self._initialize_uncertainty_params(mean=1e-8, std=1e-9)
+
+        self.is_first_forward = True
+        self.previous_features = torch.rand((num_samples, feature_dim), device=device)
+        self.class_prototypes = torch.rand((num_classes, feature_dim), device=device)
+        self.sample_predictions = torch.zeros((num_samples, 1), device=device)
+        self.sample_weights = torch.zeros((num_samples, 1), device=device)
+        
         self.sample_labels = sample_labels
-        self.bins = [np.where(self.sample_labels == i)[0] for i in range(num_classes)]
-        self.shuffledbins = copy.deepcopy(self.bins)
-        for sublist in self.shuffledbins:
-            random.shuffle(sublist)
+        self.class_sample_indices = [np.where(self.sample_labels == i)[0] for i in range(num_classes)]
+        self.shuffled_class_indices = copy.deepcopy(self.class_sample_indices)
+        for class_indices in self.shuffled_class_indices:
+            random.shuffle(class_indices)
 
-    def init_param(self, mean=1e-8, std=1e-9):
-        torch.nn.init.normal_(self.u, mean=mean, std=std)
+    def _initialize_uncertainty_params(self, mean=1e-8, std=1e-9):
+        # Initialize uncertainty parameters
+        torch.nn.init.normal_(self.uncertainty_params, mean=mean, std=std)
 
-    def forward(self, index, outputs, label, out, flag, epoch, train_acc_cater):
-        if len(outputs) > len(index):
-            output, output2 = torch.chunk(outputs, 2)
-            out1, out2 = torch.chunk(out, 2)
+    def forward(self, sample_indices, model_outputs, ground_truth_labels, feature_representations, 
+                training_flag, current_epoch, training_accuracy=None):
+
+        # Handle augmented data
+        if len(model_outputs) > len(sample_indices):
+            primary_output, augmented_output = torch.chunk(model_outputs, 2)
+            primary_features, augmented_features = torch.chunk(feature_representations, 2)
         else:
-            output = outputs
-            out1 = out
+            primary_output = model_outputs
+            primary_features = feature_representations
 
         eps = 1e-4
-        u = self.u[index]
-        weight = self.weight[index]
+        batch_uncertainty = self.uncertainty_params[sample_indices]
+        batch_weights = self.sample_weights[sample_indices]
 
-        if flag == 0:
-            if self.beginning:
-                percent = 100
-                for i in range(len(self.bins)):
-                    class_u = self.u.detach()[self.bins[i]]
-                    bottomK = int((len(class_u) / 100) * percent)
-                    important_indexs = torch.topk(class_u, bottomK, largest=False, dim=0)[1]
-                    self.masterVector[i] = torch.mean(self.prevSimilarity[self.bins[i]][important_indexs.view(-1)], dim=0)
+        if training_flag == 0:
+            if self.is_first_forward:
+                self._update_class_prototypes(selection_percentage=100)
+            self._prepare_prototype_matrix()
+            self.is_first_forward = True
 
-            masterVector_norm = self.masterVector.norm(p=2, dim=1, keepdim=True)
-            masterVector_normalized = self.masterVector.div(masterVector_norm)
-            self.masterVector_transpose = torch.transpose(masterVector_normalized, 0, 1)
-            self.beginning = True
+        self.previous_features[sample_indices] = primary_features.detach()
+        
+        # Compute similarity-based loss
+        similarity_loss = self._compute_similarity_loss(
+            sample_indices, primary_output, ground_truth_labels, 
+            primary_features, batch_uncertainty, batch_weights, eps
+        )
+        
+        # Compute MSE reconstruction loss
+        mse_loss = self._compute_reconstruction_loss(
+            primary_output, ground_truth_labels, batch_uncertainty, batch_weights
+        )
+        
+        # Compute KL divergence loss
+        kl_loss = self._compute_kl_loss(primary_output, ground_truth_labels, sample_indices)
+        
+        total_loss = similarity_loss + mse_loss + kl_loss
 
-        self.prevSimilarity[index] = out1.detach()
-        prediction = F.softmax(output, dim=1)
-        out_norm = out1.detach().norm(p=2, dim=1, keepdim=True)
-        out_normalized = out1.detach().div(out_norm)
-        similarity = torch.mm(out_normalized, self.masterVector_transpose)
-        similarity = similarity * label
-        sim_mask = (similarity > 0.000).type(torch.float32)
-        similarity = similarity * sim_mask
-        u = u * label
-        prediction = torch.clamp((prediction + ((1-weight)*u.detach())), min=eps, max=1.0)
-        loss = torch.mean(-torch.sum(similarity * torch.log(prediction), dim=1))
-        label_one_hot = self.soft_to_hard(output.detach())
-        MSE_loss = F.mse_loss((label_one_hot + (weight*u)), label, reduction='sum') / len(label)
-        loss += MSE_loss
-        self.take[index] = torch.sum(label_one_hot * label, dim=1).view(-1, 1)
-        kl_loss = F.kl_div(F.log_softmax(torch.sum(output * label, dim=1)), F.softmax(-self.u[index].detach().view(-1)))
-        loss += kl_loss
+        # Add balance regularization if specified
+        if self.balance_ratio > 0:
+            balance_loss = self._compute_balance_loss(primary_output, eps)
+            total_loss += self.balance_ratio * balance_loss
 
-        if self.ratio_balance > 0:
-            avg_prediction = torch.mean(prediction, dim=0)
-            prior_distr = 1.0 / self.num_classes * torch.ones_like(avg_prediction)
-            avg_prediction = torch.clamp(avg_prediction, min=eps, max=1.0)
-            balance_kl = torch.mean(-(prior_distr * torch.log(avg_prediction)).sum(dim=0))
-            loss += self.ratio_balance * balance_kl
+        # Add consistency loss for augmented data if specified
+        if len(model_outputs) > len(sample_indices) and self.consistency_ratio > 0:
+            consistency_loss = self._compute_consistency_loss(primary_output, augmented_output)
+            total_loss += self.consistency_ratio * torch.mean(consistency_loss)
 
-        if len(outputs) > len(index) and self.ratio_consistency > 0:
-            consistency_loss = self.consistency_loss(output, output2)
-            loss += self.ratio_consistency * torch.mean(consistency_loss)
+        return total_loss
 
+    def _update_class_prototypes(self, selection_percentage=100):
+        #Update class prototypes using most confident samples
+        for class_idx in range(len(self.class_sample_indices)):
+            class_uncertainties = self.uncertainty_params.detach()[self.class_sample_indices[class_idx]]
+            num_samples_to_select = int((len(class_uncertainties) / 100) * selection_percentage)
+            
+            # Select samples
+            _, selected_indices = torch.topk(class_uncertainties, num_samples_to_select, 
+                                           largest=False, dim=0)
+            
+            selected_indices_cpu = selected_indices.view(-1).cpu().numpy()
+            
+            selected_sample_indices = self.class_sample_indices[class_idx][selected_indices_cpu]
+            self.class_prototypes[class_idx] = torch.mean(
+                self.previous_features[selected_sample_indices], dim=0
+            )
+
+    def _prepare_prototype_matrix(self):
+        prototype_norms = self.class_prototypes.norm(p=2, dim=1, keepdim=True)
+        normalized_prototypes = self.class_prototypes.div(prototype_norms)
+        self.normalized_prototypes_transpose = torch.transpose(normalized_prototypes, 0, 1)
+
+    def _compute_similarity_loss(self, sample_indices, model_outputs, labels, features, 
+                               uncertainty, weights, eps):
+        #Compute similarity-based contrastive loss
+        predictions = F.softmax(model_outputs, dim=1)
+        
+        feature_norms = features.detach().norm(p=2, dim=1, keepdim=True)
+        normalized_features = features.detach().div(feature_norms)
+        
+        similarities = torch.mm(normalized_features, self.normalized_prototypes_transpose)
+        masked_similarities = similarities * labels
+        
+        similarity_mask = (masked_similarities > 0.000).type(torch.float32)
+        filtered_similarities = masked_similarities * similarity_mask
+        
+        # Apply uncertainty weighting to labels
+        weighted_uncertainty = uncertainty * labels
+        adjusted_predictions = torch.clamp(
+            (predictions + ((1 - weights) * weighted_uncertainty.detach())), 
+            min=eps, max=1.0
+        )
+        
+        # Compute negative log-likelihood
+        loss = torch.mean(-torch.sum(filtered_similarities * torch.log(adjusted_predictions), dim=1))
+        
         return loss
 
-    def consistency_loss(self, output1, output2):
-        preds1 = F.softmax(output1, dim=1).detach()
-        preds2 = F.log_softmax(output2, dim=1)
-        loss_kldiv = F.kl_div(preds2, preds1, reduction='none')
-        return torch.sum(loss_kldiv, dim=1)
-
-    def soft_to_hard(self, x):
-        with torch.no_grad():
-            return torch.zeros(len(x), self.num_classes).to(self.device).scatter_(1, x.argmax(dim=1).view(-1, 1), 1)
+    def _compute_reconstruction_loss(self, model_outputs, labels, uncertainty, weights):
+        #Compute MSE reconstruction loss
+        hard_predictions = self._convert_soft_to_hard_labels(model_outputs.detach())
+        reconstruction_target = hard_predictions + (weights * uncertainty)
+        mse_loss = F.mse_loss(reconstruction_target, labels, reduction='sum') / len(labels)
         
-def train_with_ncod(model, data, noisy_indices, device, lr=0.01, weight_decay=5e-4, total_epochs=200, lambda_dir=0.1, num_classes=None, patience=20, debug=True):
-    if num_classes is None:
-        num_classes = int(data.y.max().item()) + 1
+        batch_indices = torch.arange(len(labels))
+        self.sample_predictions[batch_indices] = torch.sum(
+            hard_predictions * labels, dim=1
+        ).view(-1, 1)
+        
+        return mse_loss
 
-    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
-
-    sample_labels = data.y.cpu().numpy()
-
-    oversmoothing_evaluator = OversmoothingMetrics(device=device)
-
-    ncod_loss_fn = ncodLoss(
-        sample_labels=sample_labels,
-        device=device,
-        num_examp=data.num_nodes,
-        num_classes=num_classes,
-        ratio_consistency=1.5,
-        ratio_balance=1.2,
-        encoder_features=num_classes,
-        total_epochs=total_epochs
-    ).to(device)
-
-    best_val_loss = float('inf')
-    best_model_state = None
-    epochs_no_improve = 0
-
-    for epoch in range(1, total_epochs + 1):
-        model.train()
-        optimizer.zero_grad()
-        out = model(data)
-
-        train_idx = data.train_mask.nonzero(as_tuple=True)[0]
-        label_onehot_train = F.one_hot(data.y[train_idx], num_classes=num_classes).float()
-        loss_ncod_train = ncod_loss_fn(
-            index=train_idx,
-            outputs=out[train_idx],
-            label=label_onehot_train,
-            out=out[train_idx],
-            flag=0,
-            epoch=epoch,
-            train_acc_cater=None
+    def _compute_kl_loss(self, model_outputs, labels, sample_indices):
+        #Compute KL divergence loss
+        class_predictions = torch.sum(model_outputs * labels, dim=1)
+        
+        # Compute KL divergence
+        kl_loss = F.kl_div(
+            F.log_softmax(class_predictions), 
+            F.softmax(-self.uncertainty_params[sample_indices].detach().view(-1))
         )
-        loss_dir_train = dirichlet_energy(out, data.edge_index)
-        loss_train = loss_ncod_train + lambda_dir * loss_dir_train
-        loss_train.backward()
-        optimizer.step()
+        
+        return kl_loss
 
-        model.eval()
+    def _compute_balance_loss(self, model_outputs, eps):
+        #Compute balance regularization loss
+        avg_predictions = torch.mean(F.softmax(model_outputs, dim=1), dim=0)
+        uniform_prior = torch.ones_like(avg_predictions) / self.num_classes
+        
+        clamped_predictions = torch.clamp(avg_predictions, min=eps, max=1.0)
+        balance_kl = torch.mean(-(uniform_prior * torch.log(clamped_predictions)).sum(dim=0))
+        
+        return balance_kl
+
+    def _compute_consistency_loss(self, primary_output, augmented_output):
+        #Compute consistency loss
+        primary_probs = F.softmax(primary_output, dim=1).detach()
+        augmented_log_probs = F.log_softmax(augmented_output, dim=1)
+        
+        consistency_kl = F.kl_div(augmented_log_probs, primary_probs, reduction='none')
+        return torch.sum(consistency_kl, dim=1)
+
+    def _convert_soft_to_hard_labels(self, predictions):
+
         with torch.no_grad():
-            val_idx = data.val_mask.nonzero(as_tuple=True)[0]
-            label_onehot_val = F.one_hot(data.y[val_idx], num_classes=num_classes).float()
-            val_loss_ncod = ncod_loss_fn(
-                index=val_idx,
-                outputs=out[val_idx],
-                label=label_onehot_val,
-                out=out[val_idx],
-                flag=0,
-                epoch=epoch,
-                train_acc_cater=None
-            )
-            val_loss_dir = dirichlet_energy(out, data.edge_index)
-            val_loss = val_loss_ncod + lambda_dir * val_loss_dir
+            batch_size = len(predictions)
+            hard_labels = torch.zeros(batch_size, self.num_classes).to(self.device)
+            max_indices = predictions.argmax(dim=1).view(-1, 1)
+            hard_labels.scatter_(1, max_indices, 1)
+            return hard_labels
 
-            pred = out.argmax(dim=1)
-            train_acc = (pred[train_idx] == data.y[train_idx]).sum().item() / len(train_idx)
-            val_acc = (pred[val_idx] == data.y[val_idx]).sum().item() / len(val_idx)
-            train_f1 = f1_score(data.y[train_idx].cpu(), pred[train_idx].cpu(), average='macro')
-            val_f1 = f1_score(data.y[val_idx].cpu(), pred[val_idx].cpu(), average='macro')
 
-            train_oversmoothing = _compute_oversmoothing_for_mask(
-                oversmoothing_evaluator, out, data.edge_index, data.train_mask, data.y
-            )
-            val_oversmoothing = _compute_oversmoothing_for_mask(
-                oversmoothing_evaluator, out, data.edge_index, data.val_mask, data.y
-            )
+class NCODTrainer:
 
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            best_model_state = model.state_dict()
-            epochs_no_improve = 0
+    def __init__(self, model, data, noisy_indices, device, num_classes=None, 
+                 learning_rate=0.01, weight_decay=5e-4, total_epochs=200, 
+                 dirichlet_lambda=0.1, patience=20, debug=True):
+        
+        self.model = model.to(device)
+        self.data = data.to(device)
+        self.noisy_indices = noisy_indices
+        self.device = device
+        self.debug = debug
+        
+        # Training parameters
+        self.learning_rate = learning_rate
+        self.weight_decay = weight_decay
+        self.total_epochs = total_epochs
+        self.dirichlet_lambda = dirichlet_lambda
+        self.patience = patience
+        
+        if num_classes is None:
+            self.num_classes = int(data.y.max().item()) + 1
         else:
-            epochs_no_improve += 1
-
-        if epochs_no_improve >= patience:
-            print(f"Early stopping at epoch {epoch}")
-            model.load_state_dict(best_model_state)
-            break
-
-        if debug and epoch%20==0:
-            train_de = train_oversmoothing['EDir']
-            train_de_traditional = train_oversmoothing['EDir_traditional']
-            train_eproj = train_oversmoothing['EProj']
-            train_mad = train_oversmoothing['MAD']
-            train_num_rank = train_oversmoothing['NumRank']
-            train_eff_rank = train_oversmoothing['Erank']
+            self.num_classes = num_classes
             
-            val_de = val_oversmoothing['EDir']
-            val_de_traditional = val_oversmoothing['EDir_traditional']
-            val_eproj = val_oversmoothing['EProj']
-            val_mad = val_oversmoothing['MAD']
-            val_num_rank = val_oversmoothing['NumRank']
-            val_eff_rank = val_oversmoothing['Erank']
+        self.optimizer = optim.Adam(
+            self.model.parameters(), 
+            lr=self.learning_rate, 
+            weight_decay=self.weight_decay
+        )
+        
+        # Initialize NCOD loss function
+        sample_labels = data.y.cpu().numpy()
+        self.ncod_loss_fn = NCODLossModule(
+            sample_labels=sample_labels,
+            device=device,
+            num_samples=data.num_nodes,
+            num_classes=self.num_classes,
+            consistency_ratio=1.5,
+            balance_ratio=1.2,
+            feature_dim=self.num_classes,
+            total_epochs=total_epochs
+        ).to(device)
+        
+        # Initialize oversmoothing evaluator
+        try:
+            self.oversmoothing_evaluator = OversmoothingMetrics(device=device)
+            self.compute_oversmoothing = _compute_oversmoothing_for_mask
+        except ImportError:
+            print("Warning: Oversmoothing metrics not available")
+            self.oversmoothing_evaluator = None
+            self.compute_oversmoothing = None
+        
+        # Initialize Dirichlet energy computation
+        try:
+            self.compute_dirichlet_energy = dirichlet_energy
+        except ImportError:
+            print("Warning: Dirichlet energy computation not available")
+            self.compute_dirichlet_energy = lambda x, edge_index: torch.tensor(0.0)
+        
+        self.best_val_loss = float('inf')
+        self.best_model_state = None
+        self.epochs_without_improvement = 0
+
+    def train_single_epoch(self, epoch):
+        self.model.train()
+        self.optimizer.zero_grad()
+        
+        model_outputs = self.model(self.data)
+        
+        train_indices = self.data.train_mask.nonzero(as_tuple=True)[0]
+        train_labels_onehot = F.one_hot(
+            self.data.y[train_indices], 
+            num_classes=self.num_classes
+        ).float()
+        
+        # Compute NCOD loss
+        ncod_loss = self.ncod_loss_fn(
+            sample_indices=train_indices,
+            model_outputs=model_outputs[train_indices],
+            ground_truth_labels=train_labels_onehot,
+            feature_representations=model_outputs[train_indices],
+            training_flag=0,
+            current_epoch=epoch,
+            training_accuracy=None
+        )
+        
+        # Add Dirichlet energy regularization
+        dirichlet_loss = self.compute_dirichlet_energy(model_outputs, self.data.edge_index)
+        total_loss = ncod_loss + self.dirichlet_lambda * dirichlet_loss
+        
+        total_loss.backward()
+        self.optimizer.step()
+        
+        return total_loss.item(), ncod_loss.item(), dirichlet_loss.item()
+
+    def evaluate(self, epoch):
+        self.model.eval()
+        
+        with torch.no_grad():
+            model_outputs = self.model(self.data)
             
-            print(f"Epoch {epoch:03d} | Train Acc: {train_acc:.4f}, Val Acc: {val_acc:.4f} | "
-                  f"Train F1: {train_f1:.4f}, Val F1: {val_f1:.4f}")
-            print(f"Train DE: {train_de:.4f}, Val DE: {val_de:.4f} | "
-                  f"Train DE_trad: {train_de_traditional:.4f}, Val DE_trad: {val_de_traditional:.4f} | "
-                  f"Train EProj: {train_eproj:.4f}, Val EProj: {val_eproj:.4f} | "
-                  f"Train MAD: {train_mad:.4f}, Val MAD: {val_mad:.4f} | "
-                  f"Train NumRank: {train_num_rank:.4f}, Val NumRank: {val_num_rank:.4f} | "
-                  f"Train Erank: {train_eff_rank:.4f}, Val Erank: {val_eff_rank:.4f}")
+            val_indices = self.data.val_mask.nonzero(as_tuple=True)[0]
+            val_labels_onehot = F.one_hot(
+                self.data.y[val_indices], 
+                num_classes=self.num_classes
+            ).float()
+            
+            val_ncod_loss = self.ncod_loss_fn(
+                sample_indices=val_indices,
+                model_outputs=model_outputs[val_indices],
+                ground_truth_labels=val_labels_onehot,
+                feature_representations=model_outputs[val_indices],
+                training_flag=0,
+                current_epoch=epoch,
+                training_accuracy=None
+            )
+            
+            val_dirichlet_loss = self.compute_dirichlet_energy(model_outputs, self.data.edge_index)
+            val_total_loss = val_ncod_loss + self.dirichlet_lambda * val_dirichlet_loss
 
-    model.eval()
-    with torch.no_grad():
-        test_idx = data.test_mask.nonzero(as_tuple=True)[0]
-        label_onehot_test = F.one_hot(data.y[test_idx], num_classes=num_classes).float()
-        loss_ncod_test = ncod_loss_fn(
-            index=test_idx,
-            outputs=out[test_idx],
-            label=label_onehot_test,
-            out=out[test_idx],
-            flag=0,
-            epoch=epoch,
-            train_acc_cater=None
-        )
-        loss_dir_test = dirichlet_energy(out, data.edge_index)
-        test_loss = loss_ncod_test + lambda_dir * loss_dir_test
+            predictions = model_outputs.argmax(dim=1)
+            train_indices = self.data.train_mask.nonzero(as_tuple=True)[0]
+            
+            train_acc = (predictions[train_indices] == self.data.y[train_indices]).sum().item() / len(train_indices)
+            val_acc = (predictions[val_indices] == self.data.y[val_indices]).sum().item() / len(val_indices)
+            
+            train_f1 = f1_score(self.data.y[train_indices].cpu(), predictions[train_indices].cpu(), average='macro')
+            val_f1 = f1_score(self.data.y[val_indices].cpu(), predictions[val_indices].cpu(), average='macro')
+            
+            train_oversmoothing = {}
+            val_oversmoothing = {}
+            
+            if self.compute_oversmoothing is not None:
+                train_oversmoothing = self.compute_oversmoothing(
+                    self.oversmoothing_evaluator, model_outputs, self.data.edge_index, 
+                    self.data.train_mask, self.data.y
+                )
+                val_oversmoothing = self.compute_oversmoothing(
+                    self.oversmoothing_evaluator, model_outputs, self.data.edge_index, 
+                    self.data.val_mask, self.data.y
+                )
+            
+            return {
+                'val_loss': val_total_loss.item(),
+                'train_acc': train_acc,
+                'val_acc': val_acc,
+                'train_f1': train_f1,
+                'val_f1': val_f1,
+                'train_oversmoothing': train_oversmoothing,
+                'val_oversmoothing': val_oversmoothing
+            }
 
-        pred = out.argmax(dim=1)
-        test_acc = (pred[test_idx] == data.y[test_idx]).sum().item() / len(test_idx)
-        test_f1 = f1_score(data.y[test_idx].cpu(), pred[test_idx].cpu(), average='macro')
-
-        final_train_oversmoothing = _compute_oversmoothing_for_mask(
-            oversmoothing_evaluator, out, data.edge_index, data.train_mask, data.y
-        )
-        final_val_oversmoothing = _compute_oversmoothing_for_mask(
-            oversmoothing_evaluator, out, data.edge_index, data.val_mask, data.y
-        )
-        test_oversmoothing = _compute_oversmoothing_for_mask(
-            oversmoothing_evaluator, out, data.edge_index, data.test_mask, data.y
-        )
-
-    if debug:
-        print(f"Test Loss: {test_loss:.4f} | Test Acc: {test_acc:.4f} | Test F1: {test_f1:.4f}")
-        print("Final Oversmoothing Metrics:")
+    def train_full(self):
+        if self.debug:
+            print(f"Starting NCOD training for {self.total_epochs} epochs...")
+            print(f"Training samples: {self.data.train_mask.sum().item()}")
+            print(f"Noisy samples: {len(self.noisy_indices)}")
         
-        print(f"Train: EDir: {final_train_oversmoothing['EDir']:.4f}, EDir_traditional: {final_train_oversmoothing['EDir_traditional']:.4f}, "
-              f"EProj: {final_train_oversmoothing['EProj']:.4f}, MAD: {final_train_oversmoothing['MAD']:.4f}, "
-              f"NumRank: {final_train_oversmoothing['NumRank']:.4f}, Erank: {final_train_oversmoothing['Erank']:.4f}")
-        
-        print(f"Val: EDir: {final_val_oversmoothing['EDir']:.4f}, EDir_traditional: {final_val_oversmoothing['EDir_traditional']:.4f}, "
-              f"EProj: {final_val_oversmoothing['EProj']:.4f}, MAD: {final_val_oversmoothing['MAD']:.4f}, "
-              f"NumRank: {final_val_oversmoothing['NumRank']:.4f}, Erank: {final_val_oversmoothing['Erank']:.4f}")
-        
-        print(f"Test: EDir: {test_oversmoothing['EDir']:.4f}, EDir_traditional: {test_oversmoothing['EDir_traditional']:.4f}, "
-              f"EProj: {test_oversmoothing['EProj']:.4f}, MAD: {test_oversmoothing['MAD']:.4f}, "
-              f"NumRank: {test_oversmoothing['NumRank']:.4f}, Erank: {test_oversmoothing['Erank']:.4f}")
+        for epoch in range(1, self.total_epochs + 1):
 
-    results = {
-        'test_acc': test_acc,
-        'test_f1': test_f1,
-        'test_loss': test_loss.item(),
-        'train_oversmoothing': final_train_oversmoothing,
-        'val_oversmoothing': final_val_oversmoothing,
-        'test_oversmoothing': test_oversmoothing
-    }
-    return results
+            train_loss, ncod_loss, dirichlet_loss = self.train_single_epoch(epoch)
+            
+            eval_metrics = self.evaluate(epoch)
+            
+            # Early stopping
+            if eval_metrics['val_loss'] < self.best_val_loss:
+                self.best_val_loss = eval_metrics['val_loss']
+                self.best_model_state = self.model.state_dict().copy()
+                self.epochs_without_improvement = 0
+            else:
+                self.epochs_without_improvement += 1
+
+            if self.epochs_without_improvement >= self.patience:
+                if self.debug:
+                    print(f"Early stopping at epoch {epoch}")
+                self.model.load_state_dict(self.best_model_state)
+                break
+            
+            if self.debug and epoch % 20 == 0:
+                self._print_debug_info(epoch, eval_metrics)
+        
+        return self._final_evaluation()
+
+    def _print_debug_info(self, epoch, metrics):
+        print(f"Epoch {epoch:03d} | Train Acc: {metrics['train_acc']:.4f}, Val Acc: {metrics['val_acc']:.4f} | "
+              f"Train F1: {metrics['train_f1']:.4f}, Val F1: {metrics['val_f1']:.4f}")
+        
+        if metrics['train_oversmoothing'] and metrics['val_oversmoothing']:
+            train_os = metrics['train_oversmoothing']
+            val_os = metrics['val_oversmoothing']
+            
+            print(f"Train DE: {train_os.get('EDir', 0):.4f}, Val DE: {val_os.get('EDir', 0):.4f} | "
+                  f"Train DE_trad: {train_os.get('EDir_traditional', 0):.4f}, Val DE_trad: {val_os.get('EDir_traditional', 0):.4f} | "
+                  f"Train EProj: {train_os.get('EProj', 0):.4f}, Val EProj: {val_os.get('EProj', 0):.4f} | "
+                  f"Train MAD: {train_os.get('MAD', 0):.4f}, Val MAD: {val_os.get('MAD', 0):.4f} | "
+                  f"Train NumRank: {train_os.get('NumRank', 0):.4f}, Val NumRank: {val_os.get('NumRank', 0):.4f} | "
+                  f"Train Erank: {train_os.get('Erank', 0):.4f}, Val Erank: {val_os.get('Erank', 0):.4f}")
+
+    def _final_evaluation(self):
+
+        self.model.eval()
+        
+        with torch.no_grad():
+            model_outputs = self.model(self.data)
+            
+            test_indices = self.data.test_mask.nonzero(as_tuple=True)[0]
+            test_labels_onehot = F.one_hot(
+                self.data.y[test_indices], 
+                num_classes=self.num_classes
+            ).float()
+            
+            test_ncod_loss = self.ncod_loss_fn(
+                sample_indices=test_indices,
+                model_outputs=model_outputs[test_indices],
+                ground_truth_labels=test_labels_onehot,
+                feature_representations=model_outputs[test_indices],
+                training_flag=0,
+                current_epoch=self.total_epochs,
+                training_accuracy=None
+            )
+            
+            test_dirichlet_loss = self.compute_dirichlet_energy(model_outputs, self.data.edge_index)
+            test_total_loss = test_ncod_loss + self.dirichlet_lambda * test_dirichlet_loss
+            
+            predictions = model_outputs.argmax(dim=1)
+            train_indices = self.data.train_mask.nonzero(as_tuple=True)[0]
+            val_indices = self.data.val_mask.nonzero(as_tuple=True)[0]
+            
+            test_acc = (predictions[test_indices] == self.data.y[test_indices]).sum().item() / len(test_indices)
+            test_f1 = f1_score(self.data.y[test_indices].cpu(), predictions[test_indices].cpu(), average='macro')
+            test_precision = precision_score(self.data.y[test_indices].cpu(), predictions[test_indices].cpu(), average='macro')
+            test_recall = recall_score(self.data.y[test_indices].cpu(), predictions[test_indices].cpu(), average='macro')
+            
+            final_train_oversmoothing = {}
+            final_val_oversmoothing = {}
+            test_oversmoothing = {}
+            
+            if self.compute_oversmoothing is not None:
+                final_train_oversmoothing = self.compute_oversmoothing(
+                    self.oversmoothing_evaluator, model_outputs, self.data.edge_index, 
+                    self.data.train_mask, self.data.y
+                )
+                final_val_oversmoothing = self.compute_oversmoothing(
+                    self.oversmoothing_evaluator, model_outputs, self.data.edge_index, 
+                    self.data.val_mask, self.data.y
+                )
+                test_oversmoothing = self.compute_oversmoothing(
+                    self.oversmoothing_evaluator, model_outputs, self.data.edge_index, 
+                    self.data.test_mask, self.data.y
+                )
+            
+            if self.debug:
+                print(f"Test Loss: {test_total_loss:.4f} | Test Acc: {test_acc:.4f} | Test F1: {test_f1:.4f}")
+                print("Final Oversmoothing Metrics:")
+                
+                if final_train_oversmoothing:
+                    print(f"Train: EDir: {final_train_oversmoothing.get('EDir', 0):.4f}, "
+                          f"EDir_traditional: {final_train_oversmoothing.get('EDir_traditional', 0):.4f}, "
+                          f"EProj: {final_train_oversmoothing.get('EProj', 0):.4f}, "
+                          f"MAD: {final_train_oversmoothing.get('MAD', 0):.4f}, "
+                          f"NumRank: {final_train_oversmoothing.get('NumRank', 0):.4f}, "
+                          f"Erank: {final_train_oversmoothing.get('Erank', 0):.4f}")
+                
+                if final_val_oversmoothing:
+                    print(f"Val: EDir: {final_val_oversmoothing.get('EDir', 0):.4f}, "
+                          f"EDir_traditional: {final_val_oversmoothing.get('EDir_traditional', 0):.4f}, "
+                          f"EProj: {final_val_oversmoothing.get('EProj', 0):.4f}, "
+                          f"MAD: {final_val_oversmoothing.get('MAD', 0):.4f}, "
+                          f"NumRank: {final_val_oversmoothing.get('NumRank', 0):.4f}, "
+                          f"Erank: {final_val_oversmoothing.get('Erank', 0):.4f}")
+                
+                if test_oversmoothing:
+                    print(f"Test: EDir: {test_oversmoothing.get('EDir', 0):.4f}, "
+                          f"EDir_traditional: {test_oversmoothing.get('EDir_traditional', 0):.4f}, "
+                          f"EProj: {test_oversmoothing.get('EProj', 0):.4f}, "
+                          f"MAD: {test_oversmoothing.get('MAD', 0):.4f}, "
+                          f"NumRank: {test_oversmoothing.get('NumRank', 0):.4f}, "
+                          f"Erank: {test_oversmoothing.get('Erank', 0):.4f}")
+            
+            return {
+                'accuracy': torch.tensor(test_acc),
+                'f1': torch.tensor(test_f1),
+                'precision': torch.tensor(test_precision),
+                'recall': torch.tensor(test_recall),
+                'test_loss': test_total_loss.item(),
+                'oversmoothing': test_oversmoothing if test_oversmoothing else {
+                    'EDir': 0, 'EDir_traditional': 0, 'EProj': 0, 
+                    'MAD': 0, 'NumRank': 0, 'Erank': 0
+                }
+            }
