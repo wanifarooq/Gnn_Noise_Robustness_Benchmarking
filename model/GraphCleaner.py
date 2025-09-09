@@ -1,5 +1,4 @@
 import os
-import os
 import copy
 import time
 import numpy as np
@@ -18,219 +17,247 @@ from cleanlab.count import estimate_latent, compute_confident_joint
 
 from model.evaluation import OversmoothingMetrics
 
-class GraphCleanerDetector:
 
-    def __init__(self, config, device):
-        self.config = config
-        self.device = device
-        self.k = config.get('k', 3)
-        self.sample_rate = config.get('sample_rate', 0.5)
-        self.max_iter_classifier = config.get('max_iter_classifier', 3000)
+class GraphCleanerNoiseDetector:
 
-        self.oversmoothing_evaluator = OversmoothingMetrics(device=device)
+    def __init__(self, configuration_params, computation_device):
+
+        self.config = configuration_params
+        self.device = computation_device
         
-    def ensure_dir(self, path):
-        os.makedirs(path, exist_ok=True)
+        self.neighborhood_depth = configuration_params.get('graphcleaner_params', {}).get('k', 3)
+        self.negative_sample_ratio = configuration_params.get('graphcleaner_params', {}).get('sample_rate', 0.5)
+        self.classifier_max_iterations = configuration_params.get('graphcleaner_params', {}).get('max_iter_classifier', 3000)
+        self.validation_split_type = configuration_params.get('graphcleaner_params', {}).get('held_split', 'valid')
+        
+        self.learning_rate = configuration_params.get('training', {}).get('lr', 0.001)
+        self.weight_decay_factor = float(configuration_params.get('training', {}).get('weight_decay', 5e-4))
+        self.training_epochs = configuration_params.get('training', {}).get('epochs', 200)
+        self.early_stopping_patience = configuration_params.get('training', {}).get('patience', 10)
 
-    def _compute_oversmoothing_for_mask(self, embeddings, edge_index, mask, labels=None):
+        self.oversmoothing_calculator = OversmoothingMetrics(device=computation_device)
+        
+
+    def _calculate_oversmoothing_metrics_for_subset(self, node_embeddings, graph_edges, node_subset_mask, node_labels=None):
+        
         try:
-            mask_indices = torch.where(mask)[0]
-            mask_embeddings = embeddings[mask]
+            subset_node_indices = torch.where(node_subset_mask)[0]
+            subset_embeddings = node_embeddings[subset_node_indices]
             
-            mask_set = set(mask_indices.cpu().numpy())
-            edge_mask = torch.tensor([
-                src.item() in mask_set and tgt.item() in mask_set
-                for src, tgt in edge_index.t()
-            ], device=edge_index.device)
+            subset_indices_set = set(subset_node_indices.cpu().numpy())
             
-            if not edge_mask.any():
+            # Filter edges
+            edge_within_subset_mask = torch.tensor([
+                source_node.item() in subset_indices_set and target_node.item() in subset_indices_set
+                for source_node, target_node in graph_edges.t()
+            ], device=graph_edges.device)
+            
+            if not edge_within_subset_mask.any():
                 return {
-                    'NumRank': float(min(mask_embeddings.shape)),
-                    'Erank': float(min(mask_embeddings.shape)),
+                    'NumRank': float(min(subset_embeddings.shape)),
+                    'Erank': float(min(subset_embeddings.shape)),
                     'EDir': 0.0,
                     'EDir_traditional': 0.0,
                     'EProj': 0.0,
                     'MAD': 0.0
                 }
             
-            masked_edges = edge_index[:, edge_mask]
-            node_mapping = {orig_idx.item(): local_idx for local_idx, orig_idx in enumerate(mask_indices)}
+            subset_edges = graph_edges[:, edge_within_subset_mask]
+            index_mapping = {original_idx.item(): new_idx for new_idx, original_idx in enumerate(subset_node_indices)}
             
-            remapped_edges = torch.stack([
-                torch.tensor([node_mapping[src.item()] for src in masked_edges[0]], device=edge_index.device),
-                torch.tensor([node_mapping[tgt.item()] for tgt in masked_edges[1]], device=edge_index.device)
+            remapped_edge_indices = torch.stack([
+                torch.tensor([index_mapping[src.item()] for src in subset_edges[0]], device=graph_edges.device),
+                torch.tensor([index_mapping[tgt.item()] for tgt in subset_edges[1]], device=graph_edges.device)
             ])
             
-            graphs_in_class = [{
-                'X': mask_embeddings,
-                'edge_index': remapped_edges,
+            subset_graph_data = [{
+                'X': subset_embeddings,
+                'edge_index': remapped_edge_indices,
                 'edge_weight': None
             }]
             
-            return self.oversmoothing_evaluator.compute_all_metrics(
-                X=mask_embeddings,
-                edge_index=remapped_edges,
-                graphs_in_class=graphs_in_class
+            return self.oversmoothing_calculator.compute_all_metrics(
+                X=subset_embeddings,
+                edge_index=remapped_edge_indices,
+                graphs_in_class=subset_graph_data
             )
             
-        except Exception as e:
-            print(f"Warning: Could not compute oversmoothing metrics for mask: {e}")
+        except Exception as error:
+            print(f"Warning: Could not compute oversmoothing metrics for subset: {error}")
             return None
         
-    def to_softmax(self, log_probs):
-        if isinstance(log_probs, np.ndarray):
-            e = np.exp(log_probs - np.max(log_probs, axis=1, keepdims=True))
-            return e / e.sum(axis=1, keepdims=True)
-        elif isinstance(log_probs, torch.Tensor):
-            return F.softmax(log_probs, dim=1).cpu().numpy()
-        else:
-            return F.softmax(torch.tensor(log_probs), dim=1).cpu().numpy()
+    def _convert_logits_to_probabilities(self, prediction_logits):
 
-    def compute_dirichlet_energy(self, data, predictions, mask):
+        if isinstance(prediction_logits, np.ndarray):
 
-        if predictions.dim() > 1 and predictions.size(1) > 1:
-            probs = F.softmax(predictions, dim=1)
+            exp_values = np.exp(prediction_logits - np.max(prediction_logits, axis=1, keepdims=True))
+            return exp_values / exp_values.sum(axis=1, keepdims=True)
+        elif isinstance(prediction_logits, torch.Tensor):
+            return F.softmax(prediction_logits, dim=1).cpu().numpy()
         else:
-            probs = predictions
+            return F.softmax(torch.tensor(prediction_logits), dim=1).cpu().numpy()
+
+    def _calculate_dirichlet_energy(self, graph_data, model_predictions, node_subset_mask):
+ 
+        if model_predictions.dim() > 1 and model_predictions.size(1) > 1:
+            prediction_probabilities = F.softmax(model_predictions, dim=1)
+        else:
+            prediction_probabilities = model_predictions
             
-        edge_index = data.edge_index
-        num_nodes = data.num_nodes
+        graph_edge_index = graph_data.edge_index
+        total_nodes = graph_data.num_nodes
 
-        energy = 0.0
+        accumulated_energy = 0.0
         edge_count = 0
 
-        for i in range(edge_index.size(1)):
-            src, dst = edge_index[0, i].item(), edge_index[1, i].item()
+        for edge_idx in range(graph_edge_index.size(1)):
+            source_node, target_node = graph_edge_index[0, edge_idx].item(), graph_edge_index[1, edge_idx].item()
             
-            if mask[src] or mask[dst]:
-                diff = torch.norm(probs[src] - probs[dst], p=2) ** 2
-                energy += diff.item()
+            if node_subset_mask[source_node] or node_subset_mask[target_node]:
+                probability_difference = torch.norm(prediction_probabilities[source_node] - prediction_probabilities[target_node], p=2) ** 2
+                accumulated_energy += probability_difference.item()
                 edge_count += 1
         
-        return energy / edge_count if edge_count > 0 else 0.0
+        return accumulated_energy / edge_count if edge_count > 0 else 0.0
 
-    def compute_metrics(self, data, model, out):
+    def _calculate_training_metrics(self, graph_data, neural_network_model, model_predictions):
 
-        metrics = {}
+        metrics_dict = {}
 
-        train_pred = out[data.train_mask].argmax(dim=-1).cpu()
-        train_true = data.y[data.train_mask].cpu()
-        metrics['train_loss'] = F.cross_entropy(out[data.train_mask], data.y_noisy[data.train_mask]).item()
-        metrics['train_acc'] = accuracy_score(train_true, train_pred)
-        metrics['train_f1'] = f1_score(train_true, train_pred, average='micro')
+        training_predictions = model_predictions[graph_data.train_mask].argmax(dim=-1).cpu()
+        training_ground_truth = graph_data.y[graph_data.train_mask].cpu()
+        metrics_dict['train_loss'] = F.cross_entropy(model_predictions[graph_data.train_mask], graph_data.y_noisy[graph_data.train_mask]).item()
+        metrics_dict['train_acc'] = accuracy_score(training_ground_truth, training_predictions)
+        metrics_dict['train_f1'] = f1_score(training_ground_truth, training_predictions, average='micro')
 
-        val_pred = out[data.val_mask].argmax(dim=-1).cpu()
-        val_true = data.y[data.val_mask].cpu()
-        metrics['val_loss'] = F.cross_entropy(out[data.val_mask], data.y_noisy[data.val_mask]).item()
-        metrics['val_acc'] = accuracy_score(val_true, val_pred)
-        metrics['val_f1'] = f1_score(val_true, val_pred, average='micro')
+        validation_predictions = model_predictions[graph_data.val_mask].argmax(dim=-1).cpu()
+        validation_ground_truth = graph_data.y[graph_data.val_mask].cpu()
+        metrics_dict['val_loss'] = F.cross_entropy(model_predictions[graph_data.val_mask], graph_data.y_noisy[graph_data.val_mask]).item()
+        metrics_dict['val_acc'] = accuracy_score(validation_ground_truth, validation_predictions)
+        metrics_dict['val_f1'] = f1_score(validation_ground_truth, validation_predictions, average='micro')
         
-        train_oversmoothing = self._compute_oversmoothing_for_mask(out, data.edge_index, data.train_mask, data.y)
-        val_oversmoothing = self._compute_oversmoothing_for_mask(out, data.edge_index, data.val_mask, data.y)
-        
-        metrics['train_oversmoothing'] = train_oversmoothing
-        metrics['val_oversmoothing'] = val_oversmoothing
-        
-        return metrics
+        return metrics_dict
 
-    def train_base_gnn(self, data, model, n_epochs=200):
+    def _train_base_neural_network(self, graph_data, neural_network_model, total_training_epochs=200):
+
         print("Training base GNN for GraphCleaner")
-        start_time = time.time()
+        training_start_time = time.time()
         
-        optimizer = torch.optim.Adam(model.parameters(), 
-                                   lr=self.config.get('lr', 0.001),
-                                   weight_decay=self.config.get('weight_decay', 5e-4))
+        model_optimizer = torch.optim.Adam(
+            neural_network_model.parameters(), 
+            lr=self.learning_rate,
+            weight_decay=self.weight_decay_factor
+        )
         
-        all_sm_vectors = []
-        best_sm_vectors = []
-        best_model_state = None
+        prediction_history_list = []
+        optimal_predictions = []
+        optimal_model_state = None
         
-        data = data.to(self.device)
-        model = model.to(self.device)
-        best_val_loss = float('inf')
-        best_model_state = None
-        best_f1 = 0
-        patience = self.config.get('patience', 10)
+        graph_data = graph_data.to(self.device)
+        neural_network_model = neural_network_model.to(self.device)
+        
+        best_validation_loss = float('inf')
+        optimal_model_state = None
+        best_f1_score = 0
         patience_counter = 0
 
-        for epoch in range(n_epochs):
-            model.train()
-            optimizer.zero_grad()
+        for current_epoch in range(total_training_epochs):
 
-            out = model(data)
-            loss = F.cross_entropy(out[data.train_mask], data.y_noisy[data.train_mask])
+            neural_network_model.train()
+            model_optimizer.zero_grad()
 
-            loss.backward()
-            optimizer.step()
+            model_output = neural_network_model(graph_data)
+            training_loss = F.cross_entropy(model_output[graph_data.train_mask], graph_data.y_noisy[graph_data.train_mask])
 
-            model.eval()
+            training_loss.backward()
+            model_optimizer.step()
+
+            neural_network_model.eval()
             with torch.no_grad():
-                out = model(data)
-                metrics = self.compute_metrics(data, model, out)
+                model_output = neural_network_model(graph_data)
+                current_metrics = self._calculate_training_metrics(graph_data, neural_network_model, model_output)
                 
-                train_oversmoothing = metrics.get('train_oversmoothing', {})
-                val_oversmoothing = metrics.get('val_oversmoothing', {})
-                
-                train_de = train_oversmoothing.get('EDir', 0.0)
-                train_de_traditional = train_oversmoothing.get('EDir_traditional', 0.0)
-                train_eproj = train_oversmoothing.get('EProj', 0.0)
-                train_mad = train_oversmoothing.get('MAD', 0.0)
-                train_num_rank = train_oversmoothing.get('NumRank', 0.0)
-                train_eff_rank = train_oversmoothing.get('Erank', 0.0)
-                
-                val_de = val_oversmoothing.get('EDir', 0.0)
-                val_de_traditional = val_oversmoothing.get('EDir_traditional', 0.0)
-                val_eproj = val_oversmoothing.get('EProj', 0.0)
-                val_mad = val_oversmoothing.get('MAD', 0.0)
-                val_num_rank = val_oversmoothing.get('NumRank', 0.0)
-                val_eff_rank = val_oversmoothing.get('Erank', 0.0)
-                
-                print(f"Epoch {epoch:03d} | Train Loss: {metrics['train_loss']:.4f}, Val Loss: {metrics['val_loss']:.4f} | "
-                    f"Train Acc: {metrics['train_acc']:.4f}, Val Acc: {metrics['val_acc']:.4f} | "
-                    f"Train F1: {metrics['train_f1']:.4f}, Val F1: {metrics['val_f1']:.4f}")
-                print(f"Train DE: {train_de:.4f}, Val DE: {val_de:.4f} | "
-                    f"Train DE_trad: {train_de_traditional:.4f}, Val DE_trad: {val_de_traditional:.4f} | "
-                    f"Train EProj: {train_eproj:.4f}, Val EProj: {val_eproj:.4f} | "
-                    f"Train MAD: {train_mad:.4f}, Val MAD: {val_mad:.4f} | "
-                    f"Train NumRank: {train_num_rank:.4f}, Val NumRank: {val_num_rank:.4f} | "
-                    f"Train Erank: {train_eff_rank:.4f}, Val Erank: {val_eff_rank:.4f}")
+                if (current_epoch + 1) % 20 == 0:
+                    train_oversmoothing_metrics = self._calculate_oversmoothing_metrics_for_subset(
+                        model_output, graph_data.edge_index, graph_data.train_mask, graph_data.y)
+                    val_oversmoothing_metrics = self._calculate_oversmoothing_metrics_for_subset(
+                        model_output, graph_data.edge_index, graph_data.val_mask, graph_data.y)
+                    
+                    train_dirichlet_energy = train_oversmoothing_metrics.get('EDir', 0.0) if train_oversmoothing_metrics else 0.0
+                    train_dirichlet_traditional = train_oversmoothing_metrics.get('EDir_traditional', 0.0) if train_oversmoothing_metrics else 0.0
+                    train_effective_projection = train_oversmoothing_metrics.get('EProj', 0.0) if train_oversmoothing_metrics else 0.0
+                    train_mean_absolute_deviation = train_oversmoothing_metrics.get('MAD', 0.0) if train_oversmoothing_metrics else 0.0
+                    train_numerical_rank = train_oversmoothing_metrics.get('NumRank', 0.0) if train_oversmoothing_metrics else 0.0
+                    train_effective_rank = train_oversmoothing_metrics.get('Erank', 0.0) if train_oversmoothing_metrics else 0.0
+                    
+                    val_dirichlet_energy = val_oversmoothing_metrics.get('EDir', 0.0) if val_oversmoothing_metrics else 0.0
+                    val_dirichlet_traditional = val_oversmoothing_metrics.get('EDir_traditional', 0.0) if val_oversmoothing_metrics else 0.0
+                    val_effective_projection = val_oversmoothing_metrics.get('EProj', 0.0) if val_oversmoothing_metrics else 0.0
+                    val_mean_absolute_deviation = val_oversmoothing_metrics.get('MAD', 0.0) if val_oversmoothing_metrics else 0.0
+                    val_numerical_rank = val_oversmoothing_metrics.get('NumRank', 0.0) if val_oversmoothing_metrics else 0.0
+                    val_effective_rank = val_oversmoothing_metrics.get('Erank', 0.0) if val_oversmoothing_metrics else 0.0
+                    
+                    print(f"Epoch {current_epoch:03d} | Train Loss: {current_metrics['train_loss']:.4f}, Val Loss: {current_metrics['val_loss']:.4f} | "
+                        f"Train Acc: {current_metrics['train_acc']:.4f}, Val Acc: {current_metrics['val_acc']:.4f} | "
+                        f"Train F1: {current_metrics['train_f1']:.4f}, Val F1: {current_metrics['val_f1']:.4f}")
+                    print(f"Train DE: {train_dirichlet_energy:.4f}, Val DE: {val_dirichlet_energy:.4f} | "
+                        f"Train DE_trad: {train_dirichlet_traditional:.4f}, Val DE_trad: {val_dirichlet_traditional:.4f} | "
+                        f"Train EProj: {train_effective_projection:.4f}, Val EProj: {val_effective_projection:.4f} | "
+                        f"Train MAD: {train_mean_absolute_deviation:.4f}, Val MAD: {val_mean_absolute_deviation:.4f} | "
+                        f"Train NumRank: {train_numerical_rank:.4f}, Val NumRank: {val_numerical_rank:.4f} | "
+                        f"Train Erank: {train_effective_rank:.4f}, Val Erank: {val_effective_rank:.4f}")
+                else:
 
-                if metrics['val_loss'] < best_val_loss:
-                    best_val_loss = metrics['val_loss']
-                    best_model_state = copy.deepcopy(model.state_dict())
-                    best_sm_vectors = out.cpu().detach().numpy()
-                    best_f1 = metrics['val_f1']
+                    print(f"Epoch {current_epoch:03d} | Train Loss: {current_metrics['train_loss']:.4f}, Val Loss: {current_metrics['val_loss']:.4f} | "
+                        f"Train Acc: {current_metrics['train_acc']:.4f}, Val Acc: {current_metrics['val_acc']:.4f} | "
+                        f"Train F1: {current_metrics['train_f1']:.4f}, Val F1: {current_metrics['val_f1']:.4f}")
+
+                if current_metrics['val_loss'] < best_validation_loss:
+                    best_validation_loss = current_metrics['val_loss']
+                    optimal_model_state = copy.deepcopy(neural_network_model.state_dict())
+                    optimal_predictions = model_output.cpu().detach().numpy()
+                    best_f1_score = current_metrics['val_f1']
                     patience_counter = 0
                 else:
                     patience_counter += 1
-                    if patience_counter >= patience:
-                        print(f"Early stopping at epoch {epoch+1}")
+                    if patience_counter >= self.early_stopping_patience:
+                        print(f"Early stopping triggered at epoch {current_epoch+1}")
                         break
 
-            if (epoch + 1) % 20 == 0:
-                all_sm_vectors.append(out.cpu().detach().numpy())
+            if (current_epoch + 1) % 20 == 0 or current_epoch == current_epoch:
+                prediction_history_list.append(model_output.cpu().detach().numpy())
 
-        if best_model_state is not None:
-            model.load_state_dict(best_model_state)
+        if len(prediction_history_list) == 0:
+            neural_network_model.eval()
+            with torch.no_grad():
+                final_output = neural_network_model(graph_data)
+                prediction_history_list.append(final_output.cpu().detach().numpy())
 
-        model.eval()
+        if optimal_model_state is not None:
+            neural_network_model.load_state_dict(optimal_model_state)
+
+        neural_network_model.eval()
         with torch.no_grad():
-            out = model(data)
-            final_metrics = {}
-            test_pred = out[data.test_mask].argmax(dim=-1).cpu()
-            test_true = data.y[data.test_mask].cpu()
-            final_metrics['test_loss'] = F.cross_entropy(out[data.test_mask], data.y_noisy[data.test_mask]).item()
-            final_metrics['test_acc'] = accuracy_score(test_true, test_pred)
-            final_metrics['test_f1'] = f1_score(test_true, test_pred, average='micro')
+            final_model_output = neural_network_model(graph_data)
+            final_metrics_dict = {}
             
-            final_train_oversmoothing = self._compute_oversmoothing_for_mask(out, data.edge_index, data.train_mask, data.y)
-            final_val_oversmoothing = self._compute_oversmoothing_for_mask(out, data.edge_index, data.val_mask, data.y)
-            final_test_oversmoothing = self._compute_oversmoothing_for_mask(out, data.edge_index, data.test_mask, data.y)
+            test_predictions = final_model_output[graph_data.test_mask].argmax(dim=-1).cpu()
+            test_ground_truth = graph_data.y[graph_data.test_mask].cpu()
+            final_metrics_dict['test_loss'] = F.cross_entropy(final_model_output[graph_data.test_mask], graph_data.y_noisy[graph_data.test_mask]).item()
+            final_metrics_dict['test_acc'] = accuracy_score(test_ground_truth, test_predictions)
+            final_metrics_dict['test_f1'] = f1_score(test_ground_truth, test_predictions, average='micro')
+            
+            final_train_oversmoothing = self._calculate_oversmoothing_metrics_for_subset(
+                final_model_output, graph_data.edge_index, graph_data.train_mask, graph_data.y)
+            final_val_oversmoothing = self._calculate_oversmoothing_metrics_for_subset(
+                final_model_output, graph_data.edge_index, graph_data.val_mask, graph_data.y)
+            final_test_oversmoothing = self._calculate_oversmoothing_metrics_for_subset(
+                final_model_output, graph_data.edge_index, graph_data.test_mask, graph_data.y)
 
-        total_time = time.time() - start_time
+        total_training_time = time.time() - training_start_time
 
-        print(f"\nTraining completed in {total_time:.2f}s")
-        print(f"Test Loss: {final_metrics['test_loss']:.4f} | Test Acc: {final_metrics['test_acc']:.4f} | Test F1: {final_metrics['test_f1']:.4f}")
+        print(f"\nTraining completed in {total_training_time:.2f}s")
+        print(f"Test Loss: {final_metrics_dict['test_loss']:.4f} | Test Acc: {final_metrics_dict['test_acc']:.4f} | Test F1: {final_metrics_dict['test_f1']:.4f}")
         print("Final Oversmoothing Metrics:")
 
         if final_train_oversmoothing is not None:
@@ -248,149 +275,211 @@ class GraphCleanerDetector:
                 f"EProj: {final_test_oversmoothing['EProj']:.4f}, MAD: {final_test_oversmoothing['MAD']:.4f}, "
                 f"NumRank: {final_test_oversmoothing['NumRank']:.4f}, Erank: {final_test_oversmoothing['Erank']:.4f}")
 
-        return np.array(all_sm_vectors), best_sm_vectors, model
+        return np.array(prediction_history_list), optimal_predictions, neural_network_model
     
-    def confident_joint_estimation(self, noisy_labels, pred_probs, num_classes):
+    def _estimate_noise_transition_matrix(self, corrupted_labels, prediction_probabilities, total_classes):
 
-        print(f"Using {len(noisy_labels)} samples for confident joint estimation.")
+        print(f"Using {len(corrupted_labels)} samples for confident joint estimation.")
         
-        confident_joint = compute_confident_joint(noisy_labels, pred_probs)
-        py, noise_matrix, inv_noise_matrix = estimate_latent(confident_joint, noisy_labels)
+        # Compute confident joint matrix
+        confident_joint_matrix = compute_confident_joint(corrupted_labels, prediction_probabilities)
         
-        print(f"Estimated prior probabilities py: {py}")
+        # Estimate latent class distribution and noise matrices
+        estimated_class_priors, estimated_noise_matrix, inverse_noise_matrix = estimate_latent(
+            confident_joint_matrix, corrupted_labels)
+        
+        print(f"Estimated prior probabilities: {estimated_class_priors}")
         print("Estimated noise transition matrix:")
-        print(noise_matrix)
+        print(estimated_noise_matrix)
         
-        return py, noise_matrix, inv_noise_matrix
+        return estimated_class_priors, estimated_noise_matrix, inverse_noise_matrix
     
-    def negative_sampling(self, data_orig, noise_matrix, n_classes, sample_rate=None):
-        if sample_rate is None:
-            sample_rate = self.sample_rate
+    def _generate_negative_samples(self, original_graph_data, noise_transition_matrix, num_classes, sampling_rate=None):
+        
+        if sampling_rate is None:
+            sampling_rate = self.negative_sample_ratio
         import random
 
-        data = copy.deepcopy(data_orig)
-        train_idx = np.argwhere(data.held_mask.cpu().numpy() == True).flatten()
-        train_y = data.y[data.held_mask].cpu().numpy()
-
-        valid_subidx = set(range(len(train_y)))
-        for c in range(n_classes):
-            if c >= noise_matrix.shape[1] or np.isnan(noise_matrix[0, c]) or np.max(noise_matrix[:, c]) == 1:
-                print(f"Class {c} is invalid!")
-                valid = set(np.where(train_y != c)[0])
-                valid_subidx = valid_subidx & valid
-        train_idx = train_idx[list(valid_subidx)]
-
-        tr_sample_idx = random.sample(list(train_idx), int(np.round(sample_rate * len(train_idx))))
-        for idx in tr_sample_idx:
-            y = int(data.y[idx])
-            while y == int(data.y[idx]):
-                y = np.random.choice(range(n_classes), p=noise_matrix[:, y])
-            data.y[idx] = y
-
-        return data, tr_sample_idx
-
+        corrupted_graph_data = copy.deepcopy(original_graph_data)
     
-    def generate_features(self, k, data, noisy_data, sample_idx, all_sm_vectors, n_classes):
-        print("Generating new features")
+        training_node_indices = np.argwhere(corrupted_graph_data.held_mask.cpu().numpy() == True).flatten()
+        training_node_labels = corrupted_graph_data.y[corrupted_graph_data.held_mask].cpu().numpy()
 
-        y = np.zeros(data.num_nodes)
-        y[sample_idx] = 1
+        # Filter out invalid classes
+        valid_sample_indices = set(range(len(training_node_labels)))
+        for class_idx in range(num_classes):
+            if (class_idx >= noise_transition_matrix.shape[1] or 
+                np.isnan(noise_transition_matrix[0, class_idx]) or 
+                np.max(noise_transition_matrix[:, class_idx]) == 1):
+                print(f"Class {class_idx} is invalid for negative sampling.")
 
-        A = to_scipy_sparse_matrix(data.edge_index, num_nodes=data.num_nodes)
-        n = A.shape[0]
+                valid_indices = set(np.where(training_node_labels != class_idx)[0])
+                valid_sample_indices = valid_sample_indices & valid_indices
+                
+        training_node_indices = training_node_indices[list(valid_sample_indices)]
 
-        S = spdiags(np.squeeze((1e-10 + np.array(A.sum(1)))**-0.5), 0, n, n) @ A @ spdiags(np.squeeze((1e-10 + np.array(A.sum(0)))**-0.5), 0, n, n)
-        S2 = S @ S
-        S3 = S @ S2
-        S2.setdiag(np.zeros(n))
-        S3.setdiag(np.zeros(n))
-        print("S matrices calculated!")
-
-        ymat = y[:, np.newaxis]
-        L0 = np.eye(n_classes)[data.y.cpu().numpy()]
-        L_corr = ymat * np.eye(n_classes)[noisy_data.y.cpu().numpy()] + (1 - ymat) * L0
-        L1, L2, L3 = S @ L0, S2 @ L0, S3 @ L0
-
-        P0 = self.to_softmax(torch.tensor(all_sm_vectors[-1]))
-        P1, P2, P3 = S @ P0, S2 @ P0, S3 @ P0
-
-        features_list = [np.sum(L_corr * P0, axis=1, keepdims=True),
-                        np.sum(L_corr * P1, axis=1, keepdims=True),
-                        np.sum(L_corr * P2, axis=1, keepdims=True),
-                        np.sum(L_corr * L1, axis=1, keepdims=True),
-                        np.sum(L_corr * L2, axis=1, keepdims=True),
-                        np.sum(L_corr * L3, axis=1, keepdims=True)]
-
-        if k >= 4:
-            S4 = S @ S3
-            S4.setdiag(np.zeros(n))
-            L4 = S4 @ L0
-            P4 = S4 @ P0
-            features_list += [np.sum(L_corr * P4, axis=1, keepdims=True),
-                              np.sum(L_corr * L4, axis=1, keepdims=True)]
-
-        if k >= 5:
-            S5 = S @ S4
-            S5.setdiag(np.zeros(n))
-            L5 = S5 @ L0
-            P5 = S5 @ P0
-            features_list += [np.sum(L_corr * P5, axis=1, keepdims=True),
-                              np.sum(L_corr * L5, axis=1, keepdims=True)]
-
-        feat = np.hstack(features_list)
-        return feat, y
-
+        num_negative_samples = int(np.round(sampling_rate * len(training_node_indices)))
+        negative_sample_indices = random.sample(list(training_node_indices), num_negative_samples)
         
-    def detect_noise(self, data, model, num_classes):
-        print("Starting GraphCleaner Detection")
+        for node_index in negative_sample_indices:
+            current_label = int(corrupted_graph_data.y[node_index])
 
-        held_split = self.config.get('held_split', 'valid')
-        if held_split == 'train':
-            data.held_mask = data.train_mask
-        elif held_split == 'valid':
-            data.held_mask = data.val_mask
+            new_corrupted_label = current_label
+            while new_corrupted_label == current_label:
+                new_corrupted_label = np.random.choice(
+                    range(num_classes), 
+                    p=noise_transition_matrix[:, current_label]
+                )
+            corrupted_graph_data.y[node_index] = new_corrupted_label
+
+        return corrupted_graph_data, negative_sample_indices
+
+    def _construct_detection_features(self, neighborhood_depth, original_graph_data, corrupted_graph_data, 
+                                    negative_sample_indices, prediction_history, total_classes):
+
+        print("Generating detection features")
+
+        # Create binary indicator for negative samples
+        negative_sample_indicator = np.zeros(original_graph_data.num_nodes)
+        negative_sample_indicator[negative_sample_indices] = 1
+
+        adjacency_matrix = to_scipy_sparse_matrix(original_graph_data.edge_index, num_nodes=original_graph_data.num_nodes)
+        num_nodes = adjacency_matrix.shape[0]
+
+        # Create normalized graph Laplacian
+        normalized_laplacian = (
+            spdiags(np.squeeze((1e-10 + np.array(adjacency_matrix.sum(1)))**-0.5), 0, num_nodes, num_nodes) @ 
+            adjacency_matrix @ 
+            spdiags(np.squeeze((1e-10 + np.array(adjacency_matrix.sum(0)))**-0.5), 0, num_nodes, num_nodes)
+        )
+        
+        laplacian_squared = normalized_laplacian @ normalized_laplacian
+        laplacian_cubed = normalized_laplacian @ laplacian_squared
+        
+        laplacian_squared.setdiag(np.zeros(num_nodes))
+        laplacian_cubed.setdiag(np.zeros(num_nodes))
+        
+        print("Normalized Laplacian matrices calculated.")
+
+        # Prepare label matrices
+        negative_indicator_matrix = negative_sample_indicator[:, np.newaxis]
+        original_label_matrix = np.eye(total_classes)[original_graph_data.y.cpu().numpy()]
+        
+        # Create corrected label matrix
+        corrected_label_matrix = (negative_indicator_matrix * np.eye(total_classes)[corrupted_graph_data.y.cpu().numpy()] + 
+                                (1 - negative_indicator_matrix) * original_label_matrix)
+        
+        label_propagation_1hop = normalized_laplacian @ original_label_matrix
+        label_propagation_2hop = laplacian_squared @ original_label_matrix  
+        label_propagation_3hop = laplacian_cubed @ original_label_matrix
+
+        # Convert latest predictions to probabilities
+        latest_prediction_probs = self._convert_logits_to_probabilities(torch.tensor(prediction_history[-1]))
+        
+        prediction_propagation_1hop = normalized_laplacian @ latest_prediction_probs
+        prediction_propagation_2hop = laplacian_squared @ latest_prediction_probs
+        prediction_propagation_3hop = laplacian_cubed @ latest_prediction_probs
+
+        # Compute feature interactions
+        feature_list = [
+            np.sum(corrected_label_matrix * latest_prediction_probs, axis=1, keepdims=True),
+            np.sum(corrected_label_matrix * prediction_propagation_1hop, axis=1, keepdims=True),
+            np.sum(corrected_label_matrix * prediction_propagation_2hop, axis=1, keepdims=True),
+            np.sum(corrected_label_matrix * label_propagation_1hop, axis=1, keepdims=True),
+            np.sum(corrected_label_matrix * label_propagation_2hop, axis=1, keepdims=True),
+            np.sum(corrected_label_matrix * label_propagation_3hop, axis=1, keepdims=True)
+        ]
+
+        if neighborhood_depth >= 4:
+            laplacian_fourth = normalized_laplacian @ laplacian_cubed
+            laplacian_fourth.setdiag(np.zeros(num_nodes))
+            label_propagation_4hop = laplacian_fourth @ original_label_matrix
+            prediction_propagation_4hop = laplacian_fourth @ latest_prediction_probs
+            feature_list += [
+                np.sum(corrected_label_matrix * prediction_propagation_4hop, axis=1, keepdims=True),
+                np.sum(corrected_label_matrix * label_propagation_4hop, axis=1, keepdims=True)
+            ]
+
+        if neighborhood_depth >= 5:
+            laplacian_fifth = normalized_laplacian @ laplacian_fourth
+            laplacian_fifth.setdiag(np.zeros(num_nodes))
+            label_propagation_5hop = laplacian_fifth @ original_label_matrix
+            prediction_propagation_5hop = laplacian_fifth @ latest_prediction_probs
+            feature_list += [
+                np.sum(corrected_label_matrix * prediction_propagation_5hop, axis=1, keepdims=True),
+                np.sum(corrected_label_matrix * label_propagation_5hop, axis=1, keepdims=True)
+            ]
+
+        feature_matrix = np.hstack(feature_list)
+        return feature_matrix, negative_sample_indicator
+
+    def execute_noise_detection_pipeline(self, graph_data, neural_network_model, num_classes):
+
+        print("Starting GraphCleaner Detection Pipeline")
+
+        # Determine which split to use for noise matrix estimation
+        if self.validation_split_type == 'train':
+            graph_data.held_mask = graph_data.train_mask
+        elif self.validation_split_type == 'valid':
+            graph_data.held_mask = graph_data.val_mask
         else:
-            data.held_mask = data.test_mask
+            graph_data.held_mask = graph_data.test_mask
 
-        all_sm_vectors, best_sm_vectors, trained_model = self.train_base_gnn(
-            data, model, self.config.get('total_epochs', 200)
+        # Train base GNN model
+        prediction_history, optimal_predictions, trained_neural_network = self._train_base_neural_network(
+            graph_data, neural_network_model, self.training_epochs
         )
         
-        val_noisy_labels = data.y_noisy[data.val_mask].cpu().numpy()
-        val_pred_probs = self.to_softmax(torch.tensor(best_sm_vectors))[data.val_mask.cpu().numpy()]
+        # Extract validation data
+        validation_corrupted_labels = graph_data.y_noisy[graph_data.val_mask].cpu().numpy()
+        validation_prediction_probs = self._convert_logits_to_probabilities(
+            torch.tensor(optimal_predictions))[graph_data.val_mask.cpu().numpy()]
         
-        py, noise_matrix, inv_noise_matrix = self.confident_joint_estimation(
-            val_noisy_labels, val_pred_probs, num_classes
+        # Estimate noise transition matrix
+        class_priors, noise_transition_matrix, inverse_noise_matrix = self._estimate_noise_transition_matrix(
+            validation_corrupted_labels, validation_prediction_probs, num_classes
         )
         
-        self.visualize_noise_matrix(noise_matrix, num_classes, "Learned")
+        self._visualize_noise_transition_matrix(noise_transition_matrix, num_classes, "Learned")
         
-        noisy_data, sample_idx = self.negative_sampling(data, noise_matrix, num_classes)
-        print(f"{len(sample_idx)} negative samples generated")
+        # Generate negative samples
+        artificially_corrupted_data, artificial_corruption_indices = self._generate_negative_samples(
+            graph_data, noise_transition_matrix, num_classes)
+        print(f"{len(artificial_corruption_indices)} negative samples generated")
 
-        features, binary_labels = self.generate_features(
-            self.k, data, noisy_data, sample_idx, all_sm_vectors, num_classes
+        # Generate features for binary classification
+        detection_features, binary_noise_labels = self._construct_detection_features(
+            self.neighborhood_depth, graph_data, artificially_corrupted_data, 
+            artificial_corruption_indices, prediction_history, num_classes
         )
 
         print("Training binary noise detector")
 
-        val_mask_cpu = data.val_mask.cpu().numpy()
-        test_mask_cpu = data.test_mask.cpu().numpy()
+        # Prepare training and test data for binary classifier
+        validation_mask_cpu = graph_data.val_mask.cpu().numpy()
+        test_mask_cpu = graph_data.test_mask.cpu().numpy()
         
-        X_train = features[val_mask_cpu].reshape(features[val_mask_cpu].shape[0], -1)
-        y_train = binary_labels[val_mask_cpu]
+        classifier_training_features = detection_features[validation_mask_cpu].reshape(
+            detection_features[validation_mask_cpu].shape[0], -1)
+        classifier_training_labels = binary_noise_labels[validation_mask_cpu]
 
-        X_test = features[test_mask_cpu].reshape(features[test_mask_cpu].shape[0], -1)
+        classifier_test_features = detection_features[test_mask_cpu].reshape(
+            detection_features[test_mask_cpu].shape[0], -1)
         
-        classifier = LogisticRegression(max_iter=self.max_iter_classifier, random_state=42)
-        classifier.fit(X_train, y_train)
+        # Train binary logistic regression classifier
+        binary_noise_classifier = LogisticRegression(
+            max_iter=self.classifier_max_iterations, 
+            random_state=42
+        )
+        binary_noise_classifier.fit(classifier_training_features, classifier_training_labels)
 
-        test_probs = classifier.predict_proba(X_test)[:, 1]
-        test_predictions = test_probs > 0.5
+        # Generate final predictions
+        test_confidence_scores = binary_noise_classifier.predict_proba(classifier_test_features)[:, 1]
+        test_binary_predictions = test_confidence_scores > 0.5
         
-        return test_predictions, test_probs, classifier, trained_model
+        return test_binary_predictions, test_confidence_scores, binary_noise_classifier, trained_neural_network
 
-    def visualize_noise_matrix(self, noise_matrix, num_classes, title_prefix=""):
+    def _visualize_noise_transition_matrix(self, noise_matrix, num_classes, title_prefix=""):
 
         plt.figure(figsize=(8, 6))
         plt.imshow(noise_matrix.T, cmap='Blues', vmin=0, vmax=1)
@@ -407,49 +496,119 @@ class GraphCleanerDetector:
         plt.tight_layout()
         plt.show()
     
-    def evaluate_detection(self, predictions, ground_truth, probs, model=None, data=None):
+    def clean_training_data(self, graph_data, neural_network_model, num_classes):
+ 
+        print("Starting GraphCleaner Training Data Cleaning")
 
-        acc = accuracy_score(ground_truth, predictions)
-        f1 = f1_score(ground_truth, predictions)
-        precision = precision_score(ground_truth, predictions)
-        recall = recall_score(ground_truth, predictions)
-        mcc = matthews_corrcoef(ground_truth, predictions)
-        auc = roc_auc_score(ground_truth, probs)
+        # Set validation split for noise matrix estimation
+        if self.validation_split_type == 'train':
+            graph_data.held_mask = graph_data.train_mask
+        elif self.validation_split_type == 'valid':
+            graph_data.held_mask = graph_data.val_mask
+        else:
+            graph_data.held_mask = graph_data.test_mask
+
+        # Train base GNN model on noisy training data
+        prediction_history, optimal_predictions, trained_neural_network = self._train_base_neural_network(
+            graph_data, neural_network_model, self.training_epochs
+        )
         
-        oversmoothing_metrics = None
-        if model is not None and data is not None:
-            model.eval()
+        # Extract validation data
+        validation_corrupted_labels = graph_data.y[graph_data.val_mask].cpu().numpy()
+        validation_prediction_probs = self._convert_logits_to_probabilities(
+            torch.tensor(optimal_predictions))[graph_data.val_mask.cpu().numpy()]
+        
+        # Estimate noise transition matrix
+        class_priors, noise_transition_matrix, inverse_noise_matrix = self._estimate_noise_transition_matrix(
+            validation_corrupted_labels, validation_prediction_probs, num_classes
+        )
+        
+        # Generate negative samples
+        artificially_corrupted_data, artificial_corruption_indices = self._generate_negative_samples(
+            graph_data, noise_transition_matrix, num_classes)
+        print(f"{len(artificial_corruption_indices)} negative samples generated for detector training")
+
+        # Generate features for binary classification
+        detection_features, binary_noise_labels = self._construct_detection_features(
+            self.neighborhood_depth, graph_data, artificially_corrupted_data, 
+            artificial_corruption_indices, prediction_history, num_classes
+        )
+
+        # Train binary noise detector
+        validation_mask_cpu = graph_data.val_mask.cpu().numpy()
+        classifier_training_features = detection_features[validation_mask_cpu].reshape(
+            detection_features[validation_mask_cpu].shape[0], -1)
+        classifier_training_labels = binary_noise_labels[validation_mask_cpu]
+
+        binary_noise_classifier = LogisticRegression(
+            max_iter=self.classifier_max_iterations, 
+            random_state=42
+        )
+        binary_noise_classifier.fit(classifier_training_features, classifier_training_labels)
+
+        # Apply detector
+        train_mask_cpu = graph_data.train_mask.cpu().numpy()
+        train_detection_features = detection_features[train_mask_cpu].reshape(
+            detection_features[train_mask_cpu].shape[0], -1)
+        
+        train_noise_predictions = binary_noise_classifier.predict(train_detection_features)
+        train_confidence_scores = binary_noise_classifier.predict_proba(train_detection_features)[:, 1]
+        
+        train_indices = torch.where(graph_data.train_mask)[0]
+        detected_noisy_indices = train_indices[torch.tensor(train_noise_predictions.astype(bool))]
+        
+        clean_train_mask = graph_data.train_mask.clone()
+        clean_train_mask[detected_noisy_indices] = False
+        
+        print(f"GraphCleaner detected {len(detected_noisy_indices)} noisy nodes out of {graph_data.train_mask.sum()} training nodes")
+        print(f"Clean training set size: {clean_train_mask.sum()} nodes")
+        
+        return clean_train_mask, graph_data
+
+    def evaluate_detection_performance(self, noise_predictions, ground_truth_labels, confidence_scores, trained_model=None, graph_data=None):
+
+        detection_accuracy = accuracy_score(ground_truth_labels, noise_predictions)
+        detection_f1 = f1_score(ground_truth_labels, noise_predictions)
+        detection_precision = precision_score(ground_truth_labels, noise_predictions)
+        detection_recall = recall_score(ground_truth_labels, noise_predictions)
+        detection_mcc = matthews_corrcoef(ground_truth_labels, noise_predictions)
+        detection_auc = roc_auc_score(ground_truth_labels, confidence_scores)
+        
+        oversmoothing_results = None
+        if trained_model is not None and graph_data is not None:
+            trained_model.eval()
             with torch.no_grad():
-                out = model(data)
-                oversmoothing_metrics = self._compute_oversmoothing_for_mask(
-                    out, data.edge_index, data.test_mask, data.y
+                model_predictions = trained_model(graph_data)
+                oversmoothing_results = self._calculate_oversmoothing_metrics_for_subset(
+                    model_predictions, graph_data.edge_index, graph_data.test_mask, graph_data.y
                 )
         
         print(f"GraphCleaner Training completed!")
-        print(f"Test Accuracy: {acc:.4f}")
-        print(f"Test F1: {f1:.4f}")
-        print(f"Test Precision: {precision:.4f}")
-        print(f"Test Recall: {recall:.4f}")
-        print(f"Test MCC: {mcc:.4f}")
-        print(f"Test AUC: {auc:.4f}")
-        print(f"Samples detected as noisy: {np.sum(predictions)}")
-        print(f"Actual noisy samples: {np.sum(ground_truth)}")
+        print(f"Test Accuracy: {detection_accuracy:.4f}")
+        print(f"Test F1: {detection_f1:.4f}")
+        print(f"Test Precision: {detection_precision:.4f}")
+        print(f"Test Recall: {detection_recall:.4f}")
+        print(f"Test MCC: {detection_mcc:.4f}")
+        print(f"Test AUC: {detection_auc:.4f}")
+        print(f"Samples detected as noisy: {np.sum(noise_predictions)}")
+        print(f"Actual noisy samples: {np.sum(ground_truth_labels)}")
         
         return {
-            'accuracy': acc,
-            'f1': f1,
-            'precision': precision,
-            'recall': recall,
-            'mcc': mcc,
-            'auc': auc,
-            'oversmoothing': oversmoothing_metrics
+            'accuracy': detection_accuracy,
+            'f1': detection_f1,
+            'precision': detection_precision,
+            'recall': detection_recall,
+            'mcc': detection_mcc,
+            'auc': detection_auc,
+            'oversmoothing': oversmoothing_results
         }
 
-def get_noisy_ground_truth(data, noisy_indices):
 
-    ground_truth = torch.zeros(data.num_nodes, dtype=torch.bool)
-    if isinstance(noisy_indices, torch.Tensor):
-        ground_truth[noisy_indices] = True
+def create_noise_ground_truth_labels(graph_data, noisy_node_indices):
+
+    ground_truth_labels = torch.zeros(graph_data.num_nodes, dtype=torch.bool)
+    if isinstance(noisy_node_indices, torch.Tensor):
+        ground_truth_labels[noisy_node_indices] = True
     else:
-        ground_truth[torch.tensor(noisy_indices)] = True
-    return ground_truth
+        ground_truth_labels[torch.tensor(noisy_node_indices)] = True
+    return ground_truth_labels

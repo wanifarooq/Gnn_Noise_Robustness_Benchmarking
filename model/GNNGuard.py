@@ -14,379 +14,489 @@ from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_sc
 
 from model.evaluation import OversmoothingMetrics
 
-class GNNGuard(nn.Module):
-    def __init__(self, nfeat, nhid, nclass, dropout=0.5, lr=0.01, weight_decay=5e-4,
-                 attention=True, device=None, P0=0.5, K=2, D2=16):
-        super(GNNGuard, self).__init__()
+
+class GNNGuardTrainer:
+
+    def __init__(self, input_features, hidden_channels, num_classes, dropout=0.5, lr=0.01, 
+                 weight_decay=5e-4, attention=True, device=None, similarity_threshold=0.5, 
+                 num_layers=2, attention_dim=16):
 
         assert device is not None, "Please specify 'device'!"
         self.device = device
-        self.nfeat = nfeat
-        self.nclass = nclass
-        self.dropout = dropout
-        self.lr = lr
-        self.weight_decay = weight_decay if attention else 0
-        self.attention = attention
-
-        self.P0 = P0
-        self.K = K
-        self.D2 = D2
-
-        self.output = None
-        self.best_model = None
+        self.input_features = input_features
+        self.num_classes = num_classes
+        self.hidden_channels = hidden_channels
+        self.dropout_rate = dropout
+        self.learning_rate = lr
+        self.weight_decay_coeff = weight_decay if attention else 0
+        self.use_attention = attention
+        
+        # GNNGuard specific parameters
+        self.similarity_threshold = similarity_threshold
+        self.num_layers = num_layers
+        self.attention_dim = attention_dim
+        
+        self.model_output = None
+        self.best_model_state = None
         self.best_output = None
-        self.adj_norm = None
-        self.features = None
-        self.labels = None
-
+        self.normalized_adjacency = None
+        self.node_features = None
+        self.node_labels = None
+        
+        # Oversmoothing evaluation
         self.oversmoothing_evaluator = OversmoothingMetrics(device=device)
-        self.oversmoothing_history = {
+        self.oversmoothing_metrics_history = {
             'train': [],
             'val': [],
             'test': []
         }
+        
+        self._initialize_model()
+    
+    def _initialize_model(self):
 
-        self.gate = Parameter(torch.rand(1))
-        self.test_value = Parameter(torch.rand(1))
+        self.model = GNNGuardModel(
+            input_features=self.input_features,
+            hidden_channels=self.hidden_channels,
+            num_classes=self.num_classes,
+            dropout=self.dropout_rate,
+            similarity_threshold=self.similarity_threshold,
+            num_layers=self.num_layers,
+            attention_dim=self.attention_dim,
+            device=self.device
+        ).to(self.device)
+    
+    def _compute_mask_oversmoothing_metrics(self, node_embeddings, edge_index, node_mask, labels=None):
 
-        self.gc_layers = nn.ModuleList()
-        self.gc_layers.append(GCNConv(nfeat, nhid, bias=True))
-        if self.K > 1:
-            self.gc_layers.append(GCNConv(nhid, self.D2, bias=True))
-        self.gc_layers.append(GCNConv(D2 if self.K > 1 else nhid, nclass, bias=True))
-
-    def _compute_oversmoothing_for_mask(self, embeddings, edge_index, mask, labels=None):
         try:
-            mask_indices = torch.where(mask)[0]
-            mask_embeddings = embeddings[mask]
+            masked_node_indices = torch.where(node_mask)[0]
+            masked_embeddings = node_embeddings[node_mask]
             
-            mask_set = set(mask_indices.cpu().numpy())
-            edge_mask = torch.tensor([
-                src.item() in mask_set and tgt.item() in mask_set
-                for src, tgt in edge_index.t()
+            # Filter edges
+            masked_node_set = set(masked_node_indices.cpu().numpy())
+            edge_filter = torch.tensor([
+                source.item() in masked_node_set and target.item() in masked_node_set
+                for source, target in edge_index.t()
             ], device=edge_index.device)
             
-            if not edge_mask.any():
+            if not edge_filter.any():
+
                 return {
-                    'NumRank': float(min(mask_embeddings.shape)),
-                    'Erank': float(min(mask_embeddings.shape)),
+                    'NumRank': float(min(masked_embeddings.shape)),
+                    'Erank': float(min(masked_embeddings.shape)),
                     'EDir': 0.0,
                     'EDir_traditional': 0.0,
                     'EProj': 0.0,
                     'MAD': 0.0
                 }
             
-            masked_edges = edge_index[:, edge_mask]
-            node_mapping = {orig_idx.item(): local_idx for local_idx, orig_idx in enumerate(mask_indices)}
+            filtered_edges = edge_index[:, edge_filter]
+            local_node_mapping = {orig_idx.item(): local_idx 
+                                for local_idx, orig_idx in enumerate(masked_node_indices)}
             
-            remapped_edges = torch.stack([
-                torch.tensor([node_mapping[src.item()] for src in masked_edges[0]], device=edge_index.device),
-                torch.tensor([node_mapping[tgt.item()] for tgt in masked_edges[1]], device=edge_index.device)
+            remapped_edge_index = torch.stack([
+                torch.tensor([local_node_mapping[src.item()] for src in filtered_edges[0]], 
+                           device=edge_index.device),
+                torch.tensor([local_node_mapping[tgt.item()] for tgt in filtered_edges[1]], 
+                           device=edge_index.device)
             ])
             
-            graphs_in_class = [{
-                'X': mask_embeddings,
-                'edge_index': remapped_edges,
+            # Prepare data for oversmoothing evaluation
+            graph_data_for_class = [{
+                'X': masked_embeddings,
+                'edge_index': remapped_edge_index,
                 'edge_weight': None
             }]
             
             return self.oversmoothing_evaluator.compute_all_metrics(
-                X=mask_embeddings,
-                edge_index=remapped_edges,
-                graphs_in_class=graphs_in_class
+                X=masked_embeddings,
+                edge_index=remapped_edge_index,
+                graphs_in_class=graph_data_for_class
             )
             
         except Exception as e:
             print(f"Warning: Could not compute oversmoothing metrics for mask: {e}")
             return None
+    
+    def _convert_sparse_matrix_to_torch_tensor(self, sparse_matrix):
+        # Convert scipy sparse matrix to PyTorch sparse tensor
+        sparse_coo = sparse_matrix.tocoo().astype(np.float32)
+        indices_tensor = torch.from_numpy(
+            np.vstack((sparse_coo.row, sparse_coo.col)).astype(np.int64)
+        ).to(self.device)
+        values_tensor = torch.from_numpy(sparse_coo.data).to(self.device)
+        shape_tensor = torch.Size(sparse_coo.shape)
+        return torch.sparse_coo_tensor(indices_tensor, values_tensor, shape_tensor, 
+                                     dtype=torch.float32, device=self.device)
+    
+    def _add_self_loops_to_sparse_tensor(self, adjacency_tensor, loop_weight=1):
 
-    def forward(self, x, adj):
-        x = x.to_dense() if x.is_sparse else x
-        x = x.to(self.device)
+        num_nodes = adjacency_tensor.shape[0]
+        diagonal_indices = torch.arange(num_nodes, dtype=torch.int64)
+        self_loop_indices = torch.stack((diagonal_indices, diagonal_indices), dim=0)
+        self_loop_values = torch.ones(num_nodes, dtype=torch.float32)
+        identity_tensor = torch.sparse.FloatTensor(
+            self_loop_indices, self_loop_values, adjacency_tensor.shape
+        ).to(self.device)
+        return adjacency_tensor + identity_tensor
+    
+    def _reset_model_parameters(self):
 
-        for i, gc in enumerate(self.gc_layers[:-1]):
-            if self.attention:
-                adj_mod = self.att_coef(x, adj, i=i)
-                edge_index = adj_mod._indices()
-                adj_values = adj_mod._values()
-            else:
-                edge_index = adj._indices()
-                adj_values = adj._values()
+        for gcn_layer in self.model.gcn_layers:
+            gcn_layer.reset_parameters()
+    
+    def train_model(self, node_features, adjacency_matrix, node_labels, train_indices, 
+                   val_indices, test_indices=None, max_epochs=200, verbose=True, patience=5):
 
-            x = gc(x, edge_index, edge_weight=adj_values)
-            x = F.relu(x)
-            x = F.dropout(x, self.dropout, training=self.training)
+        self._reset_model_parameters()
+        
+        # Prepare data
+        if not isinstance(adjacency_matrix, torch.Tensor):
+            adjacency_matrix = self._convert_sparse_matrix_to_torch_tensor(adjacency_matrix)
+        
+        self.node_features = node_features.to(self.device)
+        self.normalized_adjacency = self._add_self_loops_to_sparse_tensor(adjacency_matrix.to(self.device))
+        self.node_labels = node_labels.to(self.device)
+        
+        self._train_with_early_stopping(node_labels, train_indices, val_indices, 
+                                       test_indices, max_epochs, patience, verbose)
+    
+    def _train_with_early_stopping(self, labels, train_indices, val_indices, test_indices, 
+                                  max_epochs, patience, verbose):
 
-        gc_last = self.gc_layers[-1]
-        if self.attention:
-            adj_mod = self.att_coef(x, adj, i=self.K)
-            edge_index = adj_mod._indices()
-            adj_values = adj_mod._values()
-        else:
-            edge_index = adj._indices()
-            adj_values = adj._values()
-
-        x = gc_last(x, edge_index, edge_weight=adj_values)
-        return F.log_softmax(x, dim=1)
-
-    def att_coef(self, fea, edge_index, is_lil=False, i=0, debug=False):
-        if not is_lil:
-            edge_index = edge_index._indices()
-        else:
-            edge_index = edge_index.tocoo()
-
-        n_node = fea.shape[0]
-
-        row, col = edge_index[0].cpu().data.numpy(), edge_index[1].cpu().data.numpy()
-        row = np.array(row, dtype=np.int64, copy=True)
-        col = np.array(col, dtype=np.int64, copy=True)
-
-        fea_copy = fea.cpu().data.numpy()
-        sim_matrix = cosine_similarity(X=fea_copy, Y=fea_copy)
-        sim_matrix = np.array(sim_matrix, dtype=np.float32, copy=True)
-        sim = sim_matrix[row, col].copy()
-        sim[sim < self.P0] = 0
-
-
-        att_dense = lil_matrix((n_node, n_node), dtype=np.float32)
-        att_dense[row, col] = sim
-
-        if att_dense[0, 0] == 1:
-            att_dense -= sp.diags(att_dense.diagonal(), offsets=0, format="lil")
-
-        att_dense_norm = normalize(att_dense, axis=1, norm='l1')
-
-        if att_dense_norm[0, 0] == 0:
-            degree = (att_dense_norm != 0).sum(1).A1
-            lam = 1 / (degree + 1)
-            self_weight = sp.diags(np.array(lam), offsets=0, format="lil")
-            att = att_dense_norm + self_weight
-        else:
-            att = att_dense_norm
-
-        row, col = att.nonzero()
-        att_edge_weight = att[row, col]
-        att_edge_weight = np.array(att_edge_weight, dtype=np.float32, copy=True).flatten()
-        att_edge_weight = np.exp(att_edge_weight)
-        att_edge_weight = torch.tensor(att_edge_weight, dtype=torch.float32).to(self.device)
-
-        att_adj = torch.tensor(np.vstack((row, col)), dtype=torch.int64).to(self.device)
-        shape = (n_node, n_node)
-        new_adj = torch.sparse.FloatTensor(att_adj, att_edge_weight, shape).to(self.device)
-
-        return new_adj
-
-
-    def add_loop_sparse(self, adj, fill_value=1):
-        row = torch.arange(adj.shape[0], dtype=torch.int64)
-        i = torch.stack((row, row), dim=0)
-        v = torch.ones(adj.shape[0], dtype=torch.float32)
-        I_n = torch.sparse.FloatTensor(i, v, adj.shape).to(self.device)
-        return adj + I_n
-
-    def initialize(self):
-        for gc in self.gc_layers:
-            gc.reset_parameters()
-
-    def fit(self, features, adj, labels, idx_train, idx_val, idx_test=None,
-            epochs=200, verbose=True, patience=5):
-        self.initialize()
-
-        if not isinstance(adj, torch.Tensor):
-            adj = self.sparse_mx_to_torch_sparse_tensor(adj)
-
-        self.features = features.to(self.device)
-        self.adj_norm = self.add_loop_sparse(adj.to(self.device))
-        self.labels = labels.to(self.device)
-
-        self._train_with_early_stopping(labels, idx_train, idx_val, idx_test, epochs, patience, verbose)
-
-    def sparse_mx_to_torch_sparse_tensor(self, sparse_mx):
-        sparse_mx = sparse_mx.tocoo().astype(np.float32)
-        indices = torch.from_numpy(np.vstack((sparse_mx.row, sparse_mx.col)).astype(np.int64)).to(self.device)
-        values = torch.from_numpy(sparse_mx.data).to(self.device)
-        shape = torch.Size(sparse_mx.shape)
-        return torch.sparse_coo_tensor(indices, values, shape, dtype=torch.float32, device=self.device)
-
-    def _train_with_early_stopping(self, labels, idx_train, idx_val, idx_test, epochs, patience, verbose):
         if verbose:
             print('Training GNNGuard model')
-        optimizer = optim.Adam(self.parameters(), lr=self.lr, weight_decay=self.weight_decay)
+            
+        optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate, 
+                             weight_decay=self.weight_decay_coeff)
+        
+        # Early stopping
+        best_validation_loss = float('inf')
+        patience_counter = patience
+        best_model_weights = deepcopy(self.model.state_dict())
+        
+        for epoch in range(max_epochs):
 
-        early_stopping = patience
-        best_loss_val = float('inf')
-        patience_counter = early_stopping
-        weights = deepcopy(self.state_dict())
-
-        for i in range(epochs):
-            self.train()
+            self.model.train()
             optimizer.zero_grad()
-            output_train = self.forward(self.features, self.adj_norm)
-            loss_train = F.nll_loss(output_train[idx_train], labels[idx_train])
-            loss_train.backward()
+            
+            train_output = self.model(self.node_features, self.normalized_adjacency, 
+                                    use_attention=self.use_attention)
+            train_loss = F.nll_loss(train_output[train_indices], labels[train_indices])
+            train_loss.backward()
             optimizer.step()
-
-            self.eval()
+            
+            self.model.eval()
             with torch.no_grad():
-                output_val = self.forward(self.features, self.adj_norm)
-                loss_val = F.nll_loss(output_val[idx_val], labels[idx_val])
-
-                pred_train_labels = output_train[idx_train].max(1)[1].cpu().numpy()
-                pred_val_labels = output_val[idx_val].max(1)[1].cpu().numpy()
-                true_train_labels = labels[idx_train].cpu().numpy()
-                true_val_labels = labels[idx_val].cpu().numpy()
-
-                train_acc = accuracy_score(true_train_labels, pred_train_labels)
-                val_acc = accuracy_score(true_val_labels, pred_val_labels)
-                train_f1 = f1_score(true_train_labels, pred_train_labels, average='macro')
-                val_f1 = f1_score(true_val_labels, pred_val_labels, average='macro')
-
-                train_mask = torch.zeros(self.features.size(0), dtype=torch.bool, device=self.device)
-                val_mask = torch.zeros(self.features.size(0), dtype=torch.bool, device=self.device)
-                train_mask[idx_train] = True
-                val_mask[idx_val] = True
-
-                edge_index = self.adj_norm._indices()
-                train_oversmoothing = self._compute_oversmoothing_for_mask(output_train, edge_index, train_mask, labels)
-                val_oversmoothing = self._compute_oversmoothing_for_mask(output_val, edge_index, val_mask, labels)
-
-                if train_oversmoothing is not None:
-                    self.oversmoothing_history['train'].append(train_oversmoothing)
-                if val_oversmoothing is not None:
-                    self.oversmoothing_history['val'].append(val_oversmoothing)
-
+                val_output = self.model(self.node_features, self.normalized_adjacency, 
+                                      use_attention=self.use_attention)
+                val_loss = F.nll_loss(val_output[val_indices], labels[val_indices])
+                
+                train_predictions = train_output[train_indices].max(1)[1].cpu().numpy()
+                val_predictions = val_output[val_indices].max(1)[1].cpu().numpy()
+                train_true_labels = labels[train_indices].cpu().numpy()
+                val_true_labels = labels[val_indices].cpu().numpy()
+                
+                train_accuracy = accuracy_score(train_true_labels, train_predictions)
+                val_accuracy = accuracy_score(val_true_labels, val_predictions)
+                train_f1_score = f1_score(train_true_labels, train_predictions, average='macro')
+                val_f1_score = f1_score(val_true_labels, val_predictions, average='macro')
+                
+                # Compute oversmoothing metrics
+                train_node_mask = torch.zeros(self.node_features.size(0), dtype=torch.bool, device=self.device)
+                val_node_mask = torch.zeros(self.node_features.size(0), dtype=torch.bool, device=self.device)
+                train_node_mask[train_indices] = True
+                val_node_mask[val_indices] = True
+                
+                edge_connectivity = self.normalized_adjacency._indices()
+                if epoch%20 == 0:
+                    train_oversmoothing_metrics = self._compute_mask_oversmoothing_metrics(
+                        train_output, edge_connectivity, train_node_mask, labels)
+                    val_oversmoothing_metrics = self._compute_mask_oversmoothing_metrics(
+                        val_output, edge_connectivity, val_node_mask, labels)
+                
+                if train_oversmoothing_metrics is not None:
+                    self.oversmoothing_metrics_history['train'].append(train_oversmoothing_metrics)
+                if val_oversmoothing_metrics is not None:
+                    self.oversmoothing_metrics_history['val'].append(val_oversmoothing_metrics)
+            
             if verbose:
-                train_de = train_oversmoothing['EDir'] if train_oversmoothing else 0.0
-                train_de_traditional = train_oversmoothing['EDir_traditional'] if train_oversmoothing else 0.0
-                train_eproj = train_oversmoothing['EProj'] if train_oversmoothing else 0.0
-                train_mad = train_oversmoothing['MAD'] if train_oversmoothing else 0.0
-                train_num_rank = train_oversmoothing['NumRank'] if train_oversmoothing else 0.0
-                train_eff_rank = train_oversmoothing['Erank'] if train_oversmoothing else 0.0
-                
-                val_de = val_oversmoothing['EDir'] if val_oversmoothing else 0.0
-                val_de_traditional = val_oversmoothing['EDir_traditional'] if val_oversmoothing else 0.0
-                val_eproj = val_oversmoothing['EProj'] if val_oversmoothing else 0.0
-                val_mad = val_oversmoothing['MAD'] if val_oversmoothing else 0.0
-                val_num_rank = val_oversmoothing['NumRank'] if val_oversmoothing else 0.0
-                val_eff_rank = val_oversmoothing['Erank'] if val_oversmoothing else 0.0
-                
-                print(f"Epoch {i+1:03d} | Train Loss: {loss_train:.4f}, Val Loss: {loss_val:.4f} | "
-                    f"Train Acc: {train_acc:.4f}, Val Acc: {val_acc:.4f} | "
-                    f"Train F1: {train_f1:.4f}, Val F1: {val_f1:.4f}")
-                print(f"Train DE: {train_de:.4f}, Val DE: {val_de:.4f} | "
-                    f"Train DE_trad: {train_de_traditional:.4f}, Val DE_trad: {val_de_traditional:.4f} | "
-                    f"Train EProj: {train_eproj:.4f}, Val EProj: {val_eproj:.4f} | "
-                    f"Train MAD: {train_mad:.4f}, Val MAD: {val_mad:.4f} | "
-                    f"Train NumRank: {train_num_rank:.4f}, Val NumRank: {val_num_rank:.4f} | "
-                    f"Train Erank: {train_eff_rank:.4f}, Val Erank: {val_eff_rank:.4f}")
-
-            if loss_val < best_loss_val:
-                best_loss_val = loss_val
-                self.output = output_val
-                weights = deepcopy(self.state_dict())
-                patience_counter = early_stopping
+                self._log_training_progress(epoch, train_loss, val_loss, train_accuracy, val_accuracy,
+                                          train_f1_score, val_f1_score, train_oversmoothing_metrics,
+                                          val_oversmoothing_metrics)
+            
+            # Early stopping
+            if val_loss < best_validation_loss:
+                best_validation_loss = val_loss
+                self.model_output = val_output
+                best_model_weights = deepcopy(self.model.state_dict())
+                patience_counter = patience
             else:
                 patience_counter -= 1
-
+            
             if patience_counter <= 0:
                 if verbose:
-                    print(f'Early stopping at epoch {i}, best_loss_val={best_loss_val:.4f}')
+                    print(f'Early stopping at epoch {epoch}, best_val_loss={best_validation_loss:.4f}')
                 break
-
-        self.load_state_dict(weights)
         
-        if idx_test is not None:
-            test_mask = torch.zeros(self.features.size(0), dtype=torch.bool, device=self.device)
-            train_mask_final = torch.zeros(self.features.size(0), dtype=torch.bool, device=self.device)
-            val_mask_final = torch.zeros(self.features.size(0), dtype=torch.bool, device=self.device)
-            
-            train_mask_final[idx_train] = True
-            val_mask_final[idx_val] = True
-            test_mask[idx_test] = True
-            
-            self.eval()
-            with torch.no_grad():
-                final_output = self.forward(self.features, self.adj_norm)
-                
-                pred_test_labels = final_output[idx_test].max(1)[1].cpu().numpy()
-                true_test_labels = self.labels[idx_test].cpu().numpy()
-                test_acc = accuracy_score(true_test_labels, pred_test_labels)
-                test_f1 = f1_score(true_test_labels, pred_test_labels, average='macro')
-                test_loss = F.nll_loss(final_output[idx_test], self.labels[idx_test])
-                
-                edge_index = self.adj_norm._indices()
-                
-                final_train_oversmoothing = self._compute_oversmoothing_for_mask(final_output, edge_index, train_mask_final, self.labels)
-                final_val_oversmoothing = self._compute_oversmoothing_for_mask(final_output, edge_index, val_mask_final, self.labels)
-                final_test_oversmoothing = self._compute_oversmoothing_for_mask(final_output, edge_index, test_mask, self.labels)
-                
-                if final_test_oversmoothing is not None:
-                    self.oversmoothing_history['test'].append(final_test_oversmoothing)
-            
-            final_metrics = {
-                'test_loss': test_loss.item(),
-                'test_acc': test_acc,
-                'test_f1': test_f1
-            }
-            
-            if verbose:
-                print(f"\nTraining completed")
-                print(f"Test Loss: {final_metrics['test_loss']:.4f} | Test Acc: {final_metrics['test_acc']:.4f} | Test F1: {final_metrics['test_f1']:.4f}")
-                print("Final Oversmoothing Metrics:")
-                
-                if final_train_oversmoothing is not None:
-                    print(f"Train: EDir: {final_train_oversmoothing['EDir']:.4f}, EDir_traditional: {final_train_oversmoothing['EDir_traditional']:.4f}, "
-                          f"EProj: {final_train_oversmoothing['EProj']:.4f}, MAD: {final_train_oversmoothing['MAD']:.4f}, "
-                          f"NumRank: {final_train_oversmoothing['NumRank']:.4f}, Erank: {final_train_oversmoothing['Erank']:.4f}")
-                
-                if final_val_oversmoothing is not None:
-                    print(f"Val: EDir: {final_val_oversmoothing['EDir']:.4f}, EDir_traditional: {final_val_oversmoothing['EDir_traditional']:.4f}, "
-                          f"EProj: {final_val_oversmoothing['EProj']:.4f}, MAD: {final_val_oversmoothing['MAD']:.4f}, "
-                          f"NumRank: {final_val_oversmoothing['NumRank']:.4f}, Erank: {final_val_oversmoothing['Erank']:.4f}")
-                
-                if final_test_oversmoothing is not None:
-                    print(f"Test: EDir: {final_test_oversmoothing['EDir']:.4f}, EDir_traditional: {final_test_oversmoothing['EDir_traditional']:.4f}, "
-                          f"EProj: {final_test_oversmoothing['EProj']:.4f}, MAD: {final_test_oversmoothing['MAD']:.4f}, "
-                          f"NumRank: {final_test_oversmoothing['NumRank']:.4f}, Erank: {final_test_oversmoothing['Erank']:.4f}")
-
-    def test(self, idx_test):
-        from sklearn.metrics import precision_score, recall_score
+        self.model.load_state_dict(best_model_weights)
         
-        self.eval()
+        if test_indices is not None:
+            self._evaluate_final_test_performance(train_indices, val_indices, test_indices, verbose)
+    
+    def _log_training_progress(self, epoch, train_loss, val_loss, train_acc, val_acc, 
+                             train_f1, val_f1, train_oversmoothing, val_oversmoothing):
+        
+        print(f"Epoch {epoch+1:03d} | Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f} | "
+              f"Train Acc: {train_acc:.4f}, Val Acc: {val_acc:.4f} | "
+              f"Train F1: {train_f1:.4f}, Val F1: {val_f1:.4f}")
+        if epoch%20 == 0:
+            train_edir = train_oversmoothing['EDir'] if train_oversmoothing else 0.0
+            train_edir_trad = train_oversmoothing['EDir_traditional'] if train_oversmoothing else 0.0
+            train_eproj = train_oversmoothing['EProj'] if train_oversmoothing else 0.0
+            train_mad = train_oversmoothing['MAD'] if train_oversmoothing else 0.0
+            train_numrank = train_oversmoothing['NumRank'] if train_oversmoothing else 0.0
+            train_erank = train_oversmoothing['Erank'] if train_oversmoothing else 0.0
+            
+            val_edir = val_oversmoothing['EDir'] if val_oversmoothing else 0.0
+            val_edir_trad = val_oversmoothing['EDir_traditional'] if val_oversmoothing else 0.0
+            val_eproj = val_oversmoothing['EProj'] if val_oversmoothing else 0.0
+            val_mad = val_oversmoothing['MAD'] if val_oversmoothing else 0.0
+            val_numrank = val_oversmoothing['NumRank'] if val_oversmoothing else 0.0
+            val_erank = val_oversmoothing['Erank'] if val_oversmoothing else 0.0
+            print(f"Train EDir: {train_edir:.4f}, Val EDir: {val_edir:.4f} | "
+                  f"Train EDir_trad: {train_edir_trad:.4f}, Val EDir_trad: {val_edir_trad:.4f} | "
+                  f"Train EProj: {train_eproj:.4f}, Val EProj: {val_eproj:.4f} | "
+                  f"Train MAD: {train_mad:.4f}, Val MAD: {val_mad:.4f} | "
+                  f"Train NumRank: {train_numrank:.4f}, Val NumRank: {val_numrank:.4f} | "
+                  f"Train Erank: {train_erank:.4f}, Val Erank: {val_erank:.4f}")
+    
+    def _evaluate_final_test_performance(self, train_indices, val_indices, test_indices, verbose):
+
+        test_node_mask = torch.zeros(self.node_features.size(0), dtype=torch.bool, device=self.device)
+        train_node_mask = torch.zeros(self.node_features.size(0), dtype=torch.bool, device=self.device)
+        val_node_mask = torch.zeros(self.node_features.size(0), dtype=torch.bool, device=self.device)
+        
+        train_node_mask[train_indices] = True
+        val_node_mask[val_indices] = True
+        test_node_mask[test_indices] = True
+        
+        self.model.eval()
         with torch.no_grad():
-            output = self.forward(self.features, self.adj_norm)
-            loss_test = F.nll_loss(output[idx_test], self.labels[idx_test])
-            pred_test_labels = output[idx_test].max(1)[1].cpu().numpy()
-            true_test_labels = self.labels[idx_test].cpu().numpy()
+            final_output = self.model(self.node_features, self.normalized_adjacency, 
+                                    use_attention=self.use_attention)
             
-            acc_test = accuracy_score(true_test_labels, pred_test_labels)
-            f1_test = f1_score(true_test_labels, pred_test_labels, average='macro')
-            precision_test = precision_score(true_test_labels, pred_test_labels, average='macro')
-            recall_test = recall_score(true_test_labels, pred_test_labels, average='macro')
+            test_predictions = final_output[test_indices].max(1)[1].cpu().numpy()
+            test_true_labels = self.node_labels[test_indices].cpu().numpy()
+            test_accuracy = accuracy_score(test_true_labels, test_predictions)
+            test_f1_score = f1_score(test_true_labels, test_predictions, average='macro')
+            test_loss = F.nll_loss(final_output[test_indices], self.node_labels[test_indices])
             
-            test_mask = torch.zeros(self.features.size(0), dtype=torch.bool, device=self.device)
-            test_mask[idx_test] = True
-            edge_index = self.adj_norm._indices()
-            test_oversmoothing = self._compute_oversmoothing_for_mask(output, edge_index, test_mask, self.labels)
+            edge_connectivity = self.normalized_adjacency._indices()
+            final_train_oversmoothing = self._compute_mask_oversmoothing_metrics(
+                final_output, edge_connectivity, train_node_mask, self.node_labels)
+            final_val_oversmoothing = self._compute_mask_oversmoothing_metrics(
+                final_output, edge_connectivity, val_node_mask, self.node_labels)
+            final_test_oversmoothing = self._compute_mask_oversmoothing_metrics(
+                final_output, edge_connectivity, test_node_mask, self.node_labels)
+            
+            if final_test_oversmoothing is not None:
+                self.oversmoothing_metrics_history['test'].append(final_test_oversmoothing)
+        
+        if verbose:
+            print(f"\nTraining completed")
+            print(f"Test Loss: {test_loss:.4f} | Test Acc: {test_accuracy:.4f} | Test F1: {test_f1_score:.4f}")
+            print("Final Oversmoothing Metrics:")
+            
+            self._log_final_oversmoothing_metrics(final_train_oversmoothing, 
+                                                final_val_oversmoothing, 
+                                                final_test_oversmoothing)
+    
+    def _log_final_oversmoothing_metrics(self, train_metrics, val_metrics, test_metrics):
+
+        if train_metrics is not None:
+            print(f"Train: EDir: {train_metrics['EDir']:.4f}, EDir_traditional: {train_metrics['EDir_traditional']:.4f}, "
+                  f"EProj: {train_metrics['EProj']:.4f}, MAD: {train_metrics['MAD']:.4f}, "
+                  f"NumRank: {train_metrics['NumRank']:.4f}, Erank: {train_metrics['Erank']:.4f}")
+        
+        if val_metrics is not None:
+            print(f"Val: EDir: {val_metrics['EDir']:.4f}, EDir_traditional: {val_metrics['EDir_traditional']:.4f}, "
+                  f"EProj: {val_metrics['EProj']:.4f}, MAD: {val_metrics['MAD']:.4f}, "
+                  f"NumRank: {val_metrics['NumRank']:.4f}, Erank: {val_metrics['Erank']:.4f}")
+        
+        if test_metrics is not None:
+            print(f"Test: EDir: {test_metrics['EDir']:.4f}, EDir_traditional: {test_metrics['EDir_traditional']:.4f}, "
+                  f"EProj: {test_metrics['EProj']:.4f}, MAD: {test_metrics['MAD']:.4f}, "
+                  f"NumRank: {test_metrics['NumRank']:.4f}, Erank: {test_metrics['Erank']:.4f}")
+    
+    def evaluate_model(self, test_indices):
+
+        self.model.eval()
+        with torch.no_grad():
+            model_output = self.model(self.node_features, self.normalized_adjacency, 
+                                    use_attention=self.use_attention)
+            test_loss = F.nll_loss(model_output[test_indices], self.node_labels[test_indices])
+            
+            test_predictions = model_output[test_indices].max(1)[1].cpu().numpy()
+            test_true_labels = self.node_labels[test_indices].cpu().numpy()
+            
+            test_accuracy = accuracy_score(test_true_labels, test_predictions)
+            test_f1_score = f1_score(test_true_labels, test_predictions, average='macro')
+            test_precision = precision_score(test_true_labels, test_predictions, average='macro')
+            test_recall = recall_score(test_true_labels, test_predictions, average='macro')
+            
+            # Oversmoothing metrics
+            test_node_mask = torch.zeros(self.node_features.size(0), dtype=torch.bool, device=self.device)
+            test_node_mask[test_indices] = True
+            edge_connectivity = self.normalized_adjacency._indices()
+            test_oversmoothing_metrics = self._compute_mask_oversmoothing_metrics(
+                model_output, edge_connectivity, test_node_mask, self.node_labels)
 
         print(f"GNNGuard Training completed!")
-        print(f"Test Accuracy: {acc_test:.4f}")
-        print(f"Test F1: {f1_test:.4f}")
-        print(f"Test Precision: {precision_test:.4f}")
-        print(f"Test Recall: {recall_test:.4f}")
+        print(f"Test Accuracy: {test_accuracy:.4f}")
+        print(f"Test F1: {test_f1_score:.4f}")
+        print(f"Test Precision: {test_precision:.4f}")
+        print(f"Test Recall: {test_recall:.4f}")
         
-        if test_oversmoothing is not None:
-            print(f"Test Oversmoothing: EDir: {test_oversmoothing['EDir']:.4f}, EDir_traditional: {test_oversmoothing['EDir_traditional']:.4f}, "
-                  f"EProj: {test_oversmoothing['EProj']:.4f}, MAD: {test_oversmoothing['MAD']:.4f}, "
-                  f"NumRank: {test_oversmoothing['NumRank']:.4f}, Erank: {test_oversmoothing['Erank']:.4f}")
+        if test_oversmoothing_metrics is not None:
+            print(f"Test Oversmoothing: EDir: {test_oversmoothing_metrics['EDir']:.4f}, "
+                  f"EDir_traditional: {test_oversmoothing_metrics['EDir_traditional']:.4f}, "
+                  f"EProj: {test_oversmoothing_metrics['EProj']:.4f}, MAD: {test_oversmoothing_metrics['MAD']:.4f}, "
+                  f"NumRank: {test_oversmoothing_metrics['NumRank']:.4f}, Erank: {test_oversmoothing_metrics['Erank']:.4f}")
         
         return {
-            'accuracy': acc_test,
-            'f1': f1_test,
-            'precision': precision_test,
-            'recall': recall_test,
-            'oversmoothing': test_oversmoothing
+            'accuracy': test_accuracy,
+            'f1': test_f1_score,
+            'precision': test_precision,
+            'recall': test_recall,
+            'oversmoothing': test_oversmoothing_metrics
         }
     
-    def get_oversmoothing_history(self):
-        return self.oversmoothing_history
+    def get_oversmoothing_metrics_history(self):
+
+        return self.oversmoothing_metrics_history
+
+
+class GNNGuardModel(nn.Module):
+    
+    def __init__(self, input_features, hidden_channels, num_classes, dropout=0.5, 
+                 similarity_threshold=0.5, num_layers=2, attention_dim=16, device=None):
+
+        super(GNNGuardModel, self).__init__()
+        
+        self.device = device
+        self.dropout_rate = dropout
+        self.similarity_threshold = similarity_threshold
+        self.num_layers = num_layers
+        self.attention_dim = attention_dim
+        
+        self.attention_gate = Parameter(torch.rand(1))
+        self.test_parameter = Parameter(torch.rand(1))
+        
+        self.gcn_layers = nn.ModuleList()
+        self.gcn_layers.append(GCNConv(input_features, hidden_channels, bias=True))
+        
+        if self.num_layers > 1:
+            self.gcn_layers.append(GCNConv(hidden_channels, self.attention_dim, bias=True))
+        
+        final_input_dim = self.attention_dim if self.num_layers > 1 else hidden_channels
+        self.gcn_layers.append(GCNConv(final_input_dim, num_classes, bias=True))
+    
+    def forward(self, node_features, adjacency_tensor, use_attention=True):
+
+        x = node_features.to_dense() if node_features.is_sparse else node_features
+        x = x.to(self.device)
+        
+        for layer_idx, gcn_layer in enumerate(self.gcn_layers[:-1]):
+            if use_attention:
+                modified_adjacency = self._compute_attention_coefficients(x, adjacency_tensor, layer_idx)
+                edge_indices = modified_adjacency._indices()
+                edge_weights = modified_adjacency._values()
+            else:
+                edge_indices = adjacency_tensor._indices()
+                edge_weights = adjacency_tensor._values()
+            
+            x = gcn_layer(x, edge_indices, edge_weight=edge_weights)
+            x = F.relu(x)
+            x = F.dropout(x, self.dropout_rate, training=self.training)
+        
+        final_gcn_layer = self.gcn_layers[-1]
+        if use_attention:
+            modified_adjacency = self._compute_attention_coefficients(x, adjacency_tensor, self.num_layers)
+            edge_indices = modified_adjacency._indices()
+            edge_weights = modified_adjacency._values()
+        else:
+            edge_indices = adjacency_tensor._indices()
+            edge_weights = adjacency_tensor._values()
+        
+        x = final_gcn_layer(x, edge_indices, edge_weight=edge_weights)
+        return F.log_softmax(x, dim=1)
+    
+    def _compute_attention_coefficients(self, node_features, adjacency_tensor, layer_index, 
+                                      is_lil_matrix=False, debug=False):
+
+        if not is_lil_matrix:
+            edge_indices = adjacency_tensor._indices()
+        else:
+            adjacency_coo = adjacency_tensor.tocoo()
+            edge_indices = torch.stack([
+                torch.from_numpy(adjacency_coo.row).to(self.device),
+                torch.from_numpy(adjacency_coo.col).to(self.device)
+            ])
+        
+        num_nodes = node_features.shape[0]
+        
+        # Extract edge connectivity
+        source_nodes, target_nodes = edge_indices[0].cpu().data.numpy(), edge_indices[1].cpu().data.numpy()
+        source_nodes = np.array(source_nodes, dtype=np.int64, copy=True)
+        target_nodes = np.array(target_nodes, dtype=np.int64, copy=True)
+        
+        # Compute cosine similarity
+        features_cpu = node_features.cpu().data.numpy()
+        similarity_matrix = cosine_similarity(X=features_cpu, Y=features_cpu)
+        similarity_matrix = np.array(similarity_matrix, dtype=np.float32, copy=True)
+        
+        # Extract similarities
+        edge_similarities = similarity_matrix[source_nodes, target_nodes].copy()
+        
+        # Apply similarity threshold
+        edge_similarities[edge_similarities < self.similarity_threshold] = 0
+        
+        # Create sparse attention matrix
+        attention_matrix = lil_matrix((num_nodes, num_nodes), dtype=np.float32)
+        attention_matrix[source_nodes, target_nodes] = edge_similarities
+        
+        # Remove self-loops if they exist
+        if attention_matrix[0, 0] == 1:
+            attention_matrix -= sp.diags(attention_matrix.diagonal(), offsets=0, format="lil")
+        
+        # Normalize attention weights
+        normalized_attention_matrix = normalize(attention_matrix, axis=1, norm='l1')
+        
+        # Add self-connections with adaptive weights
+        if normalized_attention_matrix[0, 0] == 0:
+            # Compute adaptive self-loop weights
+            node_degrees = (normalized_attention_matrix != 0).sum(1).A1
+            adaptive_self_weights = 1 / (node_degrees + 1)
+            self_loop_matrix = sp.diags(np.array(adaptive_self_weights), offsets=0, format="lil")
+            final_attention_matrix = normalized_attention_matrix + self_loop_matrix
+        else:
+            final_attention_matrix = normalized_attention_matrix
+        
+        attention_row_indices, attention_col_indices = final_attention_matrix.nonzero()
+        attention_edge_weights = final_attention_matrix[attention_row_indices, attention_col_indices]
+        attention_edge_weights = np.array(attention_edge_weights, dtype=np.float32, copy=True).flatten()
+        
+        attention_edge_weights = np.exp(attention_edge_weights)
+        attention_weights_tensor = torch.tensor(attention_edge_weights, dtype=torch.float32).to(self.device)
+        
+        attention_edge_indices = torch.tensor(
+            np.vstack((attention_row_indices, attention_col_indices)), dtype=torch.int64
+        ).to(self.device)
+        
+        tensor_shape = (num_nodes, num_nodes)
+        attention_weighted_adjacency = torch.sparse.FloatTensor(
+            attention_edge_indices, attention_weights_tensor, tensor_shape
+        ).to(self.device)
+        
+        return attention_weighted_adjacency
