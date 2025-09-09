@@ -8,494 +8,636 @@ from sklearn.metrics import f1_score, precision_score, recall_score
 
 from model.evaluation import OversmoothingMetrics
 
-class Net(nn.Module):
-    def __init__(self, input_dim=2, hidden_dim=32):
+class LabelWeightingNetwork(nn.Module):
+
+    def __init__(self, input_dimensions=2, hidden_dimensions=32):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
+        self.weighting_network = nn.Sequential(
+            nn.Linear(input_dimensions, hidden_dimensions),
             nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
+            nn.Linear(hidden_dimensions, hidden_dimensions),
             nn.ReLU(),
-            nn.Linear(hidden_dim, 1),
+            nn.Linear(hidden_dimensions, 1),
             nn.Sigmoid()
         )
     
-    def forward(self, l1, l2):
-        losses = torch.stack([l1, l2], dim=1)
-        return self.net(losses).squeeze(-1)
+    def forward(self, loss_noisy_labels, loss_pseudo_labels):
+        combined_losses = torch.stack([loss_noisy_labels, loss_pseudo_labels], dim=1)
+        return self.weighting_network(combined_losses).squeeze(-1)
 
 class GNNCleanerTrainer:
-
-    def __init__(self, config, data, device, num_classes, gnn_model=None):
-        self.config = config
-        self.data = data
-        self.device = device
-        self.num_classes = num_classes
+    def __init__(self, configuration, graph_data, computation_device, number_of_classes, base_gnn_model=None):
+        self.config = configuration
+        self.data = graph_data
+        self.device = computation_device
+        self.num_classes = number_of_classes
         
-        self.epochs = config.get('epochs', 200)
-        self.lr = config.get('lr', 0.01)
-        self.net_lr = config.get('net_lr', 0.001)
-        self.weight_decay = config.get('weight_decay', 5e-4)
+        # Training hyperparameters
+        self.max_training_epochs = configuration.get('max_epochs', 200)
+        self.model_learning_rate = configuration.get('model_learning_rate', 0.01)
+        self.network_learning_rate = configuration.get('net_learning_rate', 0.001)
+        self.weight_decay_coefficient = float(configuration.get('weight_decay', 5e-4))
+        
+        # Label propagation parameters
+        self.label_propagation_iterations = configuration.get('label_propagation_iterations', 50)
+        self.similarity_epsilon = float(configuration.get('similarity_epsilon', 1e-8))
+        
+        self.clean_set_ratio = configuration.get('clean_set_ratio', 0.1)
+        
+        # Early stopping
+        self.early_stopping_patience = int(configuration.get('early_stopping_patience', 10))
 
-        self.lp_iters = config.get('lp_iters', 50)
-        self.epsilon = config.get('epsilon', 1e-8)
-
-        if gnn_model is not None:
-            self.model = gnn_model.to(device)
+        if base_gnn_model is not None:
+            self.gnn_model = base_gnn_model.to(computation_device)
         else:
-            raise ValueError("GNN Cleaner requires a GNN model")
+            raise ValueError("GNN Cleaner requires a base GNN model")
         
-        self.net = Net(input_dim=2, hidden_dim=32).to(device)
+        self.label_weighting_net = nn.Sequential(
+            nn.Linear(2, 32),
+            nn.ReLU(),
+            nn.Linear(32, 32),
+            nn.ReLU(), 
+            nn.Linear(32, 1),
+            nn.Sigmoid()
+        ).to(computation_device)
         
-        self.model_optimizer = torch.optim.Adam(
-            self.model.parameters(), 
-            lr=self.lr, weight_decay=self.weight_decay
+        self.gnn_optimizer = torch.optim.Adam(
+            self.gnn_model.parameters(), 
+            lr=self.model_learning_rate, 
+            weight_decay=self.weight_decay_coefficient
         )
         
-        self.net_optimizer = torch.optim.Adam(
-            self.net.parameters(),
-            lr=self.net_lr
+        self.network_optimizer = torch.optim.Adam(
+            self.label_weighting_net.parameters(),
+            lr=self.network_learning_rate
         )
         
-        self.clean_mask = self.data.val_mask.clone()
-        self.expanding_clean_mask = self.clean_mask.clone()
+        self._initialize_clean_set()
         
-        self.results = {'train': -1, 'val': -1, 'test': -1}
-        self._print_stats()
-        self.patience = config.get('patience', 10)
+        self.training_results = {'train': -1, 'val': -1, 'test': -1}
+        self._display_dataset_statistics()
 
-        self.oversmoothing_evaluator = OversmoothingMetrics(device=device)
-        self.oversmoothing_history = {
+        # Initialize oversmoothing evaluation
+        self.oversmoothing_metric_evaluator = OversmoothingMetrics(device=computation_device)
+        self.oversmoothing_training_history = {
             'train': [],
             'val': [],
             'test': []
         }
 
-    def _print_stats(self):
-        print("GNN Cleaner Dataset Statistics")
-        print(f"Nodes: {self.data.x.shape[0]}")
-        print(f"Features: {self.data.x.shape[1]}")
-        print(f"Classes: {self.num_classes}")
-        print(f"Edges: {self.data.edge_index.shape[1] // 2}")
-        print(f"Train/Val/Test: {self.data.train_mask.sum()}/{self.data.val_mask.sum()}/{self.data.test_mask.sum()}")
-        print(f"Clean set size: {self.clean_mask.sum()}")
+    def _initialize_clean_set(self):
+        if not hasattr(self.data, 'y_original'):
+            raise ValueError("Need y_original to identify clean samples")
         
-        if hasattr(self.data, 'y_noisy'):
-            train_noise = (self.data.y[self.data.train_mask] != self.data.y_noisy[self.data.train_mask]).sum().item()
-            if train_noise > 0:
-                actual_rate = train_noise / self.data.train_mask.sum().item()
-                print(f"Label noise rate: {actual_rate:.3f} ({train_noise} labels changed)")
-
-    def compute_similarity_matrix(self, edge_index, node_features):
-        num_nodes = node_features.size(0)
-        
-        row, col = edge_index.cpu().numpy()
-        adjacency = sparse.coo_matrix(
-            (np.ones(len(row)), (row, col)), 
-            shape=(num_nodes, num_nodes)
-        )
-        
-        W_data = []
-        W_row = []
-        W_col = []
-        
-        for edge_idx in range(len(row)):
-            i, j = row[edge_idx], col[edge_idx]
-            if i != j:
-                feat_i = node_features[i].cpu().numpy()
-                feat_j = node_features[j].cpu().numpy()
-                distance = np.linalg.norm(feat_i - feat_j) + self.epsilon
-                similarity = 1.0 / distance
-                
-                W_data.append(similarity)
-                W_row.append(i)
-                W_col.append(j)
-        
-        W = sparse.coo_matrix((W_data, (W_row, W_col)), shape=(num_nodes, num_nodes))
-        
-        degrees = np.array(W.sum(axis=1)).flatten()
-        degrees[degrees == 0] = 1.0
-        D_inv_sqrt = sparse.diags(1.0 / np.sqrt(degrees))
-        S = D_inv_sqrt @ W @ D_inv_sqrt
-        
-        return S
-
-    def label_propagation(self, similarity_matrix, initial_labels, clean_mask, num_iterations=50):
-        num_nodes = initial_labels.size(0)
-        
-        Y = torch.zeros(num_nodes, self.num_classes, device=self.device)
-        
-        clean_indices = clean_mask.nonzero(as_tuple=True)[0]
-        for idx in clean_indices:
-            label = initial_labels[idx].item()
-            Y[idx, label] = 1.0
-        
-        S = torch.from_numpy(similarity_matrix.toarray()).float().to(self.device)
-        
-        for k in range(num_iterations):
-            Y = torch.matmul(S, Y)
-            
-            for idx in clean_indices:
-                label = initial_labels[idx].item()
-                Y[idx] = 0.0
-                Y[idx, label] = 1.0
-        
-        return Y
-
-    def select_clean_samples(self, pseudo_labels, given_labels, train_mask):
-        pseudo_hard = pseudo_labels.argmax(dim=1)
-        
-        train_indices = train_mask.nonzero(as_tuple=True)[0]
-        selected_mask = torch.zeros_like(train_mask)
-        left_mask = torch.zeros_like(train_mask)
+        train_indices = self.data.train_mask.nonzero(as_tuple=True)[0]
+        clean_train_indices = []
         
         for idx in train_indices:
-            if pseudo_hard[idx] == given_labels[idx]:
-                selected_mask[idx] = True
-            else:
-                left_mask[idx] = True
+            if self.data.y[idx] == self.data.y_original[idx]:
+                clean_train_indices.append(idx)
         
-        return selected_mask, left_mask
+        clean_train_indices = torch.tensor(clean_train_indices, device=self.device)
+        
+        if len(clean_train_indices) < int(train_indices.size(0) * self.clean_set_ratio):
+            print(f"Warning: Only {len(clean_train_indices)} truly clean nodes found in training set")
+            print(f"Needed: {int(train_indices.size(0) * self.clean_set_ratio)} clean nodes")
+            print("Selecting additional nodes randomly from training set as approximation")
+            
+            remaining_train = train_indices[~torch.isin(train_indices, clean_train_indices)]
+            needed = int(train_indices.size(0) * self.clean_set_ratio) - len(clean_train_indices)
+            
+            if len(remaining_train) > 0:
+                additional_indices = remaining_train[torch.randperm(len(remaining_train))[:needed]]
+                clean_train_indices = torch.cat([clean_train_indices, additional_indices])
+        
+        max_clean = max(1, int(train_indices.size(0) * self.clean_set_ratio))
+        clean_train_indices = clean_train_indices[:max_clean]
+        
+        self.initial_clean_mask = torch.zeros(self.data.y.size(0), dtype=torch.bool, device=self.device)
+        self.initial_clean_mask[clean_train_indices] = True
+        
+        self.expanding_clean_sample_mask = self.initial_clean_mask.clone()
+        
+        truly_clean = (self.data.y[clean_train_indices] == self.data.y_original[clean_train_indices]).sum()
+        print(f"Initialized clean set with {self.initial_clean_mask.sum()} nodes from training set")
+        print(f"Of these, {truly_clean} are truly clean, {len(clean_train_indices) - truly_clean} are approximations")
 
-    def train_step(self, epoch):
-        self.model.train()
-        self.net.train()
+    def _execute_label_propagation(self, similarity_matrix, initial_node_labels, clean_nodes_mask, propagation_iterations=50):
+        total_nodes = initial_node_labels.size(0)
         
-        x = self.data.x.to(self.device)
-        edge_index = self.data.edge_index.to(self.device)
-        given_labels = self.data.y.to(self.device)
-        true_labels  = self.data.y_original.to(self.device)
+        label_probabilities = torch.zeros(total_nodes, self.num_classes, device=self.device)
+        
+        # Set clean node labels
+        clean_node_indices = clean_nodes_mask.nonzero(as_tuple=True)[0]
+        for node_idx in clean_node_indices:
+            if hasattr(self.data, 'y_original'):
+                node_label = self.data.y_original[node_idx].item()  # Use ground truth
+            else:
+                node_label = initial_node_labels[node_idx].item()
+            label_probabilities[node_idx, node_label] = 1.0
+        
+        similarity_tensor = torch.from_numpy(similarity_matrix.toarray()).float().to(self.device)
+        
+        # Iterative label propagation
+        for iteration in range(propagation_iterations):
+            label_probabilities = torch.matmul(similarity_tensor, label_probabilities)
+            
+            # Reset clean node labels
+            for node_idx in clean_node_indices:
+                if hasattr(self.data, 'y_original'):
+                    node_label = self.data.y_original[node_idx].item()
+                else:
+                    node_label = initial_node_labels[node_idx].item()
+                label_probabilities[node_idx] = 0.0
+                label_probabilities[node_idx, node_label] = 1.0
+        
+        return label_probabilities
+
+    def _perform_training_step(self, current_epoch):
+
+        self.gnn_model.train()
+        self.label_weighting_net.train()
+        
+        node_features = self.data.x.to(self.device)
+        edge_connectivity = self.data.edge_index.to(self.device)
+        noisy_node_labels = self.data.y.to(self.device)
+        ground_truth_labels = self.data.y_original.to(self.device) if hasattr(self.data, 'y_original') else self.data.y.to(self.device)
 
         try:
-            node_features = self.model(self.data)
+            node_embeddings = self.gnn_model(self.data)
         except:
-            node_features = self.model(x, edge_index)
+            node_embeddings = self.gnn_model(node_features, edge_connectivity)
 
-        S = self.compute_similarity_matrix(edge_index, node_features.detach())
-
-        pseudo_labels = self.label_propagation(
-            S, true_labels, self.expanding_clean_mask, self.lp_iters
+        # Similarity matrix
+        similarity_matrix = self._build_node_similarity_matrix(edge_connectivity, node_embeddings.detach())
+        
+        # Label propagation from clean nodes
+        propagated_labels = self._execute_label_propagation(
+            similarity_matrix, ground_truth_labels, self.expanding_clean_sample_mask, self.label_propagation_iterations
         )
 
-        selected_mask, left_mask = self.select_clean_samples(
-            pseudo_labels, given_labels, self.data.train_mask
-        )
-
-        self.expanding_clean_mask = (self.expanding_clean_mask | selected_mask).detach()
+        # Sample Selection
+        D_select = torch.zeros_like(self.data.train_mask, dtype=torch.bool)
+        D_left = torch.zeros_like(self.data.train_mask, dtype=torch.bool)
+        
+        train_node_indices = self.data.train_mask.nonzero(as_tuple=True)[0]
+        for node_idx in train_node_indices:
+            pseudo_label = propagated_labels[node_idx].argmax().item()
+            given_label = noisy_node_labels[node_idx].item()
+            
+            if pseudo_label == given_label:
+                D_select[node_idx] = True
+            else:
+                D_left[node_idx] = True
+        
+        # Update expanding clean set
+        self.expanding_clean_sample_mask = (self.expanding_clean_sample_mask | D_select).detach()
         
         total_loss = 0.0
-        net_loss_val = 0.0
         
-        if selected_mask.sum() > 0:
-            selected_logits = node_features[selected_mask]
-            selected_labels = given_labels[selected_mask]
+        # Training on selected node
+        if D_select.sum() > 0:
+            selected_embeddings = node_embeddings[D_select]
+            selected_labels = ground_truth_labels[D_select]
             
-            loss_selected = F.cross_entropy(selected_logits, selected_labels)
-            total_loss += loss_selected
+            select_loss = F.cross_entropy(selected_embeddings, selected_labels)
+            
+            # One-step optimization
+            self.gnn_optimizer.zero_grad()
+            select_loss.backward(retain_graph=True)
+            self.gnn_optimizer.step()
+            
+            total_loss += select_loss.item()
 
-        if left_mask.sum() > 0:
-            left_indices = left_mask.nonzero(as_tuple=True)[0]
+        # Label Correction
+        if D_left.sum() > 0:
+            try:
+                updated_embeddings = self.gnn_model(self.data)
+            except:
+                updated_embeddings = self.gnn_model(node_features, edge_connectivity)
             
-            left_logits = node_features[left_indices]
-            left_given_labels = given_labels[left_indices]
-            left_pseudo_labels = pseudo_labels[left_indices]
+            left_indices = D_left.nonzero(as_tuple=True)[0]
+
+            corrected_loss = 0.0
+            for node_idx in left_indices:
+
+                y_hat = updated_embeddings[node_idx].unsqueeze(0)
+                given_label = noisy_node_labels[node_idx].unsqueeze(0)
+                pseudo_label_dist = propagated_labels[node_idx].unsqueeze(0)
+                
+                l1 = F.cross_entropy(y_hat, given_label, reduction='none')
+                l2 = -(pseudo_label_dist * F.log_softmax(y_hat, dim=1)).sum(dim=1)
+                
+                # Compute lambda
+                lambda_j = self.label_weighting_net(torch.stack([l1.detach(), l2.detach()], dim=1))
+                
+                # Correct label
+                given_onehot = F.one_hot(given_label, self.num_classes).float()
+                corrected_label = lambda_j * given_onehot + (1 - lambda_j) * pseudo_label_dist
+                
+                # Training loss
+                node_loss = -(corrected_label * F.log_softmax(y_hat, dim=1)).sum()
+                corrected_loss += node_loss
             
-            l1 = F.cross_entropy(left_logits, left_given_labels, reduction='none')
-            
-            l2 = -(left_pseudo_labels * F.log_softmax(left_logits, dim=1)).sum(dim=1)
-            
-            lambda_weights = self.net(l1.detach(), l2.detach())
-            
-            left_given_onehot = F.one_hot(left_given_labels, self.num_classes).float()
-            corrected_labels = (lambda_weights.unsqueeze(1) * left_given_onehot + 
-                             (1 - lambda_weights.unsqueeze(1)) * left_pseudo_labels)
-            
-            train_loss = -(corrected_labels * F.log_softmax(left_logits, dim=1)).sum(dim=1).mean()
-            total_loss += train_loss
-        
-        if total_loss != 0.0:
-            self.model_optimizer.zero_grad()
-            total_loss.backward(retain_graph=True)
-            
-            model_grads = []
-            for param in self.model.parameters():
-                if param.grad is not None:
-                    model_grads.append(param.grad.clone())
-                else:
-                    model_grads.append(torch.zeros_like(param))
-            
-            self.model_optimizer.step()
-            
-            if left_mask.sum() > 0:
-                clean_indices = self.clean_mask.nonzero(as_tuple=True)[0]
+            if corrected_loss > 0:
+                avg_corrected_loss = corrected_loss / len(left_indices)
+                
+                # Update GNN
+                self.gnn_optimizer.zero_grad()
+                avg_corrected_loss.backward(retain_graph=True)
+                
+                temp_gnn_params = {}
+                for name, param in self.gnn_model.named_parameters():
+                    if param.grad is not None:
+                        temp_gnn_params[name] = param.clone().detach()
+                
+                self.gnn_optimizer.step()
+                
+                # Update aggregation network
+                clean_indices = self.initial_clean_mask.nonzero(as_tuple=True)[0]
                 if len(clean_indices) > 0:
                     try:
-                        updated_logits = self.model(self.data)
+                        final_embeddings = self.gnn_model(self.data)
                     except:
-                        updated_logits = self.model(x, edge_index)
+                        final_embeddings = self.gnn_model(node_features, edge_connectivity)
                     
-                    clean_logits = updated_logits[clean_indices]
-                    clean_labels = true_labels[clean_indices]
-                    net_loss = F.cross_entropy(clean_logits, clean_labels)
-                    net_loss_val = net_loss.item()
+                    clean_embeddings = final_embeddings[clean_indices]
+                    clean_labels = ground_truth_labels[clean_indices]
                     
-                    self.net_optimizer.zero_grad()
-                    net_loss.backward()
-                    self.net_optimizer.step()
+                    clean_loss = F.cross_entropy(clean_embeddings, clean_labels)
+                    
+                    self.network_optimizer.zero_grad()
+                    clean_loss.backward()
+                    self.network_optimizer.step()
+                
+                total_loss += avg_corrected_loss.item()
         
-        return total_loss.item() if total_loss != 0.0 else 0.0, net_loss_val
+        return total_loss, 0.0
+
+    def _display_dataset_statistics(self):
+        print("GNN Cleaner Dataset Statistics")
+        print(f"Total nodes: {self.data.x.shape[0]}")
+        print(f"Node features: {self.data.x.shape[1]}")
+        print(f"Number of classes: {self.num_classes}")
+        print(f"Total edges: {self.data.edge_index.shape[1] // 2}")
+        print(f"Train/Validation/Test split: {self.data.train_mask.sum()}/{self.data.val_mask.sum()}/{self.data.test_mask.sum()}")
+        print(f"Initial clean set size: {self.initial_clean_mask.sum()}")
+        
+        if hasattr(self.data, 'y_original'):
+            train_corrupted = (self.data.y[self.data.train_mask] != self.data.y_original[self.data.train_mask]).sum().item()
+            train_total = self.data.train_mask.sum().item()
+            
+            val_clean = (self.data.y[self.data.val_mask] == self.data.y_original[self.data.val_mask]).all().item()
+            test_clean = (self.data.y[self.data.test_mask] == self.data.y_original[self.data.test_mask]).all().item()
+            
+            print(f"Training labels corrupted: {train_corrupted}/{train_total} ({train_corrupted/train_total:.3%})")
+            print(f"Validation labels clean: {val_clean}")
+            print(f"Test labels clean: {test_clean}")
+            
+            if train_corrupted > 0:
+                actual_noise_rate = train_corrupted / train_total
+                print(f"Actual noise rate on training: {actual_noise_rate:.3%}")
+            else:
+                print("WARNING: No noise detected in training labels.")
+        else:
+            print("WARNING: No y_original found - cannot verify label corruption.")
+        
+        print("Sample Label Check")
+        train_indices = self.data.train_mask.nonzero(as_tuple=True)[0][:5]
+        for i, idx in enumerate(train_indices):
+            if hasattr(self.data, 'y_original'):
+                original_label = self.data.y_original[idx].item()
+                current_label = self.data.y[idx].item()
+                print(f"Train node {idx}: Original={original_label}, Current={current_label}, Match={original_label==current_label}")
+            else:
+                current_label = self.data.y[idx].item()
+                print(f"Train node {idx}: Current={current_label}")
+
+    def _build_node_similarity_matrix(self, edge_connectivity, node_feature_embeddings):
+        total_nodes = node_feature_embeddings.size(0)
+        
+        edge_source, edge_target = edge_connectivity.cpu().numpy()
+        graph_adjacency = sparse.coo_matrix(
+            (np.ones(len(edge_source)), (edge_source, edge_target)), 
+            shape=(total_nodes, total_nodes)
+        )
+        
+        similarity_weights = []
+        similarity_row_indices = []
+        similarity_col_indices = []
+        
+        for edge_idx in range(len(edge_source)):
+            source_node, target_node = edge_source[edge_idx], edge_target[edge_idx]
+            if source_node != target_node:
+                source_features = node_feature_embeddings[source_node].cpu().numpy()
+                target_features = node_feature_embeddings[target_node].cpu().numpy()
+                feature_distance = np.linalg.norm(source_features - target_features) + self.similarity_epsilon
+                edge_similarity = 1.0 / feature_distance
+                
+                similarity_weights.append(edge_similarity)
+                similarity_row_indices.append(source_node)
+                similarity_col_indices.append(target_node)
+        
+        similarity_matrix = sparse.coo_matrix(
+            (similarity_weights, (similarity_row_indices, similarity_col_indices)), 
+            shape=(total_nodes, total_nodes)
+        )
+        
+        node_degrees = np.array(similarity_matrix.sum(axis=1)).flatten()
+        node_degrees[node_degrees == 0] = 1.0
+        degree_normalization = sparse.diags(1.0 / np.sqrt(node_degrees))
+        normalized_similarity = degree_normalization @ similarity_matrix @ degree_normalization
+        
+        return normalized_similarity
+
+
+    def _identify_clean_samples(self, propagated_label_probabilities, given_node_labels, training_nodes_mask):
+
+        predicted_hard_labels = propagated_label_probabilities.argmax(dim=1)
+        
+        training_node_indices = training_nodes_mask.nonzero(as_tuple=True)[0]
+        identified_clean_mask = torch.zeros_like(training_nodes_mask)
+        identified_noisy_mask = torch.zeros_like(training_nodes_mask)
+        
+        for node_idx in training_node_indices:
+            if predicted_hard_labels[node_idx] == given_node_labels[node_idx]:
+                identified_clean_mask[node_idx] = True
+            else:
+                identified_noisy_mask[node_idx] = True
+        
+        return identified_clean_mask, identified_noisy_mask
 
     @torch.no_grad()
-    def evaluate(self, include_test=False):
+    def _evaluate_model_performance(self, include_test_metrics=False):
+
         from sklearn.metrics import precision_score, recall_score
         
-        self.model.eval()
+        self.gnn_model.eval()
         
-        x, edge_index = self.data.x.to(self.device), self.data.edge_index.to(self.device)
+        node_features, edge_connectivity = self.data.x.to(self.device), self.data.edge_index.to(self.device)
         
         try:
-            logits = self.model(self.data)
+            model_outputs = self.gnn_model(self.data)
         except:
-            logits = self.model(x, edge_index)
+            model_outputs = self.gnn_model(node_features, edge_connectivity)
         
-        preds = logits.argmax(dim=1)
+        predicted_labels = model_outputs.argmax(dim=1)
+        ground_truth_labels = self.data.y_original.to(self.device)
         
-        labels = self.data.y_original.to(self.device)
+        train_loss_value = F.cross_entropy(model_outputs[self.data.train_mask], ground_truth_labels[self.data.train_mask]).item()
+        validation_loss_value = F.cross_entropy(model_outputs[self.data.val_mask], ground_truth_labels[self.data.val_mask]).item()
         
-        train_loss = F.cross_entropy(logits[self.data.train_mask], labels[self.data.train_mask]).item()
-        val_loss = F.cross_entropy(logits[self.data.val_mask], labels[self.data.val_mask]).item()
+        train_accuracy = (predicted_labels[self.data.train_mask] == ground_truth_labels[self.data.train_mask]).float().mean().item()
+        validation_accuracy = (predicted_labels[self.data.val_mask] == ground_truth_labels[self.data.val_mask]).float().mean().item()
         
-        train_acc = (preds[self.data.train_mask] == labels[self.data.train_mask]).float().mean().item()
-        val_acc = (preds[self.data.val_mask] == labels[self.data.val_mask]).float().mean().item()
-        
-        train_f1 = f1_score(
-            labels[self.data.train_mask].cpu().numpy(), 
-            preds[self.data.train_mask].cpu().numpy(), 
+        train_f1_score = f1_score(
+            ground_truth_labels[self.data.train_mask].cpu().numpy(), 
+            predicted_labels[self.data.train_mask].cpu().numpy(), 
             average='macro'
         )
-        val_f1 = f1_score(
-            labels[self.data.val_mask].cpu().numpy(), 
-            preds[self.data.val_mask].cpu().numpy(), 
+        validation_f1_score = f1_score(
+            ground_truth_labels[self.data.val_mask].cpu().numpy(), 
+            predicted_labels[self.data.val_mask].cpu().numpy(), 
             average='macro'
         )
         
-        result = {
-            'train_loss': train_loss, 'val_loss': val_loss,
-            'train_acc': train_acc, 'val_acc': val_acc,
-            'train_f1': train_f1, 'val_f1': val_f1
+        evaluation_results = {
+            'train_loss': train_loss_value, 
+            'val_loss': validation_loss_value,
+            'train_acc': train_accuracy, 
+            'val_acc': validation_accuracy,
+            'train_f1': train_f1_score, 
+            'val_f1': validation_f1_score
         }
         
-        if include_test:
-            test_loss = F.cross_entropy(logits[self.data.test_mask], labels[self.data.test_mask]).item()
-            test_acc = (preds[self.data.test_mask] == labels[self.data.test_mask]).float().mean().item()
-            test_f1 = f1_score(
-                labels[self.data.test_mask].cpu().numpy(), 
-                preds[self.data.test_mask].cpu().numpy(), 
+        if include_test_metrics:
+            test_loss_value = F.cross_entropy(model_outputs[self.data.test_mask], ground_truth_labels[self.data.test_mask]).item()
+            test_accuracy = (predicted_labels[self.data.test_mask] == ground_truth_labels[self.data.test_mask]).float().mean().item()
+            test_f1_score = f1_score(
+                ground_truth_labels[self.data.test_mask].cpu().numpy(), 
+                predicted_labels[self.data.test_mask].cpu().numpy(), 
                 average='macro'
             )
 
-            test_precision = precision_score(
-                labels[self.data.test_mask].cpu().numpy(), 
-                preds[self.data.test_mask].cpu().numpy(), 
+            test_precision_score = precision_score(
+                ground_truth_labels[self.data.test_mask].cpu().numpy(), 
+                predicted_labels[self.data.test_mask].cpu().numpy(), 
                 average='macro'
             )
-            test_recall = recall_score(
-                labels[self.data.test_mask].cpu().numpy(), 
-                preds[self.data.test_mask].cpu().numpy(), 
+            test_recall_score = recall_score(
+                ground_truth_labels[self.data.test_mask].cpu().numpy(), 
+                predicted_labels[self.data.test_mask].cpu().numpy(), 
                 average='macro'
             )
-            result.update({
-                'test_loss': test_loss, 
-                'test_acc': test_acc, 
-                'test_f1': test_f1,
-                'test_precision': test_precision,
-                'test_recall': test_recall
+            evaluation_results.update({
+                'test_loss': test_loss_value, 
+                'test_acc': test_accuracy, 
+                'test_f1': test_f1_score,
+                'test_precision': test_precision_score,
+                'test_recall': test_recall_score
             })
         
-        return result
+        return evaluation_results
 
-    def train(self, debug=True):
-        start_time = time.time()
+    def execute_full_training(self, enable_debug_output=True):
+
+        training_start_time = time.time()
         
-        best_val_loss = float("inf")
-        best_state = None
-        counter = 0
+        best_validation_loss = float("inf")
+        best_model_checkpoint = None
+        early_stopping_counter = 0
         
-        for epoch in range(self.epochs):
-            train_loss, net_loss = self.train_step(epoch)
+        oversmoothing_calculation_interval = 20
+        
+        for training_epoch in range(self.max_training_epochs):
+            epoch_training_loss, epoch_weighting_loss = self._perform_training_step(training_epoch)
             
-            metrics = self.evaluate(include_test=False)
+            current_metrics = self._evaluate_model_performance(include_test_metrics=False)
             
-            try:
-                logits_for_oversmoothing = self.model(self.data)
-            except:
-                logits_for_oversmoothing = self.model(self.data.x.to(self.device), self.data.edge_index.to(self.device))
+            train_oversmoothing_metrics = None
+            validation_oversmoothing_metrics = None
+            
+            if training_epoch % oversmoothing_calculation_interval == 0 or training_epoch == self.max_training_epochs - 1:
+                try:
+                    current_embeddings = self.gnn_model(self.data)
+                except:
+                    current_embeddings = self.gnn_model(self.data.x.to(self.device), self.data.edge_index.to(self.device))
 
-            train_oversmoothing = self._compute_oversmoothing_for_mask(
-                logits_for_oversmoothing, self.data.edge_index.to(self.device), self.data.train_mask, self.data.y_original
-            )
-            val_oversmoothing = self._compute_oversmoothing_for_mask(
-                logits_for_oversmoothing, self.data.edge_index.to(self.device), self.data.val_mask, self.data.y_original
-            )
+                train_oversmoothing_metrics = self._compute_oversmoothing_for_node_subset(
+                    current_embeddings, self.data.edge_index.to(self.device), self.data.train_mask, self.data.y_original
+                )
+                validation_oversmoothing_metrics = self._compute_oversmoothing_for_node_subset(
+                    current_embeddings, self.data.edge_index.to(self.device), self.data.val_mask, self.data.y_original
+                )
 
-            if train_oversmoothing is not None:
-                self.oversmoothing_history['train'].append(train_oversmoothing)
-            if val_oversmoothing is not None:
-                self.oversmoothing_history['val'].append(val_oversmoothing)
+                if train_oversmoothing_metrics is not None:
+                    self.oversmoothing_training_history['train'].append(train_oversmoothing_metrics)
+                if validation_oversmoothing_metrics is not None:
+                    self.oversmoothing_training_history['val'].append(validation_oversmoothing_metrics)
             
-            if metrics['val_loss'] < best_val_loss:
-                best_val_loss = metrics['val_loss']
-                best_state = {
-                    "model": self.model.state_dict(),
-                    "net": self.net.state_dict()
+            # Early stopping
+            if current_metrics['val_loss'] < best_validation_loss:
+                best_validation_loss = current_metrics['val_loss']
+                best_model_checkpoint = {
+                    "gnn_model": self.gnn_model.state_dict(),
+                    "weighting_network": self.label_weighting_net.state_dict()
                 }
-                best_train_metrics = {
-                    'train_acc': metrics['train_acc'],
-                    'train_f1': metrics['train_f1']
+                best_training_performance = {
+                    'train_acc': current_metrics['train_acc'],
+                    'train_f1': current_metrics['train_f1']
                 }
-                best_val_metrics = {
-                    'val_acc': metrics['val_acc'], 
-                    'val_f1': metrics['val_f1']
+                best_validation_performance = {
+                    'val_acc': current_metrics['val_acc'], 
+                    'val_f1': current_metrics['val_f1']
                 }
-                counter = 0
+                early_stopping_counter = 0
             else:
-                counter += 1
+                early_stopping_counter += 1
             
-            if counter >= self.patience:
-                if debug:
-                    print(f"Early stopping at epoch {epoch}")
+            if early_stopping_counter >= self.early_stopping_patience:
+                if enable_debug_output:
+                    print(f"Early stopping triggered at epoch {training_epoch}")
                 break
 
-            if debug:
-                selected_count = self.expanding_clean_mask.sum().item() - self.clean_mask.sum().item()
+            if enable_debug_output:
+                newly_selected_count = self.expanding_clean_sample_mask.sum().item() - self.initial_clean_mask.sum().item()
                 
-                train_de = train_oversmoothing['EDir'] if train_oversmoothing else 0.0
-                train_de_traditional = train_oversmoothing['EDir_traditional'] if train_oversmoothing else 0.0
-                train_eproj = train_oversmoothing['EProj'] if train_oversmoothing else 0.0
-                train_mad = train_oversmoothing['MAD'] if train_oversmoothing else 0.0
-                train_num_rank = train_oversmoothing['NumRank'] if train_oversmoothing else 0.0
-                train_eff_rank = train_oversmoothing['Erank'] if train_oversmoothing else 0.0
-                
-                val_de = val_oversmoothing['EDir'] if val_oversmoothing else 0.0
-                val_de_traditional = val_oversmoothing['EDir_traditional'] if val_oversmoothing else 0.0
-                val_eproj = val_oversmoothing['EProj'] if val_oversmoothing else 0.0
-                val_mad = val_oversmoothing['MAD'] if val_oversmoothing else 0.0
-                val_num_rank = val_oversmoothing['NumRank'] if val_oversmoothing else 0.0
-                val_eff_rank = val_oversmoothing['Erank'] if val_oversmoothing else 0.0
-                
-                print(f"Epoch {epoch+1:03d} | Train Loss: {train_loss:.4f}, Val Loss: {metrics['val_loss']:.4f} | "
-                    f"Train Acc: {metrics['train_acc']:.4f}, Val Acc: {metrics['val_acc']:.4f} | "
-                    f"Train F1: {metrics['train_f1']:.4f}, Val F1: {metrics['val_f1']:.4f} | "
-                    f"Selected: {selected_count}")
-                print(f"Train DE: {train_de:.4f}, Val DE: {val_de:.4f} | "
-                    f"Train DE_trad: {train_de_traditional:.4f}, Val DE_trad: {val_de_traditional:.4f} | "
-                    f"Train EProj: {train_eproj:.4f}, Val EProj: {val_eproj:.4f} | "
-                    f"Train MAD: {train_mad:.4f}, Val MAD: {val_mad:.4f} | "
-                    f"Train NumRank: {train_num_rank:.4f}, Val NumRank: {val_num_rank:.4f} | "
-                    f"Train Erank: {train_eff_rank:.4f}, Val Erank: {val_eff_rank:.4f}")
-        
-        if best_state is not None:
-            self.model.load_state_dict(best_state["model"])
-            self.net.load_state_dict(best_state["net"])
+                if training_epoch % oversmoothing_calculation_interval == 0 or training_epoch == self.max_training_epochs - 1:
 
-        final_metrics = self.evaluate(include_test=True)
+                    train_energy_direction = train_oversmoothing_metrics['EDir'] if train_oversmoothing_metrics else 0.0
+                    train_energy_direction_traditional = train_oversmoothing_metrics['EDir_traditional'] if train_oversmoothing_metrics else 0.0
+                    train_energy_projection = train_oversmoothing_metrics['EProj'] if train_oversmoothing_metrics else 0.0
+                    train_mean_absolute_deviation = train_oversmoothing_metrics['MAD'] if train_oversmoothing_metrics else 0.0
+                    train_numerical_rank = train_oversmoothing_metrics['NumRank'] if train_oversmoothing_metrics else 0.0
+                    train_effective_rank = train_oversmoothing_metrics['Erank'] if train_oversmoothing_metrics else 0.0
+                    
+                    val_energy_direction = validation_oversmoothing_metrics['EDir'] if validation_oversmoothing_metrics else 0.0
+                    val_energy_direction_traditional = validation_oversmoothing_metrics['EDir_traditional'] if validation_oversmoothing_metrics else 0.0
+                    val_energy_projection = validation_oversmoothing_metrics['EProj'] if validation_oversmoothing_metrics else 0.0
+                    val_mean_absolute_deviation = validation_oversmoothing_metrics['MAD'] if validation_oversmoothing_metrics else 0.0
+                    val_numerical_rank = validation_oversmoothing_metrics['NumRank'] if validation_oversmoothing_metrics else 0.0
+                    val_effective_rank = validation_oversmoothing_metrics['Erank'] if validation_oversmoothing_metrics else 0.0
+                    
+                    print(f"Epoch {training_epoch+1:03d} | Train Loss: {epoch_training_loss:.4f}, Val Loss: {current_metrics['val_loss']:.4f} | "
+                        f"Train Acc: {current_metrics['train_acc']:.4f}, Val Acc: {current_metrics['val_acc']:.4f} | "
+                        f"Train F1: {current_metrics['train_f1']:.4f}, Val F1: {current_metrics['val_f1']:.4f} | "
+                        f"Newly Selected: {newly_selected_count}")
+                    print(f"Train EDir: {train_energy_direction:.4f}, Val EDir: {val_energy_direction:.4f} | "
+                        f"Train EDir_trad: {train_energy_direction_traditional:.4f}, Val EDir_trad: {val_energy_direction_traditional:.4f} | "
+                        f"Train EProj: {train_energy_projection:.4f}, Val EProj: {val_energy_projection:.4f} | "
+                        f"Train MAD: {train_mean_absolute_deviation:.4f}, Val MAD: {val_mean_absolute_deviation:.4f} | "
+                        f"Train NumRank: {train_numerical_rank:.4f}, Val NumRank: {val_numerical_rank:.4f} | "
+                        f"Train EffRank: {train_effective_rank:.4f}, Val EffRank: {val_effective_rank:.4f}")
+                else:
+
+                    print(f"Epoch {training_epoch+1:03d} | Train Loss: {epoch_training_loss:.4f}, Val Loss: {current_metrics['val_loss']:.4f} | "
+                        f"Train Acc: {current_metrics['train_acc']:.4f}, Val Acc: {current_metrics['val_acc']:.4f} | "
+                        f"Train F1: {current_metrics['train_f1']:.4f}, Val F1: {current_metrics['val_f1']:.4f} | "
+                        f"Newly Selected: {newly_selected_count}")
+        
+        if best_model_checkpoint is not None:
+            self.gnn_model.load_state_dict(best_model_checkpoint["gnn_model"])
+            self.label_weighting_net.load_state_dict(best_model_checkpoint["weighting_network"])
+
+        final_evaluation_metrics = self._evaluate_model_performance(include_test_metrics=True)
         
         try:
-            final_logits = self.model(self.data)
+            final_embeddings = self.gnn_model(self.data)
         except:
-            final_logits = self.model(self.data.x.to(self.device), self.data.edge_index.to(self.device))
+            final_embeddings = self.gnn_model(self.data.x.to(self.device), self.data.edge_index.to(self.device))
 
-        final_train_oversmoothing = self._compute_oversmoothing_for_mask(
-            final_logits, self.data.edge_index.to(self.device), self.data.train_mask, self.data.y_original
+        final_train_oversmoothing = self._compute_oversmoothing_for_node_subset(
+            final_embeddings, self.data.edge_index.to(self.device), self.data.train_mask, self.data.y_original
         )
-        final_val_oversmoothing = self._compute_oversmoothing_for_mask(
-            final_logits, self.data.edge_index.to(self.device), self.data.val_mask, self.data.y_original
+        final_validation_oversmoothing = self._compute_oversmoothing_for_node_subset(
+            final_embeddings, self.data.edge_index.to(self.device), self.data.val_mask, self.data.y_original
         )
-        final_test_oversmoothing = self._compute_oversmoothing_for_mask(
-            final_logits, self.data.edge_index.to(self.device), self.data.test_mask, self.data.y_original
+        final_test_oversmoothing = self._compute_oversmoothing_for_node_subset(
+            final_embeddings, self.data.edge_index.to(self.device), self.data.test_mask, self.data.y_original
         )
 
         if final_test_oversmoothing is not None:
-            self.oversmoothing_history['test'].append(final_test_oversmoothing)
+            self.oversmoothing_training_history['test'].append(final_test_oversmoothing)
         
-        total_time = time.time() - start_time
+        total_training_time = time.time() - training_start_time
         
-        if debug:
-            print(f"\nGNN Cleaner Training completed!")
-            print(f"Test Accuracy: {final_metrics['test_acc']:.4f}")
-            print(f"Test F1: {final_metrics['test_f1']:.4f}")
-            print(f"Test Precision: {final_metrics['test_precision']:.4f}")
-            print(f"Test Recall: {final_metrics['test_recall']:.4f}")
-            print(f"Training completed in {total_time:.2f}s")
-            print("Final Oversmoothing Metrics:")
+        if enable_debug_output:
+            print(f"\nGNN Cleaner Training Completed")
+            print(f"Final Test Accuracy: {final_evaluation_metrics['test_acc']:.4f}")
+            print(f"Final Test F1 Score: {final_evaluation_metrics['test_f1']:.4f}")
+            print(f"Final Test Precision: {final_evaluation_metrics['test_precision']:.4f}")
+            print(f"Final Test Recall: {final_evaluation_metrics['test_recall']:.4f}")
+            print(f"Total training time: {total_training_time:.2f} seconds")
+            print("Final Oversmoothing Metrics")
             
             if final_train_oversmoothing is not None:
                 print(f"Train: EDir: {final_train_oversmoothing['EDir']:.4f}, EDir_traditional: {final_train_oversmoothing['EDir_traditional']:.4f}, "
                     f"EProj: {final_train_oversmoothing['EProj']:.4f}, MAD: {final_train_oversmoothing['MAD']:.4f}, "
-                    f"NumRank: {final_train_oversmoothing['NumRank']:.4f}, Erank: {final_train_oversmoothing['Erank']:.4f}")
+                    f"NumRank: {final_train_oversmoothing['NumRank']:.4f}, EffRank: {final_train_oversmoothing['Erank']:.4f}")
             
-            if final_val_oversmoothing is not None:
-                print(f"Val: EDir: {final_val_oversmoothing['EDir']:.4f}, EDir_traditional: {final_val_oversmoothing['EDir_traditional']:.4f}, "
-                    f"EProj: {final_val_oversmoothing['EProj']:.4f}, MAD: {final_val_oversmoothing['MAD']:.4f}, "
-                    f"NumRank: {final_val_oversmoothing['NumRank']:.4f}, Erank: {final_val_oversmoothing['Erank']:.4f}")
+            if final_validation_oversmoothing is not None:
+                print(f"Val: EDir: {final_validation_oversmoothing['EDir']:.4f}, EDir_traditional: {final_validation_oversmoothing['EDir_traditional']:.4f}, "
+                    f"EProj: {final_validation_oversmoothing['EProj']:.4f}, MAD: {final_validation_oversmoothing['MAD']:.4f}, "
+                    f"NumRank: {final_validation_oversmoothing['NumRank']:.4f}, EffRank: {final_validation_oversmoothing['Erank']:.4f}")
             
             if final_test_oversmoothing is not None:
                 print(f"Test: EDir: {final_test_oversmoothing['EDir']:.4f}, EDir_traditional: {final_test_oversmoothing['EDir_traditional']:.4f}, "
                     f"EProj: {final_test_oversmoothing['EProj']:.4f}, MAD: {final_test_oversmoothing['MAD']:.4f}, "
-                    f"NumRank: {final_test_oversmoothing['NumRank']:.4f}, Erank: {final_test_oversmoothing['Erank']:.4f}")
+                    f"NumRank: {final_test_oversmoothing['NumRank']:.4f}, EffRank: {final_test_oversmoothing['Erank']:.4f}")
         
         return {
-            'accuracy': final_metrics['test_acc'],
-            'f1': final_metrics['test_f1'],
-            'precision': final_metrics['test_precision'],
-            'recall': final_metrics['test_recall'],
+            'accuracy': final_evaluation_metrics['test_acc'],
+            'f1': final_evaluation_metrics['test_f1'],
+            'precision': final_evaluation_metrics['test_precision'],
+            'recall': final_evaluation_metrics['test_recall'],
             'oversmoothing': final_test_oversmoothing
         }
     
-    def _compute_oversmoothing_for_mask(self, embeddings, edge_index, mask, labels=None):
+    def _compute_oversmoothing_for_node_subset(self, node_embeddings, edge_connectivity, node_subset_mask, node_labels=None):
+
         try:
-            mask_indices = torch.where(mask)[0]
-            mask_embeddings = embeddings[mask]
+            subset_node_indices = torch.where(node_subset_mask)[0]
+            subset_embeddings = node_embeddings[node_subset_mask]
             
-            mask_set = set(mask_indices.cpu().numpy())
-            edge_mask = torch.tensor([
-                src.item() in mask_set and tgt.item() in mask_set
-                for src, tgt in edge_index.t()
-            ], device=edge_index.device)
+            subset_node_set = set(subset_node_indices.cpu().numpy())
+            edge_subset_mask = torch.tensor([
+                source_node.item() in subset_node_set and target_node.item() in subset_node_set
+                for source_node, target_node in edge_connectivity.t()
+            ], device=edge_connectivity.device)
             
-            if not edge_mask.any():
+            if not edge_subset_mask.any():
                 return {
-                    'NumRank': float(min(mask_embeddings.shape)),
-                    'Erank': float(min(mask_embeddings.shape)),
+                    'NumRank': float(min(subset_embeddings.shape)),
+                    'Erank': float(min(subset_embeddings.shape)),
                     'EDir': 0.0,
                     'EDir_traditional': 0.0,
                     'EProj': 0.0,
                     'MAD': 0.0
                 }
             
-            masked_edges = edge_index[:, edge_mask]
-            node_mapping = {orig_idx.item(): local_idx for local_idx, orig_idx in enumerate(mask_indices)}
+            subset_edges = edge_connectivity[:, edge_subset_mask]
+            node_index_mapping = {original_idx.item(): local_idx for local_idx, original_idx in enumerate(subset_node_indices)}
             
-            remapped_edges = torch.stack([
-                torch.tensor([node_mapping[src.item()] for src in masked_edges[0]], device=edge_index.device),
-                torch.tensor([node_mapping[tgt.item()] for tgt in masked_edges[1]], device=edge_index.device)
+            remapped_edge_connectivity = torch.stack([
+                torch.tensor([node_index_mapping[source_node.item()] for source_node in subset_edges[0]], device=edge_connectivity.device),
+                torch.tensor([node_index_mapping[target_node.item()] for target_node in subset_edges[1]], device=edge_connectivity.device)
             ])
             
-            graphs_in_class = [{
-                'X': mask_embeddings,
-                'edge_index': remapped_edges,
+            subset_graph_data = [{
+                'X': subset_embeddings,
+                'edge_index': remapped_edge_connectivity,
                 'edge_weight': None
             }]
             
-            return self.oversmoothing_evaluator.compute_all_metrics(
-                X=mask_embeddings,
-                edge_index=remapped_edges,
-                graphs_in_class=graphs_in_class
+            return self.oversmoothing_metric_evaluator.compute_all_metrics(
+                X=subset_embeddings,
+                edge_index=remapped_edge_connectivity,
+                graphs_in_class=subset_graph_data
             )
             
-        except Exception as e:
-            print(f"Warning: Could not compute oversmoothing metrics for mask: {e}")
+        except Exception as computation_error:
+            print(f"Warning: Could not compute oversmoothing metrics for node subset: {computation_error}")
             return None
 
-    def get_oversmoothing_history(self):
-        return self.oversmoothing_history
+    def get_oversmoothing_training_history(self):
+        return self.oversmoothing_training_history

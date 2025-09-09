@@ -7,7 +7,7 @@ dataset:
 
 noise:
   type: instance # clean, uniform, uniform_simple, random, pair, random_pair, flip, uniform_mix, instance, deterministic
-  rate: 0.4
+  rate: 0.6
   seed: 42
 
 model:
@@ -22,18 +22,14 @@ model:
   concat: true
   
 training:
-  method: cr_gnn # standard, ncod, positive_eigenvalues, gcod, nrgnn, pi_gnn, cr_gnn, lafak, rtgnn, graphcleaner, unionnet, gnn_cleaner, erase, gnnguard
+  method: gnnguard # standard, positive_eigenvalues, gcod, nrgnn, pi_gnn, cr_gnn, lafak, rtgnn, graphcleaner, unionnet, gnn_cleaner, erase, gnnguard
   lr: 0.001
   weight_decay: 5e-4
-  epochs: 20
+  epochs: 3
   patience: 200
 
 # Standard training parameters
 #standard_params:
-
-# NCOD parameters
-ncod_params:
-  lambda_dir: 0.1
 
 # Positive Eigenvalues parameters
 positive_eigenvalues_params:
@@ -64,7 +60,6 @@ pi_gnn_params:
   vanilla: false
 
 # CR-GNN parameters
-cr_gnn_params:
   T: 2
   tau: 0.6
   p: 0.9
@@ -98,6 +93,7 @@ graphcleaner_params:
   k: 5
   sample_rate: 0.5
   max_iter_classifier: 5000
+  held_split: valid
 
 # UnionNET parameters
 unionnet_params:
@@ -108,13 +104,8 @@ unionnet_params:
 
 # GNN Cleaner parameters
 gnn_cleaner_params:
-  lr: 0.01
-  net_lr: 0.001
-  weight_decay: 5e-4
-  lp_iters: 50
-  epsilon: 1e-8
-  epochs: 300
-  patience: 40
+  label_propagation_iterations: 50
+  similarity_epsilon: 1e-8
 
 # ERASE parameters
 erase_params:
@@ -137,11 +128,7 @@ erase_params:
 
 # GNNGuard parameters
 gnnguard_params:
-  lr: 0.01
-  dropout: 0.5
-  weight_decay: 5e-4
   P0: 0.5
   K: 2
   D2: 16
-  dropout: 0.5
   attention: True

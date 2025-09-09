@@ -14,11 +14,11 @@ from model.PI_GNN import PiGnnModel, PiGnnTrainer, GraphLinkDecoder
 from model.CR_GNN import CRGNNModel
 from model.LafAK import Attack, prepare_simpledata_attrs, resetBinaryClass_init, CommunityDefense
 from model.RTGNN import RTGNN
-from model.GraphCleaner import GraphCleanerDetector, get_noisy_ground_truth
+from model.GraphCleaner import GraphCleanerNoiseDetector, create_noise_ground_truth_labels
 from model.UnionNET import UnionNET
 from model.GNN_Cleaner import GNNCleanerTrainer
 from model.ERASE import ERASETrainer
-from model.GNNGuard import GNNGuard
+from model.GNNGuard import GNNGuardTrainer
 
 from torch_geometric.utils import from_scipy_sparse_matrix
 from torch_geometric.data import Data as PyGData
@@ -88,6 +88,7 @@ def run_experiment(config, run_id=1):
     
     verify_label_distribution(data_for_training, train_mask, val_mask, test_mask, run_id, method)
 
+    # Standard Training
     if method == 'standard':
         trainer_params = config.get('training', {})
         lr = float(trainer_params.get('lr', 0.01))
@@ -122,53 +123,8 @@ def run_experiment(config, run_id=1):
             'recall': result['recall'],
             'oversmoothing': result['oversmoothing']
         }
-
-    elif method == 'ncod':
-        trainer_params = config.get('training', {})
-        lr = float(trainer_params.get('lr', 0.01))
-        weight_decay = float(trainer_params.get('weight_decay', 5e-4))
-        epochs = int(trainer_params.get('epochs'))
-        patience = int(trainer_params.get('patience', 100))
-
-        trainer_params_method = config.get('ncod_params', {})
-        lambda_dir = float(trainer_params_method.get('lambda_dir', 0.1))
-
-        model_params = {k: v for k, v in config['model'].items() if k not in ['name', 'hidden_channels', 'n_layers', 'dropout', 'self_loop']}
-        base_model = get_model(
-            model_name=config['model']['name'],
-            in_channels=data.num_features,
-            hidden_channels=config['model'].get('hidden_channels', 64),
-            out_channels=num_classes,
-            n_layers=config['model'].get('n_layers', 2),
-            dropout=config['model'].get('dropout', 0.5),
-            self_loop=config['model'].get('self_loop', True),
-            **model_params
-        )
-
-        ncod_trainer = NCODTrainer(
-            model=base_model,
-            data=data_for_training,
-            noisy_indices=global_noisy_indices,
-            device=device,
-            num_classes=num_classes,
-            learning_rate=lr,
-            weight_decay=weight_decay,
-            total_epochs=epochs,
-            dirichlet_lambda=lambda_dir,
-            patience=patience,
-            debug=True
-        )
-        
-        result = ncod_trainer.train_full()
-        
-        return {
-            'accuracy': result['accuracy'],
-            'f1': result['f1'],
-            'precision': result['precision'],
-            'recall': result['recall'],
-            'oversmoothing': result['oversmoothing']
-        }
-
+    
+    # Positive eigenvalues Training
     elif method == 'positive_eigenvalues':
         trainer_params = config.get('training', {})
         lr = float(trainer_params.get('lr', 0.01))
@@ -208,6 +164,7 @@ def run_experiment(config, run_id=1):
             'oversmoothing': result['oversmoothing']
         }
 
+    # GCOD Training
     elif method == 'gcod':
         trainer_params = config.get('training', {})
         lr = float(trainer_params.get('lr', 0.01))
@@ -400,7 +357,7 @@ def run_experiment(config, run_id=1):
             'oversmoothing': test_results['oversmoothing']
         }
 
-    # LafAK / GradientAttack Training
+    # LafAK and defense Training
     elif method == 'lafak':
         print("Using LafAK / GradientAttack")
         data_for_lafak = data.clone()
@@ -666,29 +623,14 @@ def run_experiment(config, run_id=1):
     
     # GraphCleaner Training 
     elif method == 'graphcleaner':
-        print(f"Run {run_id}: Using GraphCleaner")
-        data_for_detection = data_for_training.clone()
+        print(f"Run {run_id}: Using GraphCleaner for robust training")
         
-        test_labels = data.y_original[data.test_mask]
-        test_features = data.x[data.test_mask] if config['noise']['type'] == 'instance' else None
-        test_indices = data.test_mask.nonzero(as_tuple=True)[0]
-        
-        noisy_test_labels, relative_noisy_test_indices = label_process(
-            test_labels,
-            test_features,
-            num_classes,
-            noise_type=config['noise']['type'],
-            noise_rate=config['noise']['rate'],
-            random_seed=config['noise'].get('seed', 42) + 1000 + run_id * 10,
-            idx_train=test_indices,
-            debug=True
-        )
-        
-        data_for_detection.y[data.test_mask] = noisy_test_labels
-        
-        global_noisy_test_indices = test_indices[relative_noisy_test_indices]
-        all_noisy_indices = torch.cat([global_noisy_indices, global_noisy_test_indices])
-        
+        trainer_params = config.get('training', {})
+        lr = float(trainer_params.get('lr', 0.01))
+        weight_decay = float(trainer_params.get('weight_decay', 5e-4))
+        epochs = int(trainer_params.get('epochs'))
+        patience = int(trainer_params.get('patience', 100))
+
         base_model = get_model(
             model_name=config['model']['name'],
             in_channels=data.num_features,
@@ -699,20 +641,51 @@ def run_experiment(config, run_id=1):
             self_loop=config['model'].get('self_loop', True)
         )
         
-        detector = GraphCleanerDetector(config, device)
-        predictions, probs, classifier, trained_model = detector.detect_noise(data_for_detection, base_model, num_classes)
-        
-        test_ground_truth = get_noisy_ground_truth(data_for_detection, all_noisy_indices)[data.test_mask.cpu()].cpu().numpy()
-        
-        detection_results = detector.evaluate_detection(
-            predictions, 
-            test_ground_truth, 
-            probs, 
-            model=trained_model, 
-            data=data_for_detection
+        graphcleaner_detector = GraphCleanerNoiseDetector(
+            configuration_params=config, 
+            computation_device=device
         )
         
-        return detection_results
+        clean_train_mask, cleaned_data = graphcleaner_detector.clean_training_data(
+            graph_data=data_for_training, 
+            neural_network_model=base_model, 
+            num_classes=num_classes
+        )
+        
+        final_model = get_model(
+            model_name=config['model']['name'],
+            in_channels=data.num_features,
+            hidden_channels=config['model'].get('hidden_channels', 64),
+            out_channels=num_classes,
+            n_layers=config['model'].get('n_layers', 2),
+            dropout=config['model'].get('dropout', 0.5),
+            self_loop=config['model'].get('self_loop', True)
+        )
+        
+        final_training_data = data.clone()
+        final_training_data.train_mask = clean_train_mask
+        final_training_data.y = data_for_training.y.clone()
+        noisy_indices_after_cleaning = (~clean_train_mask & data_for_training.train_mask).nonzero(as_tuple=True)[0]
+
+        result = train_with_standard_loss(
+            final_model, 
+            final_training_data, 
+            noisy_indices_after_cleaning,
+            device=device,
+            total_epochs=epochs,
+            lr=lr,
+            weight_decay=weight_decay,
+            patience=patience
+        )
+
+        
+        return {
+            'accuracy': result['accuracy'],
+            'f1': result['f1'],
+            'precision': result['precision'],
+            'recall': result['recall'],
+            'oversmoothing': result['oversmoothing']
+        }
     
     # UnionNET Training
     elif method == 'unionnet':
@@ -754,119 +727,170 @@ def run_experiment(config, run_id=1):
 
     # GNN Cleaner Training
     elif method == 'gnn_cleaner':
-        print(f"Run {run_id}: Using GNN Cleaner")
-        gnn_model = get_model(
+        print(f"Run {run_id}: Using GNN Cleaner method")
+        
+        print(f"[DEBUG] Data verification before GNN Cleaner:")
+        print(f"  data_for_training.y shape: {data_for_training.y.shape}")
+        print(f"  data_for_training.y_original shape: {data_for_training.y_original.shape}")
+        
+        train_corrupted = (data_for_training.y[train_mask] != data_for_training.y_original[train_mask]).sum()
+        print(f"  Training corruption: {train_corrupted}/{train_mask.sum()} nodes")
+        
+        base_gnn_model = get_model(
             model_name=config['model']['name'],
             in_channels=data.num_features,
             hidden_channels=config['model'].get('hidden_channels', 64),
             out_channels=num_classes,
-            mlp_layers=config.get('mlp_layers', 2),
-            train_eps=config.get('train_eps', True),
-            heads=config.get('heads', 8),
+            mlp_layers=config['model'].get('mlp_layers', 2),
+            train_eps=config['model'].get('train_eps', True),
+            heads=config['model'].get('heads', 8),
             n_layers=config['model'].get('n_layers', 2),
             dropout=config['model'].get('dropout', 0.5),
             self_loop=config['model'].get('self_loop', True),
         )
         
-        gnn_cleaner_config = {
-            'epochs': config["training"].get('total_epochs', 200),
-            'lr': config.get('lr', 0.01),
-            'net_lr': config.get('net_lr', 0.001),
-            'weight_decay': config.get('weight_decay', 5e-4),
-            'lp_iters': config.get('lp_iters', 50),
-            'epsilon': config.get('epsilon', 1e-8),
-            'patience': config.get('patience', 10),
+        gnn_cleaner_configuration = {
+            'max_epochs': config['gnn_cleaner_params'].get('max_epochs', config['training'].get('epochs', 200)),
+            'model_learning_rate': config['gnn_cleaner_params'].get('model_learning_rate', 0.01),
+            'net_learning_rate': config['gnn_cleaner_params'].get('net_learning_rate', 0.001),
+            'weight_decay': config['training'].get('weight_decay', 5e-4),
+            'label_propagation_iterations': config['gnn_cleaner_params'].get('label_propagation_iterations', 50),
+            'similarity_epsilon': config['gnn_cleaner_params'].get('similarity_epsilon', 1e-8),
+            'early_stopping_patience': config['gnn_cleaner_params'].get('early_stopping_patience', config['training'].get('patience', 10)),
         }
         
-        trainer = GNNCleanerTrainer(gnn_cleaner_config, data_for_training, device, num_classes, gnn_model)
-        result = trainer.train(debug=True)
+        gnn_cleaner_trainer = GNNCleanerTrainer(
+            gnn_cleaner_configuration,
+            data_for_training,
+            device,
+            num_classes,
+            base_gnn_model
+        )
         
-        return result
+        test_results = gnn_cleaner_trainer.execute_full_training(enable_debug_output=True)
+        
+        return {
+            'accuracy': torch.tensor(test_results['accuracy']),
+            'f1': torch.tensor(test_results['f1']),
+            'precision': torch.tensor(test_results['precision']),
+            'recall': torch.tensor(test_results['recall']),
+            'oversmoothing': test_results['oversmoothing']
+        }
     
     # ERASE Training
     elif method == 'erase':
-        print(f"Run {run_id}: Using ERASE")
-        erase_config = {
+        print(f"Run {run_id}: Using ERASE method")
+        
+        erase_specific_params = config['erase_params']
+        
+        erase_training_config = {
             'seed': seed,
             'erase_gnn_type': config['model']['name'],
+            'in_channels': data.num_features,
             'hidden_channels': config['model'].get('hidden_channels', 128),
-            'n_embedding': config['training'].get('erase_params', {}).get('n_embedding', 512),
+            'n_embedding': erase_specific_params.get('n_embedding', 512),
             'n_layers': config['model'].get('n_layers', 2),
-            'n_heads': config['training'].get('erase_params', {}).get('n_heads', config.get('heads', 8)),
+            'n_heads': erase_specific_params.get('n_heads', config['model'].get('heads', 8)),
             'dropout': config['model'].get('dropout', 0.5),
             'self_loop': config['model'].get('self_loop', True),
-            'mlp_layers': config.get('mlp_layers', 2),
-            'train_eps': config.get('train_eps', True),
-            'lr': config.get('lr', 0.001),
-            'weight_decay': config.get('weight_decay', 0.0005),
-            'total_epochs': config.get('total_epochs', 200),
-            'patience': config.get('patience', 5),
-            'gam1': config['training'].get('erase_params', {}).get('gam1', 1.0),
-            'gam2': config['training'].get('erase_params', {}).get('gam2', 2.0),
-            'eps': config['training'].get('erase_params', {}).get('eps', 0.05),
-            'corafull': config['training'].get('erase_params', {}).get('corafull', False),
-            'alpha': config['training'].get('erase_params', {}).get('alpha', 0.6),
-            'beta': config['training'].get('erase_params', {}).get('beta', 0.6),
-            'T': config['training'].get('erase_params', {}).get('T', 3),
-            'noise_rate': config.get('noise', {}).get('rate', 0.3),
+            'mlp_layers': config['model'].get('mlp_layers', 2),
+            'train_eps': config['model'].get('train_eps', True),
+            
+            'lr': config['training'].get('lr', 0.001),
+            'weight_decay': float(config['training'].get('weight_decay', 0.0005)),
+            'total_epochs': config['training'].get('epochs', 200),
+            'patience': config['training'].get('patience', 50),
+            
+            'gam1': erase_specific_params.get('gam1', 1.0),
+            'gam2': erase_specific_params.get('gam2', 2.0),
+            'eps': erase_specific_params.get('eps', 0.05),
+            'corafull': erase_specific_params.get('corafull', False),
+            'alpha': erase_specific_params.get('alpha', 0.6),
+            'beta': erase_specific_params.get('beta', 0.6),
+            'T': erase_specific_params.get('T', 3),
+            'use_layer_norm': erase_specific_params.get('use_layer_norm', False),
+            'use_residual': erase_specific_params.get('use_residual', False),
+            'use_residual_linear': erase_specific_params.get('use_residual_linear', False),
+            
+            'noise_rate': config.get('noise', {}).get('rate', 0.0),
         }
         
-        trainer = ERASETrainer(erase_config, device, num_classes, get_model)
-        result = trainer.train(data_for_training, debug=True)
+        erase_trainer = ERASETrainer(
+            training_config=erase_training_config, 
+            computation_device=device, 
+            num_node_classes=num_classes, 
+            model_creation_function=get_model
+        )
         
-        return result
+        test_results = erase_trainer.train_erase_model(data_for_training, enable_debug_output=True)
+        
+        return {
+            'accuracy': torch.tensor(test_results['accuracy']),
+            'f1': torch.tensor(test_results['f1']),
+            'precision': torch.tensor(test_results['precision']),
+            'recall': torch.tensor(test_results['recall']),
+            'oversmoothing': test_results['oversmoothing']
+        }
     
     # GNNGuard Training
     elif method == 'gnnguard':
         print(f"Run {run_id}: Using GNNGuard")
-        gnnguard_args = {
-            'dropout': config.get('dropout', 0.5),
-            'lr': config.get('lr', 0.01),
-            'weight_decay': config.get('weight_decay', 5e-4),
-            'P0': config.get('P0', 0.5),
-            'K': config.get('K', 2),
-            'D2': config.get('D2', 16),
-            'attention': config.get('attention', True),
-            'device': device,
-        }
         
-        gnnguard_model = GNNGuard(
-            nfeat=data.num_features,
-            nhid=config.get('hidden_channels', 64),
-            nclass=num_classes,
-            **gnnguard_args
-        ).to(device)
+        gnnguard_config = config.get('gnnguard_params', {})
         
-        adj_matrix = to_scipy_sparse_matrix(data_for_training.edge_index, num_nodes=data_for_training.num_nodes)
-        if hasattr(data_for_training, 'train_mask'):
-            idx_train = data_for_training.train_mask.nonzero(as_tuple=True)[0].cpu().numpy()
-            idx_val = data_for_training.val_mask.nonzero(as_tuple=True)[0].cpu().numpy()
-            idx_test = data_for_training.test_mask.nonzero(as_tuple=True)[0].cpu().numpy()
-        else:
-            num_nodes = data_for_training.num_nodes
-            idx_train = np.arange(min(140, num_nodes // 5))
-            idx_val = np.arange(len(idx_train), min(len(idx_train) + 500, num_nodes // 2))
-            idx_test = np.arange(max(len(idx_train) + len(idx_val), num_nodes // 2), num_nodes)
+        gnnguard_learning_rate = config['training'].get('lr', 0.01)
+        gnnguard_weight_decay = float(config['training'].get('weight_decay', 5e-4))
+        gnnguard_dropout = config['model'].get('dropout', 0.5)
+        gnnguard_similarity_threshold = gnnguard_config.get('P0', 0.5)
+        gnnguard_num_layers = gnnguard_config.get('K', 2)
+        gnnguard_attention_dim = gnnguard_config.get('D2', 16)
+        gnnguard_use_attention = gnnguard_config.get('attention', True)
         
-        gnnguard_model.fit(
-            features=data_for_training.x,
-            adj=adj_matrix,
-            labels=data_for_training.y,
-            idx_train=idx_train,
-            idx_val=idx_val,
-            idx_test=idx_test,
-            epochs=config["training"].get('total_epochs', 200),
-            verbose=True,
-            patience=config.get('patience', 5)
+        gnnguard_trainer = GNNGuardTrainer(
+            input_features=data.num_features,
+            hidden_channels=config['model'].get('hidden_channels', 64),
+            num_classes=num_classes,
+            dropout=gnnguard_dropout,
+            lr=gnnguard_learning_rate,
+            weight_decay=gnnguard_weight_decay,
+            attention=gnnguard_use_attention,
+            device=device,
+            similarity_threshold=gnnguard_similarity_threshold,
+            num_layers=gnnguard_num_layers,
+            attention_dim=gnnguard_attention_dim
         )
         
-        test_results = gnnguard_model.test(idx_test)
+        adjacency_matrix = to_scipy_sparse_matrix(data_for_training.edge_index, num_nodes=data_for_training.num_nodes)
+        
+        if hasattr(data_for_training, 'train_mask'):
+            train_node_indices = data_for_training.train_mask.nonzero(as_tuple=True)[0].cpu().numpy()
+            val_node_indices = data_for_training.val_mask.nonzero(as_tuple=True)[0].cpu().numpy()
+            test_node_indices = data_for_training.test_mask.nonzero(as_tuple=True)[0].cpu().numpy()
+        else:
+            total_nodes = data_for_training.num_nodes
+            train_node_indices = np.arange(min(140, total_nodes // 5))
+            val_node_indices = np.arange(len(train_node_indices), min(len(train_node_indices) + 500, total_nodes // 2))
+            test_node_indices = np.arange(max(len(train_node_indices) + len(val_node_indices), total_nodes // 2), total_nodes)
+        
+        gnnguard_trainer.train_model(
+            node_features=data_for_training.x,
+            adjacency_matrix=adjacency_matrix,
+            node_labels=data_for_training.y,
+            train_indices=train_node_indices,
+            val_indices=val_node_indices,
+            test_indices=test_node_indices,
+            max_epochs=config["training"].get('epochs', 200),
+            verbose=True,
+            patience=config["training"].get('patience', 5)
+        )
+        
+        test_results = gnnguard_trainer.evaluate_model(test_node_indices)
         
         return {
-            'accuracy': test_results['accuracy'],
-            'f1': test_results['f1'],
-            'precision': test_results['precision'],
-            'recall': test_results['recall'],
+            'accuracy': torch.tensor(test_results['accuracy']),
+            'f1': torch.tensor(test_results['f1']),
+            'precision': torch.tensor(test_results['precision']),
+            'recall': torch.tensor(test_results['recall']),
             'oversmoothing': test_results['oversmoothing']
         }
     
@@ -874,7 +898,7 @@ def run_experiment(config, run_id=1):
         raise ValueError(
             f"Run {run_id}: Training method '{method}' not implemented. "
             "Please choose one of the implemented methods: "
-            "[standard, ncod, positive_eigenvalues, gcod, nrgnn, pi_gnn, cr_gnn, lafak, rtgnn, graphcleaner, unionnet, gnn_cleaner, erase, gnnguard]"
+            "[standard, positive_eigenvalues, gcod, nrgnn, pi_gnn, cr_gnn, lafak, rtgnn, graphcleaner, unionnet, gnn_cleaner, erase, gnnguard]"
         )
 
 if __name__ == "__main__":
