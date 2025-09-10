@@ -47,6 +47,12 @@ class GraphCommunityDefenseTrainer:
         
         self._prepare_graph_structure()
         self.community_assignments = self._detect_communities()
+        self.num_communities = len(np.unique(self.community_assignments))
+        # community prediction layer
+        self.community_classifier = nn.Linear(
+            self.graph_data.x.shape[1],
+            self.num_communities
+        ).to(self.device)
         
     def _prepare_graph_structure(self):
 
@@ -261,44 +267,18 @@ class GraphCommunityDefenseTrainer:
 
     def compute_community_regularization_loss(self, node_embeddings: torch.Tensor, community_labels: np.ndarray) -> torch.Tensor:
 
-        positive_pairs, negative_pairs = self._generate_community_pairs(community_labels)
+        device = node_embeddings.device
+        community_labels_tensor = torch.as_tensor(community_labels, dtype=torch.long, device=device)
         
-        if positive_pairs.shape[0] == 0 and negative_pairs.shape[0] == 0:
-            return torch.zeros([], device=node_embeddings.device)
-
-        normalized_embeddings = F.normalize(node_embeddings, p=2, dim=1, eps=1e-8)
-        total_loss = 0.0
-        loss_components_count = 0
-
-        # Positive pairs loss: encourage similarity
-        if positive_pairs.shape[0] > 0:
-            pos_indices_i = torch.as_tensor(positive_pairs[:, 0], dtype=torch.long, device=node_embeddings.device)
-            pos_indices_j = torch.as_tensor(positive_pairs[:, 1], dtype=torch.long, device=node_embeddings.device)
-            
-            cosine_similarities = torch.clamp(
-                (normalized_embeddings[pos_indices_i] * normalized_embeddings[pos_indices_j]).sum(dim=1), 
-                -1.0 + 1e-7, 1.0 - 1e-7
-            )
-            positive_loss = (1.0 - cosine_similarities).mean()
-            total_loss += self.pos_pair_weight * positive_loss
-            loss_components_count += 1
-
-        # Negative pairs loss: encourage dissimilarity
-        if negative_pairs.shape[0] > 0:
-            neg_indices_i = torch.as_tensor(negative_pairs[:, 0], dtype=torch.long, device=node_embeddings.device)
-            neg_indices_j = torch.as_tensor(negative_pairs[:, 1], dtype=torch.long, device=node_embeddings.device)
-            
-            cosine_similarities = torch.clamp(
-                (normalized_embeddings[neg_indices_i] * normalized_embeddings[neg_indices_j]).sum(dim=1), 
-                -1.0 + 1e-7, 1.0 - 1e-7
-            )
-            
-            adaptive_margin = max(0.1, 1.0 - self.margin_threshold / len(np.unique(community_labels)))
-            negative_loss = F.relu(cosine_similarities - adaptive_margin).mean()
-            total_loss += self.neg_pair_weight * negative_loss
-            loss_components_count += 1
-
-        return total_loss / max(loss_components_count, 1)
+        if self.community_classifier.in_features != node_embeddings.shape[1]:
+            self.community_classifier = nn.Linear(node_embeddings.shape[1], self.num_communities).to(device)
+        
+        community_logits = self.community_classifier(node_embeddings)
+        
+        loss_fn = nn.CrossEntropyLoss()
+        community_loss = loss_fn(community_logits, community_labels_tensor)
+        
+        return community_loss
 
     def _compute_oversmoothing_metrics_for_mask(self, embeddings, edge_index, node_mask, labels=None):
 
@@ -357,7 +337,12 @@ class GraphCommunityDefenseTrainer:
         training_start_time = time.time()
         
         model = gnn_model.to(self.device)
-        optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay_rate)
+        optimizer = torch.optim.Adam(
+            list(model.parameters()) + list(self.community_classifier.parameters()),
+            lr=learning_rate,
+            weight_decay=weight_decay_rate
+        )
+
         lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, mode='min', factor=0.5, patience=10
         )
@@ -398,12 +383,18 @@ class GraphCommunityDefenseTrainer:
             # Compute losses
             supervised_loss = cross_entropy_loss(logits[self.train_node_mask], node_labels[self.train_node_mask])
             
-            # Adaptive community loss weight
+            if hasattr(model, 'last_hidden'):
+                node_embeddings = model.last_hidden
+            else:
+                node_embeddings = F.dropout(logits, p=0.3, training=True)
+
+            # community loss softmax multi-class
             adaptive_community_weight = self.community_loss_weight * min(1.0, epoch / 50.0)
             community_loss = self.compute_community_regularization_loss(node_embeddings, community_labels) if adaptive_community_weight > 0 else torch.zeros([], device=self.device)
-            
+
+            # Total loss
             total_loss = supervised_loss + adaptive_community_weight * community_loss
-            
+
             total_loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
