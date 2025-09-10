@@ -22,10 +22,10 @@ model:
   concat: true
   
 training:
-  method: gnnguard # standard, positive_eigenvalues, gcod, nrgnn, pi_gnn, cr_gnn, lafak, rtgnn, graphcleaner, unionnet, gnn_cleaner, erase, gnnguard
+  method: community_defense # standard, positive_eigenvalues, gcod, nrgnn, pi_gnn, cr_gnn, community_defense, rtgnn, graphcleaner, unionnet, gnn_cleaner, erase, gnnguard
   lr: 0.001
   weight_decay: 5e-4
-  epochs: 3
+  epochs: 8000
   patience: 200
 
 # Standard training parameters
@@ -66,17 +66,15 @@ pi_gnn_params:
   alpha: 0.2
   beta: 0.9
 
-# LafAK parameters
-lafak_params:
-  target_classes: [2, 3]
-  attack_epochs: 200
-  gcn_l2: 5e-4
-  smooth_coefficient: 1.0
-
-lafak_defense_params:
-  community_method: "louvain"
-  lambda_comm: 1.0
-  epochs: 250  
+# Community Defense parameters
+community_defense_params:
+  community_method: louvain # louvain, spectral
+  num_communities: null # auto-detect if null
+  lambda_comm: 2.0
+  pos_weight: 1.0
+  neg_weight: 2.0
+  margin: 1.5
+  num_neg_samples: 3
 
 # RTGNN parameters
 rtgnn_params:

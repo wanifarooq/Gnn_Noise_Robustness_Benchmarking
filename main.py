@@ -12,9 +12,9 @@ from model.GCOD_loss import train_with_gcod
 from model.NRGNN import NRGNN
 from model.PI_GNN import PiGnnModel, PiGnnTrainer, GraphLinkDecoder
 from model.CR_GNN import CRGNNModel
-from model.LafAK import Attack, prepare_simpledata_attrs, resetBinaryClass_init, CommunityDefense
+from model.CommunityDefense import GraphCommunityDefenseTrainer
 from model.RTGNN import RTGNN
-from model.GraphCleaner import GraphCleanerNoiseDetector, create_noise_ground_truth_labels
+from model.GraphCleaner import GraphCleanerNoiseDetector
 from model.UnionNET import UnionNET
 from model.GNN_Cleaner import GNNCleanerTrainer
 from model.ERASE import ERASETrainer
@@ -357,160 +357,54 @@ def run_experiment(config, run_id=1):
             'oversmoothing': test_results['oversmoothing']
         }
 
-    # LafAK and defense Training
-    elif method == 'lafak':
-        print("Using LafAK / GradientAttack")
-        data_for_lafak = data.clone()
-        data_for_lafak.y = data.y_original
-        data_dict = prepare_simpledata_attrs(data_for_lafak.cpu())
-        
-        target_classes = config.get('target_classes', None)
-        actual_classes = np.unique(data.y_original.cpu().numpy())
-        print(f"Available classes in dataset: {actual_classes}")
-        
-        if target_classes is None or len(target_classes) < 2:
-            if len(actual_classes) >= 2:
-                target_classes = actual_classes[:2].tolist()
-            else:
-                raise ValueError(f"Dataset has only {len(actual_classes)} classes, need at least 2 for binary attack")
-        
-        valid_targets = [tc for tc in target_classes if tc in actual_classes]
-        if len(valid_targets) < 2:
-            valid_targets = actual_classes[:2].tolist()
-            target_classes = valid_targets[:2]
-        
-        print(f"Using target classes for attack: {target_classes}")
-        
-        K = int(data.y_original.max().item() + 1)
-        target_classes = [min(tc, K-1) for tc in target_classes]
-        
-        resetBinaryClass_init(data_dict, a=target_classes[0], b=target_classes[1])
-        
-        gnn_model = get_model(
+    # Community Defense Training
+    elif method == 'community_defense':
+        print(f"Run {run_id}: Using Community Defense")
+
+        comm_params = config.get('community_defense_params', {})
+
+        base_model = get_model(
             model_name=config['model']['name'],
             in_channels=data.num_features,
             hidden_channels=config['model'].get('hidden_channels', 64),
-            out_channels=2,
+            out_channels=num_classes,
             n_layers=config['model'].get('n_layers', 2),
             dropout=config['model'].get('dropout', 0.5),
-            self_loop=config['model'].get('self_loop', True)
+            self_loop=config['model'].get('self_loop', True),
         )
-        
-        attack = Attack(
-            data_dict=data_dict,
-            gpu_id=int(device.split(':')[-1]) if ':' in str(device) else 0,
-            atkEpoch=config.get('attack_epochs', 500),
-            gcnL2=config.get('gcn_l2', 5e-4),
-            smooth_coefficient=config.get('smooth_coefficient', 1.0),
-            c_max=10,
+
+        defense_trainer = GraphCommunityDefenseTrainer(
+            graph_data=data_for_training,
+            community_detection_method=comm_params.get("community_method", "louvain"),
+            num_communities=comm_params.get("num_communities", None),
+            community_loss_weight=float(comm_params.get("lambda_comm", 2.0)),
+            positive_pair_weight=float(comm_params.get("pos_weight", 1.0)),
+            negative_pair_weight=float(comm_params.get("neg_weight", 2.0)),
+            similarity_margin=float(comm_params.get("margin", 1.5)),
+            negative_samples_per_node=int(comm_params.get("num_neg_samples", 3)),
+            device=device,
+            verbose=True
         )
-        
-        print("Performing gradient attack with comprehensive evaluation")
-        results = attack.binaryAttack_multiclass_with_clean(
-            a=target_classes[0], 
-            b=target_classes[1], 
-            gnn_model=gnn_model
+
+        test_results = defense_trainer.train_with_community_defense(
+            gnn_model=base_model,
+            training_epochs=int(config['training'].get('epochs', 200)),
+            early_stopping_patience=int(config['training'].get('patience', 20)),
+            learning_rate=float(config['training'].get('lr', 0.005)),
+            weight_decay_rate=float(config['training'].get('weight_decay', 1e-3)),
+            enable_debug=True
         )
-        
-        print("Final attack results")
-        print(f"Binary Clean accuracy: {results['binary_clean_acc']:.4f}")
-        print(f"Binary Attacked accuracy: {results['binary_attacked_acc']:.4f}")
-        print(f"Binary Attack success: {results['attack_success']:.4f}")
 
-        if results.get('gnn_clean_acc') and results.get('gnn_attacked_acc'):
-            print(f"GNN Clean accuracy: {results['gnn_clean_acc']:.4f}")
-            print(f"GNN Attacked accuracy: {results['gnn_attacked_acc']:.4f}")
-            print(f"GNN Attack success: {results['gnn_attack_success']:.4f}")
+        print("Defense completed!")
+        print(f"Test Accuracy: {test_results['accuracy']:.4f}")
 
-            x = torch.tensor(data_dict["_X_obs"], dtype=torch.float)
-            num_nodes = x.size(0)
-
-            y_original = torch.tensor(data_dict["_z_obs_original"], dtype=torch.long)
-
-            y_attacked = y_original.clone()
-            if 'flipped_nodes' in results:
-                flipped_nodes = results['flipped_nodes']
-                print(f"Applying flips to {len(flipped_nodes)} nodes in multiclass labels")
-                
-                binary_classes = data_dict.get('binary_classes', (target_classes[0], target_classes[1]))
-                a, b = binary_classes
-                
-                for node_idx in flipped_nodes:
-                    current_class = y_original[node_idx].item()
-                    if current_class == a:
-                        y_attacked[node_idx] = b
-                    elif current_class == b:
-                        y_attacked[node_idx] = a
-
-            y = y_attacked
-
-            edge_index, edge_weight = from_scipy_sparse_matrix(data_dict["_A_obs"])
-
-            pyg_data = PyGData(x=x, edge_index=edge_index, y=y)
-            if edge_weight is not None:
-                pyg_data.edge_weight = edge_weight
-
-            train_mask = torch.zeros(num_nodes, dtype=torch.bool)
-            train_mask[data_dict['split_train']] = True
-            pyg_data.train_mask = train_mask
-            
-            val_mask = torch.zeros(num_nodes, dtype=torch.bool)
-            val_mask[data_dict['split_val']] = True
-            pyg_data.val_mask = val_mask
-            
-            test_mask = torch.zeros(num_nodes, dtype=torch.bool) 
-            test_mask[data_dict['split_test']] = True
-            pyg_data.test_mask = test_mask
-
-            print(f"[Debug] Nodi totali: {num_nodes}")
-            print(f"[Debug] Train: {train_mask.sum().item()}, Val: {val_mask.sum().item()}, Test: {test_mask.sum().item()}")
-            print(f"[Debug] Classi nel dataset: {torch.unique(y)}")
-
-            defense_cfg = config.get('lafak_defense_params', {})
-            
-            num_classes_full = int(y.max().item()) + 1
-            print(f"[Debug] Numero classi per il modello di difesa: {num_classes_full}")
-            print(f"[Debug] Min/Max labels: {y.min().item()}/{y.max().item()}")
-
-            gnn_model_defense = get_model(
-                model_name=config['model']['name'],
-                in_channels=pyg_data.num_node_features,
-                hidden_channels=config['model'].get('hidden_channels', 64),
-                out_channels=num_classes_full,
-                n_layers=config['model'].get('n_layers', 2),
-                dropout=config['model'].get('dropout', 0.5),
-                self_loop=config['model'].get('self_loop', True)
-            )
-            
-            defense = CommunityDefense(
-                pyg_data,
-                community_method=defense_cfg.get("community_method", "louvain"),
-                lambda_comm=defense_cfg.get("lambda_comm", 2.0),
-                pos_weight=1.0,
-                neg_weight=2.0,
-                margin=1.5,
-                num_neg_samples=3,
-                verbose=True
-            )
-
-            test_results = defense.train_with_defense(
-                gnn_model_defense,
-                epochs=defense_cfg.get("epochs", 250),
-                early_stopping=20,
-                lr=0.005,
-                weight_decay=1e-3
-            )
-
-            print(f"Defense completed!")
-            print(f"Test Accuracy: {test_results['accuracy']:.4f}")
-
-            return {
-                'accuracy': test_results['accuracy'],
-                'f1': test_results['f1'],
-                'precision': test_results['precision'],
-                'recall': test_results['recall'],
-                'oversmoothing': test_results['oversmoothing']
-            }
+        return {
+            'accuracy': torch.tensor(test_results['accuracy']),
+            'f1': torch.tensor(test_results['f1']),
+            'precision': torch.tensor(test_results['precision']),
+            'recall': torch.tensor(test_results['recall']),
+            'oversmoothing': test_results['oversmoothing']
+        }
 
     # RTGNN Training
     elif method == 'rtgnn':
@@ -898,7 +792,7 @@ def run_experiment(config, run_id=1):
         raise ValueError(
             f"Run {run_id}: Training method '{method}' not implemented. "
             "Please choose one of the implemented methods: "
-            "[standard, positive_eigenvalues, gcod, nrgnn, pi_gnn, cr_gnn, lafak, rtgnn, graphcleaner, unionnet, gnn_cleaner, erase, gnnguard]"
+            "[standard, positive_eigenvalues, gcod, nrgnn, pi_gnn, cr_gnn, community_defense, rtgnn, graphcleaner, unionnet, gnn_cleaner, erase, gnnguard]"
         )
 
 if __name__ == "__main__":

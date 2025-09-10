@@ -602,13 +602,3 @@ class GraphCleanerNoiseDetector:
             'auc': detection_auc,
             'oversmoothing': oversmoothing_results
         }
-
-
-def create_noise_ground_truth_labels(graph_data, noisy_node_indices):
-
-    ground_truth_labels = torch.zeros(graph_data.num_nodes, dtype=torch.bool)
-    if isinstance(noisy_node_indices, torch.Tensor):
-        ground_truth_labels[noisy_node_indices] = True
-    else:
-        ground_truth_labels[torch.tensor(noisy_node_indices)] = True
-    return ground_truth_labels
