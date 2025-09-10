@@ -70,8 +70,8 @@ pi_gnn_params:
 community_defense_params:
   community_method: louvain # louvain, spectral
   num_communities: null # auto-detect if null
-  lambda_comm: 2.0
-  pos_weight: 1.0
+  lambda_comm: 1.0
+  pos_weight: 2.0
   neg_weight: 2.0
   margin: 1.5
   num_neg_samples: 3
