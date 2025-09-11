@@ -343,10 +343,6 @@ class GraphCommunityDefenseTrainer:
             weight_decay=weight_decay_rate
         )
 
-        lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode='min', factor=0.5, patience=10
-        )
-
         cross_entropy_loss = torch.nn.CrossEntropyLoss()
         
         adjacency_matrix = self.adjacency_matrix
@@ -409,7 +405,6 @@ class GraphCommunityDefenseTrainer:
                 validation_loss = cross_entropy_loss(
                     validation_logits[self.val_node_mask], node_labels[self.val_node_mask]
                 ).item()
-                lr_scheduler.step(validation_loss)
 
                 train_pred = logits[self.train_node_mask].argmax(dim=-1).cpu().numpy()
                 train_true = node_labels[self.train_node_mask].cpu().numpy()

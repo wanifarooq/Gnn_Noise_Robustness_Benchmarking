@@ -6,9 +6,9 @@ import yaml
 
 from utilities import setup_seed_device, load_dataset, get_model
 from utilities import label_process
-from model.Baseline_loss import train_with_standard_loss, NCODTrainer
-from model.Positive_Eigenvalues import train_with_positive_eigenvalues
-from model.GCOD_loss import train_with_gcod
+from model.Baseline_loss import train_with_standard_loss
+from model.Positive_Eigenvalues import PositiveEigenvaluesTrainer
+from model.GCOD_loss import GCODTrainer
 from model.NRGNN import NRGNN
 from model.PI_GNN import PiGnnModel, PiGnnTrainer, GraphLinkDecoder
 from model.CR_GNN import CRGNNModel
@@ -147,20 +147,26 @@ def run_experiment(config, run_id=1):
             **model_params
         )
 
-        result = train_with_positive_eigenvalues(
-            base_model, data_for_training, global_noisy_indices, device,
-            epochs=epochs,
-            lr=lr,
-            weight_decay=weight_decay,
+        trainer = PositiveEigenvaluesTrainer(
+            model=base_model,
+            data=data_for_training,
+            device=device,
+            learning_rate=lr,
+            weight_decay=weight_decay
+        )
+        
+        result = trainer.train_with_positive_eigenvalue_constraint(
+            max_epochs=epochs,
             batch_size=batch_size,
-            patience=patience
+            patience=patience,
+            noisy_indices=global_noisy_indices
         )
         
         return {
-            'accuracy': result['accuracy'],
-            'f1': result['f1'],
-            'precision': result['precision'],
-            'recall': result['recall'],
+            'accuracy': torch.tensor(result['accuracy']),
+            'f1': torch.tensor(result['f1']),
+            'precision': torch.tensor(result['precision']),
+            'recall': torch.tensor(result['recall']),
             'oversmoothing': result['oversmoothing']
         }
 
@@ -171,12 +177,13 @@ def run_experiment(config, run_id=1):
         weight_decay = float(trainer_params.get('weight_decay', 5e-4))
         epochs = int(trainer_params.get('epochs'))
         patience = int(trainer_params.get('patience', 100))
-
-        trainer_params_method = config.get('gcod_params', {})
-        batch_size = int(trainer_params_method.get('batch_size', 32))
-        u_lr = float(trainer_params_method.get('u_lr', 1.0))
-
+        
+        gcod_params = config.get('gcod_params', {})
+        batch_size = int(gcod_params.get('batch_size', 32))
+        uncertainty_lr = float(gcod_params.get('uncertainty_lr', 1.0))
+        
         model_params = {k: v for k, v in config['model'].items() if k not in ['name', 'hidden_channels', 'n_layers', 'dropout', 'self_loop']}
+
         base_model = get_model(
             model_name=config['model']['name'],
             in_channels=data.num_features,
@@ -188,15 +195,21 @@ def run_experiment(config, run_id=1):
             **model_params
         )
 
-        result = train_with_gcod(
-            base_model, data_for_training, global_noisy_indices, device,
-            epochs=epochs,
-            lr=lr,
+        trainer = GCODTrainer(
+            model=base_model,
+            data=data_for_training,
+            noisy_indices=global_noisy_indices,
+            device=device,
+            learning_rate=lr,
             weight_decay=weight_decay,
+            uncertainty_lr=uncertainty_lr,
+            total_epochs=epochs,
+            patience=patience,
             batch_size=batch_size,
-            u_lr=u_lr,
-            patience=patience
+            debug=True
         )
+
+        result = trainer.train_full_model()
         
         return {
             'accuracy': result['accuracy'],

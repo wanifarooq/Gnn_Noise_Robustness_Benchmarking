@@ -38,7 +38,7 @@ positive_eigenvalues_params:
 # GCOD parameters
 gcod_params:
   batch_size: 32
-  u_lr: 1.0
+  uncertainty_lr: 1.0
 
 # NRGNN parameters
 nrgnn_params:
