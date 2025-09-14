@@ -49,7 +49,6 @@ def evaluate_ce_only(model, data_loader, device='cuda', num_classes=None, mask_n
 
     return {'ce_loss': avg_ce_loss, 'accuracy': accuracy, 'f1': f1}
 
-
 class GraphCentroidOutlierDiscounting(nn.Module):
     
     def __init__(self, num_classes, device, num_samples, embedding_dim=None):
@@ -498,7 +497,7 @@ class GCODTrainer:
                 
                 test_node_set = set(test_node_indices.cpu().numpy())
                 test_edge_mask = torch.tensor([
-                    source.item() in test_node_set and target.item in test_node_set
+                    source.item() in test_node_set and target.item() in test_node_set
                     for source, target in self.data.edge_index.t()
                 ], device=self.data.edge_index.device)
                 
