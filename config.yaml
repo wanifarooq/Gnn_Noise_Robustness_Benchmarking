@@ -19,7 +19,6 @@ model:
   mlp_layers: 1
   train_eps: false
   heads: 8
-  concat: true
   
 training:
   method: community_defense # standard, positive_eigenvalues, gcod, nrgnn, pi_gnn, cr_gnn, community_defense, rtgnn, graphcleaner, unionnet, gnn_cleaner, erase, gnnguard
@@ -54,12 +53,11 @@ nrgnn_params:
 pi_gnn_params:
   start_epoch: 50
   miself: false
-  lr_main: 0.01
-  lr_mi: 0.01
   norm: null
   vanilla: false
 
 # CR-GNN parameters
+cr_gnn_params:
   T: 2
   tau: 0.6
   p: 0.9
@@ -78,7 +76,7 @@ community_defense_params:
 
 # RTGNN parameters
 rtgnn_params:
-  edge_hidden: 64
+  edge_hidden: 16
   co_lambda: 0.1
   alpha: 0.3
   th: 0.8

@@ -273,8 +273,8 @@ def run_experiment(config, run_id=1):
             epochs=int(training_config.get('epochs', 400)),
             mutual_info_start_epoch=int(pi_gnn_config.get('start_epoch', 200)),
             use_self_mi=bool(pi_gnn_config.get('miself', False)),
-            main_learning_rate=float(pi_gnn_config.get('lr_main', 0.01)),
-            mi_learning_rate=float(pi_gnn_config.get('lr_mi', 0.01)),
+            main_learning_rate=float(training_config.get('lr', 0.01)),
+            mi_learning_rate=float(training_config.get('lr', 0.01)),
             weight_decay=float(training_config.get('weight_decay', 5e-4)),
             early_stopping_patience=int(training_config.get('patience', 50)),
             normalization_factor=pi_gnn_config.get('norm', None),
@@ -302,7 +302,6 @@ def run_experiment(config, run_id=1):
             'mlp_layers': config['model'].get('mlp_layers', 2),
             'train_eps': config['model'].get('train_eps', True),
             'heads': config['model'].get('heads', 8),
-            'concat': config['model'].get('concat', True),
             'self_loop': config['model'].get('self_loop', True)
         }
         
@@ -356,7 +355,6 @@ def run_experiment(config, run_id=1):
             'mlp_layers': config['model'].get('mlp_layers', 2),
             'train_eps': config['model'].get('train_eps', True),
             'heads': config['model'].get('heads', 8),
-            'concat': config['model'].get('concat', True),
             'self_loop': config['model'].get('self_loop', True)
         }
         
@@ -435,7 +433,7 @@ def run_experiment(config, run_id=1):
                 self.patience = training_params.get('patience', 8)
                 self.dropout = model_params.get('dropout', 0.5)
 
-                self.hidden = model_params.get('hidden', 128)
+                self.hidden = model_params.get('hidden_channels', 128)
                 self.edge_hidden = rtgnn_params.get('edge_hidden', 64)
                 self.n_layers = model_params.get('n_layers', 2)
                 self.self_loop = model_params.get('self_loop', True)

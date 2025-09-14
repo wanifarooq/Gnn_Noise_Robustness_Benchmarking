@@ -6,6 +6,7 @@ from torch_geometric.data import Data
 from copy import deepcopy
 import time
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
+from model.evaluation import OversmoothingMetrics
 
 
 class ContrastiveProjectionHead(torch.nn.Module):
@@ -28,30 +29,39 @@ class NodeClassificationHead(torch.nn.Module):
         return F.log_softmax(self.classifier(embeddings), dim=-1)
 
 
-def contrastive_loss_original(z1, z2, tau):
+def contrastive_loss_original_style(z1, z2, tau):
 
     N = z1.size(0)
     
+    # Positive similarities
     pos1 = torch.exp(F.cosine_similarity(z1, z2, dim=1) / tau)
-    neg1 = torch.sum(torch.exp(torch.mm(z1, z1.t()) / tau), dim=1) + pos1
+    pos2 = torch.exp(F.cosine_similarity(z2, z1, dim=1) / tau)
     
-    pos2 = torch.exp(F.cosine_similarity(z2, z1, dim=1) / tau) 
-    neg2 = torch.sum(torch.exp(torch.mm(z2, z2.t()) / tau), dim=1) + pos2
+    # Negative similarities
+    neg_matrix_1 = torch.exp(torch.mm(z1, z1.t()) / tau)  
+    neg_matrix_2 = torch.exp(torch.mm(z2, z2.t()) / tau)
+
+    neg1 = torch.sum(neg_matrix_1, dim=1) - torch.diag(neg_matrix_1)
+    neg2 = torch.sum(neg_matrix_2, dim=1) - torch.diag(neg_matrix_2)
     
-    loss = (torch.sum(-torch.log(pos1 / (pos1 + neg1))) + 
-            torch.sum(-torch.log(pos2 / (pos2 + neg2)))) / (2 * N)
+    loss1 = -torch.log(pos1 / (pos1 + neg1 + 1e-8))
+    loss2 = -torch.log(pos2 / (pos2 + neg2 + 1e-8))
     
-    return loss
+    return (torch.sum(loss1) + torch.sum(loss2)) / (2 * N)
 
 
-def dynamic_cross_entropy_loss_original(p1, p2, labels):
-
+def dynamic_cross_entropy_loss_corrected(p1, p2, labels):
+    #Dynamic cross-entropy loss
+    if len(labels) == 0:
+        return torch.tensor(0.0, device=p1.device, requires_grad=True)
+    
     labels = labels.long()
-    pseudo1 = p1.argmax(dim=1)
-    pseudo2 = p2.argmax(dim=1)
-    consistent_mask = (pseudo1 == pseudo2)
+    pseudo_labels1 = p1.argmax(dim=1)
+    pseudo_labels2 = p2.argmax(dim=1)
+    consistent_mask = (pseudo_labels1 == pseudo_labels2)
     
     if consistent_mask.sum() > 0:
+
         loss = F.nll_loss(p1[consistent_mask], labels[consistent_mask])
     else:
         loss = torch.tensor(0.0, device=p1.device, requires_grad=True)
@@ -59,7 +69,24 @@ def dynamic_cross_entropy_loss_original(p1, p2, labels):
     return loss
 
 
-def cross_space_consistency_loss(zm, pm):
+def compute_cross_space_consistency_fixed(z1, z2, p1, p2, T, p_threshold):
+
+    # Similarity matrix
+    z1_expanded = z1.unsqueeze(1)
+    z2_expanded = z2.unsqueeze(0)
+    zm = torch.exp(F.cosine_similarity(z1_expanded, z2_expanded, dim=2) / T)
+    zm = zm.mean(dim=1)
+    
+    # Similarity matrix
+    p1_expanded = p1.unsqueeze(1)
+    p2_expanded = p2.unsqueeze(0)
+    pm = torch.exp(F.cosine_similarity(p1_expanded, p2_expanded, dim=2) / T)
+    pm = pm.mean(dim=1)
+    
+    # Apply thresholding
+    pm = torch.where(pm > p_threshold, pm, torch.zeros_like(pm))
+    
+    # MSE loss
     return F.mse_loss(zm, pm)
 
 
@@ -69,8 +96,9 @@ class CRGNNModel:
         self.T = config.get('T', 0.5)
         self.tau = config.get('tau', 0.5)
         self.p = config.get('p', 0.5)
+
         self.alpha = config.get('alpha', 1.0)
-        self.beta = config.get('beta', 0.0)
+        self.beta = config.get('beta', 1.0)
         self.lr = config.get('lr', 0.001)
         self.weight_decay = config.get('weight_decay', 5e-4)
         self.epochs = config.get('epochs', 200)
@@ -80,6 +108,59 @@ class CRGNNModel:
         self.best_val_loss = float('inf')
         self.early_stop_counter = 0
         self.best_weights = None
+        
+        self.oversmoothing_evaluator = OversmoothingMetrics(device=self.device)
+
+    def _compute_oversmoothing_metrics(self, embeddings, edge_index, node_mask):
+
+        try:
+            masked_node_indices = torch.where(node_mask)[0]
+            masked_embeddings = embeddings[node_mask]
+            mask_set = set(masked_node_indices.cpu().numpy())
+
+            edge_mask = torch.tensor([
+                src.item() in mask_set and tgt.item() in mask_set
+                for src, tgt in edge_index.t()
+            ], device=edge_index.device)
+            
+            if not edge_mask.any():
+                return {
+                    'NumRank': float(min(masked_embeddings.shape)),
+                    'Erank': float(min(masked_embeddings.shape)),
+                    'EDir': 0.0,
+                    'EDir_traditional': 0.0,
+                    'EProj': 0.0,
+                    'MAD': 0.0
+                }
+            
+            masked_edges = edge_index[:, edge_mask]
+            node_mapping = {orig_idx.item(): local_idx 
+                           for local_idx, orig_idx in enumerate(masked_node_indices)}
+            
+            remapped_edges = torch.stack([
+                torch.tensor([node_mapping[src.item()] for src in masked_edges[0]], 
+                           device=edge_index.device),
+                torch.tensor([node_mapping[tgt.item()] for tgt in masked_edges[1]], 
+                           device=edge_index.device)
+            ])
+            
+            graphs_in_class = [{
+                'X': masked_embeddings,
+                'edge_index': remapped_edges,
+                'edge_weight': None
+            }]
+            
+            return self.oversmoothing_evaluator.compute_all_metrics(
+                X=masked_embeddings,
+                edge_index=remapped_edges,
+                graphs_in_class=graphs_in_class
+            )
+        except Exception as e:
+            print(f"Warning: Could not compute oversmoothing metrics for mask: {e}")
+            return {
+                'NumRank': 0.0, 'Erank': 0.0, 'EDir': 0.0,
+                'EDir_traditional': 0.0, 'EProj': 0.0, 'MAD': 0.0
+            }
 
     def train_model(self, backbone_model, graph_data, model_config, model_factory_function):
         graph_data = graph_data.to(self.device)
@@ -95,16 +176,13 @@ class CRGNNModel:
         else:
             adapter = nn.Identity().to(self.device)
         
-        # Heads
         proj_head = ContrastiveProjectionHead(self.hidden_channels, self.hidden_channels).to(self.device)
         class_head = NodeClassificationHead(self.hidden_channels, num_classes).to(self.device)
         
-        # Optimizer
         params = list(backbone.parameters()) + list(adapter.parameters()) + \
                 list(proj_head.parameters()) + list(class_head.parameters())
         optimizer = torch.optim.Adam(params, lr=self.lr, weight_decay=self.weight_decay)
         
-        # Masks
         if hasattr(graph_data, 'train_mask'):
             train_mask, val_mask, test_mask = graph_data.train_mask, graph_data.val_mask, graph_data.test_mask
         else:
@@ -145,6 +223,28 @@ class CRGNNModel:
                                              graph_data.x, graph_data.edge_index,
                                              noisy_labels, val_mask)
             
+            if epoch % 20 == 0:
+                with torch.no_grad():
+                    embeddings = backbone(Data(x=graph_data.x, edge_index=graph_data.edge_index))
+                    embeddings = adapter(embeddings)
+                    
+                    train_oversmooth_metrics = self._compute_oversmoothing_metrics(
+                        embeddings, graph_data.edge_index, train_mask
+                    )
+                    val_oversmooth_metrics = self._compute_oversmoothing_metrics(
+                        embeddings, graph_data.edge_index, val_mask
+                    )
+                    
+                    print(f"Epoch {epoch+1:03d} | Train Acc: {train_acc:.4f}, Val Acc: {val_acc:.4f}, Total Loss: {loss:.4f}")
+                    print(f"Train EDir: {train_oversmooth_metrics['EDir']:.4f}, Val EDir: {val_oversmooth_metrics['EDir']:.4f} | "
+                          f"Train EDir_trad: {train_oversmooth_metrics['EDir_traditional']:.4f}, Val EDir_trad: {val_oversmooth_metrics['EDir_traditional']:.4f} | "
+                          f"Train EProj: {train_oversmooth_metrics['EProj']:.4f}, Val EProj: {val_oversmooth_metrics['EProj']:.4f} | "
+                          f"Train MAD: {train_oversmooth_metrics['MAD']:.4f}, Val MAD: {val_oversmooth_metrics['MAD']:.4f} | "
+                          f"Train NumRank: {train_oversmooth_metrics['NumRank']:.4f}, Val NumRank: {val_oversmooth_metrics['NumRank']:.4f} | "
+                          f"Train Erank: {train_oversmooth_metrics['Erank']:.4f}, Val Erank: {val_oversmooth_metrics['Erank']:.4f}")
+            elif epoch % 10 == 0 or epoch < 5:
+                print(f"Epoch {epoch+1:03d} | Train Acc: {train_acc:.4f}, Val Acc: {val_acc:.4f}, Total Loss: {loss:.4f}")
+            
             # Early stopping
             if val_loss < self.best_val_loss:
                 self.best_val_loss = val_loss
@@ -160,9 +260,7 @@ class CRGNNModel:
                 self.early_stop_counter += 1
                 if self.early_stop_counter >= self.patience:
                     break
-            
-            print(f"Epoch {epoch+1:03d} | Train Acc: {train_acc:.4f}, Val Acc: {val_acc:.4f}")
-        
+
         if self.best_weights:
             backbone.load_state_dict(self.best_weights['backbone'])
             adapter.load_state_dict(self.best_weights['adapter'])
@@ -187,61 +285,77 @@ class CRGNNModel:
             test_f1 = f1_score(y_true, y_pred, average='macro')
             test_precision = precision_score(y_true, y_pred, average='macro', zero_division=0)
             test_recall = recall_score(y_true, y_pred, average='macro', zero_division=0)
+            
+            test_oversmooth_metrics = self._compute_oversmoothing_metrics(
+                embeddings, graph_data.edge_index, test_mask
+            )
         
         print(f"Final Test - Acc: {test_acc:.4f}, F1: {test_f1:.4f}")
+        print("Final Test Oversmoothing Metrics:")
+        print(f"Test EDir: {test_oversmooth_metrics['EDir']:.4f}, EDir_trad: {test_oversmooth_metrics['EDir_traditional']:.4f}, "
+              f"EProj: {test_oversmooth_metrics['EProj']:.4f}, MAD: {test_oversmooth_metrics['MAD']:.4f}, "
+              f"NumRank: {test_oversmooth_metrics['NumRank']:.4f}, Erank: {test_oversmooth_metrics['Erank']:.4f}")
         
         return {
             'accuracy': float(test_acc),
             'f1': float(test_f1),
             'precision': float(test_precision),
             'recall': float(test_recall),
-            'oversmoothing': {'NumRank': 0.0, 'Erank': 0.0, 'EDir': 0.0,
-                            'EDir_traditional': 0.0, 'EProj': 0.0, 'MAD': 0.0}
+            'oversmoothing': test_oversmooth_metrics
         }
 
-    def _train_step(self, backbone, adapter, proj_head, class_head, x, edge_index, labels, mask):
-        h = backbone(Data(x=x, edge_index=edge_index))
-        h = adapter(h)
-        
-        # Augmentations
-        edge_idx1, _ = dropout_adj(edge_index, p=0.3)
-        edge_idx2, _ = dropout_adj(edge_index, p=0.3)
+    def _train_step(self, backbone, adapter, proj_head, class_head, 
+                   x, edge_index, labels, mask):
+
+        edge_idx1, _ = dropout_adj(edge_index, p=0.3, training=True)
+        edge_idx2, _ = dropout_adj(edge_index, p=0.3, training=True)  
         x1, _ = mask_feature(x, p=0.3)
         x2, _ = mask_feature(x, p=0.3)
         
         h1 = backbone(Data(x=x1, edge_index=edge_idx1))
         h1 = adapter(h1)
-        h2 = backbone(Data(x=x2, edge_index=edge_idx2))  
+        h2 = backbone(Data(x=x2, edge_index=edge_idx2))
         h2 = adapter(h2)
         
-        # Contrastive
+        # Contrastive loss
         z1 = proj_head(h1)
         z2 = proj_head(h2)
-        loss_con = contrastive_loss_original(z1, z2, self.tau)
+        loss_con = contrastive_loss_original_style(z1, z2, self.tau)
         
-        # Classification
+        # Classification predictions
         p1 = class_head(h1)
         p2 = class_head(h2)
-        loss_sup = dynamic_cross_entropy_loss_original(p1[mask], p2[mask], labels[mask])
+        
+        # Dynamic cross-entropy loss
+        if mask.sum() > 0:
+            loss_sup = dynamic_cross_entropy_loss_corrected(p1[mask], p2[mask], labels[mask])
+        else:
+            loss_sup = torch.tensor(0.0, device=x.device, requires_grad=True)
+        
+        # Cross-space consistency
+        loss_ccon = torch.tensor(0.0, device=x.device)
+        if self.beta > 0:
+            try:
+                loss_ccon = compute_cross_space_consistency_fixed(z1, z2, p1, p2, self.T, self.p)
+            except:
+                loss_ccon = torch.tensor(0.0, device=x.device)
         
         # Total loss
-        total_loss = self.alpha * loss_con + loss_sup
-        
-        # Consistency loss
-        if self.beta > 0:
-            zm = torch.exp(F.cosine_similarity(z1.unsqueeze(1), z2.unsqueeze(0), dim=2) / self.T).mean(dim=1)
-            pm = torch.exp(F.cosine_similarity(p1.unsqueeze(1), p2.unsqueeze(0), dim=2) / self.T).mean(dim=1)
-            pm = torch.where(pm > self.p, pm, torch.zeros_like(pm))
-            loss_ccon = cross_space_consistency_loss(zm, pm)
-            total_loss += self.beta * loss_ccon
+        total_loss = self.alpha * loss_con + loss_sup + self.beta * loss_ccon
         
         with torch.no_grad():
-            pred = class_head(h)[mask].exp().argmax(dim=1)
-            acc = accuracy_score(labels[mask].cpu().numpy(), pred.cpu().numpy())
+            h_orig = backbone(Data(x=x, edge_index=edge_index))
+            h_orig = adapter(h_orig)
+            pred_orig = class_head(h_orig)[mask].exp().argmax(dim=1)
+            if mask.sum() > 0:
+                acc = accuracy_score(labels[mask].cpu().numpy(), pred_orig.cpu().numpy())
+            else:
+                acc = 0.0
         
         return total_loss, acc
 
     def _evaluate(self, backbone, adapter, class_head, x, edge_index, labels, mask):
+
         backbone.eval()
         adapter.eval()
         class_head.eval()
@@ -256,65 +370,3 @@ class CRGNNModel:
             acc = accuracy_score(labels[mask].cpu().numpy(), pred_labels.cpu().numpy())
             
         return loss, acc
-
-    def _compute_oversmoothing_metrics(self, embeddings, edge_index, node_mask, labels=None):
-        if not self.oversmoothing_calc:
-            return None
-            
-        try:
-            masked_indices = torch.where(node_mask)[0]
-            subset_embeddings = embeddings[node_mask]
-            
-            index_set = set(masked_indices.cpu().numpy())
-            valid_edges = []
-            for i, (src, tgt) in enumerate(edge_index.t()):
-                if src.item() in index_set and tgt.item() in index_set:
-                    valid_edges.append(i)
-            
-            if not valid_edges:
-                return self._default_oversmoothing_metrics(subset_embeddings.shape[0])
-            
-            filtered_edge_index = edge_index[:, valid_edges]
-            
-            index_mapping = {orig_idx.item(): local_idx for local_idx, orig_idx in enumerate(masked_indices)}
-            remapped_edges = torch.stack([
-                torch.tensor([index_mapping[src.item()] for src in filtered_edge_index[0]], device=edge_index.device),
-                torch.tensor([index_mapping[tgt.item()] for tgt in filtered_edge_index[1]], device=edge_index.device)
-            ])
-            
-            graphs_in_class = [{
-                'X': subset_embeddings,
-                'edge_index': remapped_edges,
-                'edge_weight': None
-            }]
-            
-            metrics = self.oversmoothing_calc.compute_all_metrics(
-                X=subset_embeddings,
-                edge_index=remapped_edges,
-                graphs_in_class=graphs_in_class
-            )
-            
-            return metrics
-            
-        except Exception as e:
-            print(f"Warning: Could not compute oversmoothing metrics: {e}")
-            return None
-
-    def _default_oversmoothing_metrics(self, dim):
-        return {
-            'NumRank': float(dim),
-            'Erank': float(dim),
-            'EDir': 0.0,
-            'EDir_traditional': 0.0,
-            'EProj': 0.0,
-            'MAD': 0.0
-        }
-
-    def _print_oversmoothing_metrics(self, train_metrics, val_metrics):
-
-        print(f"Train DE: {train_metrics['EDir']:.4f}, Val DE: {val_metrics['EDir']:.4f} | "
-              f"Train DE_trad: {train_metrics['EDir_traditional']:.4f}, Val DE_trad: {val_metrics['EDir_traditional']:.4f} | "
-              f"Train EProj: {train_metrics['EProj']:.4f}, Val EProj: {val_metrics['EProj']:.4f} | "
-              f"Train MAD: {train_metrics['MAD']:.4f}, Val MAD: {val_metrics['MAD']:.4f} | "
-              f"Train NumRank: {train_metrics['NumRank']:.4f}, Val NumRank: {val_metrics['NumRank']:.4f} | "
-              f"Train Erank: {train_metrics['Erank']:.4f}, Val Erank: {val_metrics['Erank']:.4f}")

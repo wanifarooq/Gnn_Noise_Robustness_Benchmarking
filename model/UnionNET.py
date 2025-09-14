@@ -87,7 +87,7 @@ class UnionNET:
         return support_features, support_node_labels
 
     def _aggregate_labels_from_support(self, support_features, support_labels, node_features, n_classes):
-        #Aggregate labels from support set using similarity-based weighting.
+        #Aggregate labels from support set
 
         device = node_features.device
         n_nodes = node_features.size(0)
@@ -297,39 +297,41 @@ class UnionNET:
         }
 
     def _evaluate_oversmoothing_metrics(self, node_embeddings, mask=None):
-        if mask is not None:
-            masked_embeddings = node_embeddings[mask]
-            
-            # Filter edges to only include masked nodes
-            edge_mask = mask[self.edge_connections[0]] & mask[self.edge_connections[1]]
-            masked_edge_index = self.edge_connections[:, edge_mask]
-            
-            # Remap node indices for masked subgraph
-            index_mapping = torch.full((mask.size(0),), -1, device=masked_edge_index.device)
-            index_mapping[mask] = torch.arange(mask.sum(), device=masked_edge_index.device)
-            masked_edge_index = index_mapping[masked_edge_index]
+        try:
+            if mask is not None:
+                masked_embeddings = node_embeddings[mask]
 
-            subgraph_list = [{
-                'X': masked_embeddings, 
-                'edge_index': masked_edge_index,
-                'edge_weight': None
-            }]
-            
-            return self.oversmoothing_evaluator.compute_all_metrics(
-                X=masked_embeddings,
-                edge_index=masked_edge_index,
-                graphs_in_class=subgraph_list
-            )
-        else:
-            full_graph_list = [{
-                'X': node_embeddings, 
-                'edge_index': self.edge_connections,
-                'edge_weight': None
-            }]
-            
-            return self.oversmoothing_evaluator.compute_all_metrics(
-                X=node_embeddings,
-                edge_index=self.edge_connections,
-                graphs_in_class=full_graph_list
-            )
+                edge_mask = mask[self.edge_connections[0]] & mask[self.edge_connections[1]]
+                masked_edge_index = self.edge_connections[:, edge_mask]
+
+                index_mapping = torch.full((mask.size(0),), -1, device=masked_edge_index.device)
+                index_mapping[mask] = torch.arange(mask.sum(), device=masked_edge_index.device)
+                masked_edge_index = index_mapping[masked_edge_index]
+                subgraph_list = [{
+                    'X': masked_embeddings,
+                    'edge_index': masked_edge_index,
+                    'edge_weight': None
+                }]
+                return self.oversmoothing_evaluator.compute_all_metrics(
+                    X=masked_embeddings,
+                    edge_index=masked_edge_index,
+                    graphs_in_class=subgraph_list
+                )
+            else:
+                full_graph_list = [{
+                    'X': node_embeddings,
+                    'edge_index': self.edge_connections,
+                    'edge_weight': None
+                }]
+                return self.oversmoothing_evaluator.compute_all_metrics(
+                    X=node_embeddings,
+                    edge_index=self.edge_connections,
+                    graphs_in_class=full_graph_list
+                )
+        except Exception as e:
+            print(f"Warning: Could not compute oversmoothing metrics: {e}")
+            return {
+                'NumRank': 0.0, 'Erank': 0.0, 'EDir': 0.0,
+                'EDir_traditional': 0.0, 'EProj': 0.0, 'MAD': 0.0
+            }
         

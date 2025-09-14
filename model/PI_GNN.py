@@ -271,7 +271,6 @@ class PiGnnTrainer:
                 mlp_layers=config.get('mlp_layers', 2),
                 train_eps=config.get('train_eps', True),
                 heads=config.get('heads', 8),
-                concat=config.get('concat', True),
                 self_loop=config.get('self_loop', True)
             )
             mi_link_decoder = GraphLinkDecoder()

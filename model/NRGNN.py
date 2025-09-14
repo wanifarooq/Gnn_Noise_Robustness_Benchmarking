@@ -89,7 +89,7 @@ class NRGNN:
         return torch.sparse_coo_tensor(indices, values, shape)
 
     def create_edge_weight_estimator(self, input_features, hidden_dim, output_dim):
-        #Create GCN-based edge weight estimator
+        # Create GCN-based edge weight estimator
         estimator = nn.Module()
         estimator.first_conv = GCNConv(input_features, hidden_dim, bias=True, add_self_loops=True)
         estimator.second_conv = GCNConv(hidden_dim, output_dim, bias=True, add_self_loops=True)
@@ -116,7 +116,12 @@ class NRGNN:
             data_obj = type('GraphData', (), {})()
             data_obj.x = node_features
             data_obj.edge_index = edge_index
-            data_obj.edge_weight = edge_weights
+            
+            if hasattr(wrapper.base_gnn_model, '__class__') and 'gatv2' in wrapper.base_gnn_model.__class__.__name__.lower():
+                data_obj.edge_weight = None
+            else:
+                data_obj.edge_weight = edge_weights
+                
             return wrapper.base_gnn_model(data_obj)
             
         def reset_params_fn():
