@@ -655,7 +655,7 @@ def run_experiment(config, run_id=1):
         )
         
         gnn_cleaner_configuration = {
-            'max_epochs': config['gnn_cleaner_params'].get('max_epochs', config['training'].get('epochs', 200)),
+            'max_epochs': config['training'].get('epochs', 200),
             'model_learning_rate': config['gnn_cleaner_params'].get('model_learning_rate', 0.01),
             'net_learning_rate': config['gnn_cleaner_params'].get('net_learning_rate', 0.001),
             'weight_decay': config['training'].get('weight_decay', 5e-4),
