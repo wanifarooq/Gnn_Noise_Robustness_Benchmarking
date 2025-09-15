@@ -33,12 +33,11 @@ class MaximalCodingRateReductionLoss(nn.Module):
     #Maximal Coding Rate Reduction loss
     
     def __init__(self, compression_weight: float = 1.0, discrimination_weight: float = 1.0, 
-                 eps: float = 0.01, use_cora_full_variant: bool = False):
+                 eps: float = 0.01):
         super().__init__()
         self.compression_weight = compression_weight
         self.discrimination_weight = discrimination_weight
         self.eps = eps
-        self.use_cora_full_variant = use_cora_full_variant
 
     def compute_discrimination_loss_empirical(self, feature_matrix: torch.Tensor) -> torch.Tensor:
         #Compute empirical discrimination loss term
@@ -132,26 +131,20 @@ class MaximalCodingRateReductionLoss(nn.Module):
         # Compute discrimination loss
         discrimination_loss_empirical = self.compute_discrimination_loss_empirical(feature_matrix)
 
-        if self.use_cora_full_variant:
-            compression_loss_empirical = self.compute_compression_loss_empirical_multiclass(feature_matrix, predicted_labels)
-            total_loss_empirical = -self.discrimination_weight * discrimination_loss_empirical + self.compression_weight * compression_loss_empirical
-            return total_loss_empirical, [discrimination_loss_empirical.item(), compression_loss_empirical.item()], predicted_labels
+        # Standard variant with membership matrices
+        membership_matrices = self._convert_labels_to_membership_matrices(predicted_labels.cpu(), num_classes)
+        membership_matrices = torch.tensor(membership_matrices, dtype=torch.float32, device=node_features.device)
 
-        else:
-            # Standard variant with membership matrices
-            membership_matrices = self._convert_labels_to_membership_matrices(predicted_labels.cpu(), num_classes)
-            membership_matrices = torch.tensor(membership_matrices, dtype=torch.float32, device=node_features.device)
+        compression_loss_empirical = self.compute_compression_loss_empirical(feature_matrix, membership_matrices)
+        compression_loss_theoretical = self.compute_compression_loss_theoretical(feature_matrix, membership_matrices)
+        discrimination_loss_theoretical = self.compute_discrimination_loss_theoretical(feature_matrix)
 
-            compression_loss_empirical = self.compute_compression_loss_empirical(feature_matrix, membership_matrices)
-            compression_loss_theoretical = self.compute_compression_loss_theoretical(feature_matrix, membership_matrices)
-            discrimination_loss_theoretical = self.compute_discrimination_loss_theoretical(feature_matrix)
+        total_loss_empirical = -self.discrimination_weight * discrimination_loss_empirical + self.compression_weight * compression_loss_empirical
 
-            total_loss_empirical = -self.discrimination_weight * discrimination_loss_empirical + self.compression_weight * compression_loss_empirical
-
-            return (total_loss_empirical,
-                    [discrimination_loss_empirical.item(), compression_loss_empirical.item()],
-                    [discrimination_loss_theoretical.item(), compression_loss_theoretical.item()],
-                    predicted_labels)
+        return (total_loss_empirical,
+                [discrimination_loss_empirical.item(), compression_loss_empirical.item()],
+                [discrimination_loss_theoretical.item(), compression_loss_theoretical.item()],
+                predicted_labels)
 
     def _convert_labels_to_membership_matrices(self, target_labels: torch.Tensor, num_classes: int) -> np.ndarray:
         targets_onehot = F.one_hot(target_labels, num_classes).numpy()
@@ -385,8 +378,7 @@ class ERASETrainer:
         mcr2_loss_function = MaximalCodingRateReductionLoss(
             compression_weight=self.training_config.get('gam1', 1.0),
             discrimination_weight=self.training_config.get('gam2', 2.0), 
-            eps=self.training_config.get('eps', 0.05),
-            use_cora_full_variant=self.training_config.get('corafull', False)
+            eps=self.training_config.get('eps', 0.05)
         )
         
         model_optimizer = torch.optim.Adam(

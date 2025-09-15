@@ -3,8 +3,8 @@ import random
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torch_geometric.datasets import Planetoid, CoraFull, Amazon, Coauthor, WikiCS, Reddit
-from torch_geometric.transforms import NormalizeFeatures, RandomNodeSplit
+from torch_geometric.datasets import Planetoid
+from torch_geometric.transforms import NormalizeFeatures
 from scipy import stats
 from numpy.testing import assert_array_almost_equal
 
@@ -221,28 +221,12 @@ def setup_seed_device(seed: int):
 def load_dataset(name, root="./data"):
     name_lower = name.lower()
     
-    if name_lower == "corafull":
-        dataset = CoraFull(root=f"{root}/CoraFull", transform=NormalizeFeatures())
-    elif name_lower in ["cora", "citeseer", "pubmed"]:
+    if name_lower in ["cora", "citeseer", "pubmed"]:
         dataset = Planetoid(root=f"{root}/{name}", name=name.capitalize(), transform=NormalizeFeatures(), split='public')
-    elif name_lower in ["computers", "photo"]:
-        dataset = Amazon(root=f"{root}/Amazon", name=name.capitalize(), transform=NormalizeFeatures())
-    elif name_lower in ["coauthorcs", "coauthorphysics"]:
-        dataset = Coauthor(root=f"{root}/Coauthor", name=name_lower.replace("coauthor", "").capitalize(), transform=NormalizeFeatures())
-    elif name_lower == "wikics":
-        dataset = WikiCS(root=f"{root}/WikiCS", transform=NormalizeFeatures())
-    elif name_lower == "reddit":
-        dataset = Reddit(root=f"{root}/Reddit")
     else:
         raise ValueError(f"Dataset {name} not supported.")
     
     data = dataset[0]
-    
-    if not hasattr(data, 'train_mask'):
-        if name_lower in ['wikics', 'reddit', 'computers', 'photo', 'coauthorcs', 'coauthorphysics']:
-            data = RandomNodeSplit(train_ratio=0.7, val_ratio=0.1, test_ratio=0.2)(data)
-        else:
-            data = RandomNodeSplit(num_train_per_class=20, num_val=500, num_test=1000)(data)
     
     return data, dataset.num_classes
 

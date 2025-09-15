@@ -709,7 +709,6 @@ def run_experiment(config, run_id=1):
             'gam1': erase_specific_params.get('gam1', 1.0),
             'gam2': erase_specific_params.get('gam2', 2.0),
             'eps': erase_specific_params.get('eps', 0.05),
-            'corafull': erase_specific_params.get('corafull', False),
             'alpha': erase_specific_params.get('alpha', 0.6),
             'beta': erase_specific_params.get('beta', 0.6),
             'T': erase_specific_params.get('T', 3),
