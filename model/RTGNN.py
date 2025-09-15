@@ -415,7 +415,7 @@ class RTGNN(nn.Module):
         patience_counter = 0
         best_validation_loss = float('inf')
         
-        print(f"Starting RTGNN training with {self.gnn_backbone.upper()}...")
+        print(f"Starting RTGNN training with {self.gnn_backbone.upper()}")
         
         for epoch in range(self.training_config.epochs):
             self.train()

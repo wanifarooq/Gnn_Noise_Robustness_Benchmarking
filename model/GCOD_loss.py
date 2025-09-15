@@ -5,6 +5,8 @@ import torch.optim as optim
 from sklearn.metrics import f1_score, precision_score, recall_score
 from copy import deepcopy
 from torch_geometric.loader import NeighborLoader
+import matplotlib.pyplot as plt
+import numpy as np
 
 from model.evaluation import OversmoothingMetrics
 
@@ -240,6 +242,12 @@ class GCODTrainer:
         self.epochs_without_improvement = 0
         
         self.training_accuracy = 0.1
+        
+        self.epoch_oversmoothing_metrics = {
+            'train': {'EDir': [], 'MAD': [], 'NumRank': []},
+            'val': {'EDir': [], 'MAD': [], 'NumRank': []}
+        }
+        self.epochs_recorded = []
     
     def _setup_data_loaders(self):
         train_indices = self.data.train_mask.nonzero(as_tuple=True)[0]
@@ -536,10 +544,69 @@ class GCODTrainer:
                 'val': {},
                 'test': {}
             }
-    
+        
+    def plot_oversmoothing_metrics(self):
+
+        if not self.epochs_recorded or len(self.epochs_recorded) == 0:
+            print("No oversmoothing metrics recorded to plot.")
+            return
+        
+        fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+        fig.suptitle('Oversmoothing Metrics Evolution', fontsize=16)
+        
+        metrics_names = ['EDir', 'MAD', 'NumRank']
+        colors = {'train': 'blue', 'val': 'red'}
+        
+        for idx, metric_name in enumerate(metrics_names):
+            ax = axes[idx]
+            
+            for split in ['train', 'val']:
+                if (split in self.epoch_oversmoothing_metrics and 
+                    len(self.epoch_oversmoothing_metrics[split][metric_name]) > 0):
+                    
+                    y_values = self.epoch_oversmoothing_metrics[split][metric_name]
+                    ax.plot(self.epochs_recorded[:len(y_values)], y_values, 
+                           color=colors[split], label=f'{split.capitalize()}', 
+                           linewidth=2, alpha=0.8)
+            
+            ax.set_xlabel('Epoch')
+            ax.set_ylabel(metric_name)
+            ax.set_title(f'{metric_name} Evolution')
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.show()
+
+    def plot_training_metrics(self):
+
+        if not hasattr(self, 'train_metrics_history'):
+            print("Nessun record di metriche disponibili.")
+            return
+        
+        epochs = range(1, len(self.train_metrics_history['train']['loss']) + 1)
+        
+        fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+        
+        metrics_names = ['loss', 'accuracy', 'f1']
+        for idx, metric in enumerate(metrics_names):
+            ax = axes[idx]
+            for split in ['train', 'val']:
+                y_values = self.train_metrics_history[split][metric]
+                ax.plot(epochs, y_values, label=f'{split.capitalize()}', linewidth=2)
+            
+            ax.set_xlabel('Epoch')
+            ax.set_ylabel(metric.capitalize())
+            ax.set_title(f'{metric.capitalize()} Evolution')
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.show()
+
     def train_full_model(self):
         if self.debug:
-            print(f"Starting GCOD training for {self.total_epochs} epochs...")
+            print(f"Starting GCOD training for {self.total_epochs} epochs")
             print(f"Training samples: {self.data.train_mask.sum().item()}")
             print(f"Noisy samples: {len(self.noisy_indices)}")
         
@@ -550,6 +617,30 @@ class GCODTrainer:
             val_ce_metrics = evaluate_ce_only(self.model, self.val_loader, self.device, mask_name='val')
             val_loss_ce = val_ce_metrics['ce_loss']
 
+            oversmoothing_metrics = self.compute_oversmoothing_metrics()
+            
+            self.epochs_recorded.append(epoch)
+            for split in ['train', 'val']:
+                if split in oversmoothing_metrics:
+                    for metric_name in ['EDir', 'MAD', 'NumRank']:
+                        metric_value = oversmoothing_metrics[split].get(metric_name, 0.0)
+                        self.epoch_oversmoothing_metrics[split][metric_name].append(metric_value)
+
+            if not hasattr(self, 'train_metrics_history'):
+                self.train_metrics_history = {
+                    'train': {'loss': [], 'accuracy': [], 'f1': []},
+                    'val': {'loss': [], 'accuracy': [], 'f1': []}
+                }
+
+            self.train_metrics_history['train']['loss'].append(train_metrics['loss'])
+            self.train_metrics_history['train']['accuracy'].append(train_metrics['accuracy'])
+            self.train_metrics_history['train']['f1'].append(train_metrics['f1'])
+
+            self.train_metrics_history['val']['loss'].append(val_ce_metrics['ce_loss'])
+            self.train_metrics_history['val']['accuracy'].append(val_ce_metrics['accuracy'])
+            self.train_metrics_history['val']['f1'].append(val_ce_metrics['f1'])
+
+            # Eearly Stopping
             if val_loss_ce < self.best_val_loss:
                 self.best_val_loss = val_loss_ce
                 self.best_model_state = deepcopy(self.model.state_dict())
@@ -563,26 +654,21 @@ class GCODTrainer:
                 break
 
             if self.debug and epoch % 20 == 0:
-
                 with torch.no_grad():
                     u_mean = self.gcod_loss_fn.uncertainty_params.mean().item()
                     u_std = self.gcod_loss_fn.uncertainty_params.std().item()
                     u_min = self.gcod_loss_fn.uncertainty_params.min().item()
                     u_max = self.gcod_loss_fn.uncertainty_params.max().item()
-                
+
                 print(f"Epoch {epoch:03d} | Train Loss: {train_metrics['loss']:.4f}, Val CE Loss: {val_ce_metrics['ce_loss']:.4f} | "
-                      f"Train Acc: {train_metrics['accuracy']:.4f}, Val Acc: {val_ce_metrics['accuracy']:.4f} | "
-                      f"Train F1: {train_metrics['f1']:.4f}, Val F1: {val_ce_metrics['f1']:.4f}")
-                
+                    f"Train Acc: {train_metrics['accuracy']:.4f}, Val Acc: {val_ce_metrics['accuracy']:.4f} | "
+                    f"Train F1: {train_metrics['f1']:.4f}, Val F1: {val_ce_metrics['f1']:.4f}")
                 print(f"Training Accuracy: {self.training_accuracy:.4f} | "
-                      f"L1: {l1_loss:.4f}, L2: {l2_loss:.4f}, L3: {l3_loss:.4f}")
-                
+                    f"L1: {l1_loss:.4f}, L2: {l2_loss:.4f}, L3: {l3_loss:.4f}")
                 print(f"Uncertainty Stats - Mean: {u_mean:.4f}, Std: {u_std:.4f}, "
-                      f"Min: {u_min:.4f}, Max: {u_max:.4f}")
+                    f"Min: {u_min:.4f}, Max: {u_max:.4f}")
 
-                oversmoothing_metrics = self.compute_oversmoothing_metrics()
-
-                train_os = oversmoothing_metrics['train']
+                train_os = oversmoothing_metrics.get('train', {})
                 train_edir = train_os.get('EDir', 0.0)
                 train_edir_traditional = train_os.get('EDir_traditional', 0.0)
                 train_eproj = train_os.get('EProj', 0.0)
@@ -590,7 +676,7 @@ class GCODTrainer:
                 train_num_rank = train_os.get('NumRank', 0.0)
                 train_effective_rank = train_os.get('Erank', 0.0)
                 
-                val_os = oversmoothing_metrics['val']
+                val_os = oversmoothing_metrics.get('val', {})
                 val_edir = val_os.get('EDir', 0.0)
                 val_edir_traditional = val_os.get('EDir_traditional', 0.0)
                 val_eproj = val_os.get('EProj', 0.0)
@@ -604,6 +690,11 @@ class GCODTrainer:
                     f"Train MAD: {train_mad:.4f}, Val MAD: {val_mad:.4f} | "
                     f"Train NumRank: {train_num_rank:.4f}, Val NumRank: {val_num_rank:.4f} | "
                     f"Train Erank: {train_effective_rank:.4f}, Val Erank: {val_effective_rank:.4f}")
+        
+        if self.debug:
+            print("\nGenerating plots")
+            self.plot_training_metrics()
+            self.plot_oversmoothing_metrics()
         
         if self.best_model_state is not None:
             self.model.load_state_dict(self.best_model_state)
@@ -643,13 +734,13 @@ class GCODTrainer:
                   f"Test Acc: {test_metrics['accuracy']:.4f} | "
                   f"Test F1: {test_metrics['f1']:.4f}")
             
-            test_os = oversmoothing_metrics['test']
+            test_os = oversmoothing_metrics.get('test', {})
             if test_os:
                 print(f"Test: EDir: {test_os.get('EDir', 0):.4f}, EDir_traditional: {test_os.get('EDir_traditional', 0):.4f}, "
                       f"EProj: {test_os.get('EProj', 0):.4f}, MAD: {test_os.get('MAD', 0):.4f}, "
                       f"NumRank: {test_os.get('NumRank', 0):.4f}, Erank: {test_os.get('Erank', 0):.4f}")
         
-        test_os = oversmoothing_metrics['test']
+        test_os = oversmoothing_metrics.get('test', {})
         
         return {
             'accuracy': torch.tensor(test_metrics['accuracy']),
