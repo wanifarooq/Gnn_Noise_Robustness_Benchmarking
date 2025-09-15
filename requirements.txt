@@ -12,3 +12,4 @@ networkx==3.5
 nni==3.0
 cleanlab==2.7.1
 json-tricks==3.17.3
+matplotlib==3.7.2

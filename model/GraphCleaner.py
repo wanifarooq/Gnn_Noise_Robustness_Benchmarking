@@ -440,8 +440,6 @@ class GraphCleanerNoiseDetector:
             validation_corrupted_labels, validation_prediction_probs, num_classes
         )
         
-        self._visualize_noise_transition_matrix(noise_transition_matrix, num_classes, "Learned")
-        
         # Generate negative samples
         artificially_corrupted_data, artificial_corruption_indices = self._generate_negative_samples(
             graph_data, noise_transition_matrix, num_classes)
@@ -478,23 +476,6 @@ class GraphCleanerNoiseDetector:
         test_binary_predictions = test_confidence_scores > 0.5
         
         return test_binary_predictions, test_confidence_scores, binary_noise_classifier, trained_neural_network
-
-    def _visualize_noise_transition_matrix(self, noise_matrix, num_classes, title_prefix=""):
-
-        plt.figure(figsize=(8, 6))
-        plt.imshow(noise_matrix.T, cmap='Blues', vmin=0, vmax=1)
-        plt.colorbar()
-        plt.title(f'{title_prefix} Noise Transition Matrix')
-        
-        for i in range(num_classes):
-            for j in range(num_classes):
-                plt.text(j, i, f'{noise_matrix.T[i,j]:.2f}', 
-                        ha='center', va='center', color='black')
-        
-        plt.xlabel('True Label')
-        plt.ylabel('Noisy Label')
-        plt.tight_layout()
-        plt.show()
     
     def clean_training_data(self, graph_data, neural_network_model, num_classes):
  
