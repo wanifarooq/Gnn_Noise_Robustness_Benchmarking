@@ -581,7 +581,7 @@ class GCODTrainer:
     def plot_training_metrics(self):
 
         if not hasattr(self, 'train_metrics_history'):
-            print("Nessun record di metriche disponibili.")
+            print("No metrics recorded to plot.")
             return
         
         epochs = range(1, len(self.train_metrics_history['train']['loss']) + 1)
