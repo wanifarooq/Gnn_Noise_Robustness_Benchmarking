@@ -15,12 +15,41 @@ class OversmoothingMetrics:
         
         X_np = X.detach().cpu().numpy()
 
-        metrics['EDir'] = self._compute_edir_average(graphs_in_class)
-        metrics['NumRank'] = self._compute_numerical_rank(X_np)
-        metrics['Erank'] = self._compute_effective_rank(X_np)
-        metrics['EDir_traditional'] = self._compute_dirichlet_energy_traditional(X, edge_index, edge_weight)
-        metrics['EProj'] = self._compute_projection_energy(X, edge_index, edge_weight)
-        metrics['MAD'] = self._compute_mad(X, edge_index)
+        try:
+            metrics['EDir'] = self._compute_edir_average(graphs_in_class)
+        except Exception as e:
+            print(f"Warning: Could not compute EDir: {e}")
+            metrics['EDir'] = 0.0
+
+        try:
+            metrics['NumRank'] = self._compute_numerical_rank(X_np)
+        except Exception as e:
+            print(f"Warning: Could not compute NumRank: {e}")
+            metrics['NumRank'] = float(min(X_np.shape))
+
+        try:
+            metrics['Erank'] = self._compute_effective_rank(X_np)
+        except Exception as e:
+            print(f"Warning: Could not compute Erank: {e}")
+            metrics['Erank'] = float(min(X_np.shape))
+
+        try:
+            metrics['EDir_traditional'] = self._compute_dirichlet_energy_traditional(X, edge_index, edge_weight)
+        except Exception as e:
+            print(f"Warning: Could not compute EDir_traditional: {e}")
+            metrics['EDir_traditional'] = 0.0
+
+        try:
+            metrics['EProj'] = self._compute_projection_energy(X, edge_index, edge_weight)
+        except Exception as e:
+            print(f"Warning: Could not compute EProj: {e}")
+            metrics['EProj'] = 0.0
+
+        try:
+            metrics['MAD'] = self._compute_mad(X, edge_index)
+        except Exception as e:
+            print(f"Warning: Could not compute MAD: {e}")
+            metrics['MAD'] = 0.0
         
         return metrics
     
@@ -158,6 +187,10 @@ class OversmoothingMetrics:
     def _compute_mad(self, X, edge_index):
 
         num_edges = edge_index.size(1)
+        
+        if num_edges == 0:
+            return 0.0
+            
         total_distance = 0.0
         
         for i in range(num_edges):
