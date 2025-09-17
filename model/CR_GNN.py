@@ -103,6 +103,7 @@ class CRGNNModel:
         self.epochs = config.get('epochs', 200)
         self.patience = config.get('patience', 10)
         self.hidden_channels = config.get('hidden_channels', 64)
+        self.pr = config.get('pr', 0.3)
         
         self.best_val_loss = float('inf') # self.best_val_acc = 0.0
         self.early_stop_counter = 0
@@ -306,10 +307,10 @@ class CRGNNModel:
     def _train_step(self, backbone, adapter, proj_head, class_head, 
                    x, edge_index, labels, mask):
 
-        edge_idx1, _ = dropout_adj(edge_index, p=0.3, training=True) #dropout_adj(edge_index, p=0.1, training=True)
-        edge_idx2, _ = dropout_adj(edge_index, p=0.3, training=True) #dropout_adj(edge_index, p=0.1, training=True)
-        x1, _ = mask_feature(x, p=0.3) #mask_feature(x, p=0.1)
-        x2, _ = mask_feature(x, p=0.3) #mask_feature(x, p=0.1)
+        edge_idx1, _ = dropout_adj(edge_index, self.pr, training=True)
+        edge_idx2, _ = dropout_adj(edge_index, self.pr, training=True)
+        x1, _ = mask_feature(x, self.pr)
+        x2, _ = mask_feature(x, self.pr)
         
         h1 = backbone(Data(x=x1, edge_index=edge_idx1))
         h1 = adapter(h1)

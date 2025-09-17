@@ -4,28 +4,35 @@ This study contributes to the analysis of the robustness of Graph Neural Network
 
 This work therefore establishes a unified benchmarking effort to identify which strategies perform best under controlled and comparable conditions. To this end, extensive experiments and advanced ablation studies are conducted to evaluate not only standard performance metrics but also oversmoothing measures and alternative experimental setups. Furthermore, the study investigates how different backbone architectures influence model performance. By providing a systematic and in-depth analysis under consistent conditions, this study sheds light on the differences among robustness frameworks and highlights which approaches are most effective in various scenarios.
 
+<div style="display: flex; justify-content: center; gap: 10px; margin-bottom: 20px;">
+  <img src="images/diagram.png" alt="Symmetric" width="100%">
+</div>
+
 # Experiments
 
-It is possible here to observe some of the experiments conducted during the work.
+It is possible to observe here some of the experiments conducted during the work.
 
-Here are presented the results on the Cora dataset under a uniform setup:
+The following figures present the results on the Cora dataset under a uniform setup, with different noise levels. Two types of noise are considered: **Uniform** and **Instance**.
 
-Symmetric PNG and Asymmetric PNG:
-
-The results are shown for different levels of noise: Uniform and Instance noise.
-
-Also, it is possible to observe MAD, $E^{dir}$, and Numrank oversmoothing metrics of the GCOD framework during training and validation. These metrics are used in the ablation study to understand the behavior of the model beyond the commonly employed ones.
-
-<div style="display: flex; justify-content: center; gap: 10px; margin-bottom: 20px;">
-  <img src="images/Symmetric.png" alt="Symmetric" width="45%">
-  <img src="images/Asymmetric.png" alt="Asymmetric" width="45%">
+<div style="display: flex; justify-content: center; gap: 10px; margin-bottom: 5px;">
+  <img src="images/Symmetric.png" alt="Uniform Noise" width="50%">
+  <img src="images/Asymmetric.png" alt="Instance Noise" width="50%">
 </div>
+<p style="text-align: center; margin-bottom: 20px;">
+  <i>Results on the Cora dataset with (left) Uniform noise and (right) Instance noise.</i>
+</p>
 
-<div style="display: flex; justify-content: center; gap: 10px;">
-  <img src="images/E_dir.png" alt="E_dir" width="30%">
-  <img src="images/Mad.png" alt="MAD" width="30%">
-  <img src="images/Numrank.png" alt="Numrank" width="30%">
+In addition, the following plots show the behavior of the **MAD**, **$E^{dir}$**, and **Numrank** oversmoothing metrics of the GCOD framework during training and validation.  
+These metrics are employed in the ablation study to better understand the model’s behavior beyond the commonly used evaluation measures.
+
+<div style="display: flex; justify-content: center; gap: 10px; margin-bottom: 5px;">
+  <img src="images/E_dir.png" alt="E_dir" width="33%">
+  <img src="images/Mad.png" alt="MAD" width="33%">
+  <img src="images/Numrank.png" alt="Numrank" width="33%">
 </div>
+<p style="text-align: center;">
+  <i>Evolution of E<sup>dir</sup> (left), MAD (center), and Numrank (right) metrics during training and validation.</i>
+</p>
 
 # Configuration
 
@@ -92,6 +99,7 @@ Also, it is possible to observe MAD, $E^{dir}$, and Numrank oversmoothing metric
 - **p**: Filtering threshold for low similarity values in prediction space.
 - **alpha**: Weight of contrastive loss.
 - **beta**: Weight for cross-space consistency between embedding and prediction spaces.
+- **pr**: Probability of dropout/masking
 
 ### Community Defense
 - **community_method**: Algorithm used for community detection (`louvain`, `spectral`).

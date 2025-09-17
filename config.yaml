@@ -63,6 +63,7 @@ cr_gnn_params:
   p: 0.9
   alpha: 0.2
   beta: 0.9
+  pr: 0.3
 
 # Community Defense parameters
 community_defense_params:
