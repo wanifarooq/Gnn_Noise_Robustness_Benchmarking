@@ -14,25 +14,23 @@ It is possible to observe here some of the experiments conducted during the work
 
 The following figures present the results on the Cora dataset under a uniform setup, with different noise levels. Two types of noise are considered: **Uniform** and **Instance**.
 
-<div style="display: flex; justify-content: center; gap: 10px; margin-bottom: 5px;">
-  <img src="images/Symmetric.png" alt="Uniform Noise" width="50%">
-  <img src="images/Asymmetric.png" alt="Instance Noise" width="50%">
-</div>
-<p style="text-align: center; margin-bottom: 20px;">
-  <i>Results on the Cora dataset with (left) Uniform noise and (right) Instance noise.</i>
+<p align="center">
+  <img src="images/Symmetric.png" alt="Uniform Noise" width="45%">
+  <img src="images/Asymmetric.png" alt="Instance Noise" width="45%">
 </p>
+
+<i>Results on the Cora dataset with (left) Uniform noise and (right) Instance noise.</i>
 
 In addition, the following plots show the behavior of the **MAD**, **$E^{dir}$**, and **Numrank** oversmoothing metrics of the GCOD framework during training and validation.  
 These metrics are employed in the ablation study to better understand the model’s behavior beyond the commonly used evaluation measures.
 
-<div style="display: flex; justify-content: center; gap: 10px; margin-bottom: 5px;">
-  <img src="images/E_dir.png" alt="E_dir" width="33%">
-  <img src="images/Mad.png" alt="MAD" width="33%">
-  <img src="images/Numrank.png" alt="Numrank" width="33%">
-</div>
-<p style="text-align: center;">
-  <i>Evolution of E<sup>dir</sup> (left), MAD (center), and Numrank (right) metrics during training and validation.</i>
+<p align="center">
+  <img src="images/E_dir.png" alt="E_dir" width="30%">
+  <img src="images/Mad.png" alt="MAD" width="30%">
+  <img src="images/NumRank.png" alt="Numrank" width="30%">
 </p>
+
+<i>Evolution of E<sup>dir</sup> (left), MAD (center), and NumRank (right) metrics during training and validation.</i>
 
 # Configuration
 
