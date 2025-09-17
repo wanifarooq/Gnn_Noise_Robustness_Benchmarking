@@ -229,7 +229,6 @@ class GraphStructureEstimator(nn.Module):
         
         return positive_loss, negative_loss
 
-
 class RTGNN(nn.Module):
 
     def __init__(self, input_features, num_classes, training_config, device, gnn_backbone='gcn'):
@@ -413,7 +412,7 @@ class RTGNN(nn.Module):
         # Early stopping
         early_stop_patience = getattr(self.training_config, 'patience', 8)
         patience_counter = 0
-        best_validation_loss = float('inf')
+        best_validation_loss = float('inf') #best_validation_accuracy = 0.0
         
         print(f"Starting RTGNN training with {self.gnn_backbone.upper()}")
         
@@ -505,9 +504,9 @@ class RTGNN(nn.Module):
                       f"Train F1: {performance_metrics['train_f1']:.4f}, Val F1: {performance_metrics['val_f1']:.4f}")
 
             # Early stopping
-            current_val_loss = performance_metrics['val_loss'].item()
-            if current_val_loss < best_validation_loss:
-                best_validation_loss = current_val_loss
+            current_val_loss = performance_metrics['val_loss'].item() #current_val_accuracy = performance_metrics['val_acc']
+            if current_val_loss < best_validation_loss: #if current_val_accuracy > best_validation_accuracy:
+                best_validation_loss = current_val_loss # best_validation_accuracy = current_val_accuracy
                 patience_counter = 0
                 self.best_model_state = {
                     'model': deepcopy(self.state_dict()),
@@ -550,7 +549,7 @@ class RTGNN(nn.Module):
                       f"EProj: {final_test_oversmoothing['EProj']:.4f}, MAD: {final_test_oversmoothing['MAD']:.4f}, "
                       f"NumRank: {final_test_oversmoothing['NumRank']:.4f}, Erank: {final_test_oversmoothing['Erank']:.4f}")
             
-        print(f"Training completed! Best validation loss: {best_validation_loss:.4f}")
+        print(f"Training completed! Best validation loss: {best_validation_loss:.4f}") #print(f"Training completed! Best validation accuracy: {best_validation_accuracy:.4f}")
 
     def evaluate_final_performance(self, node_features, node_labels, test_indices):
         if self.best_model_state is None:
