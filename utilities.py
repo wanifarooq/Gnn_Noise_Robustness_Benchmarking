@@ -14,13 +14,15 @@ from model.GNNs import GCN, GIN, GAT, GATv2
 def simple_uniform_noise(labels, n_classes, noise_rate, random_seed):
     if noise_rate == 0:
         return labels.clone()
+    rng = np.random.RandomState(random_seed)
+    
     n_samples = len(labels)
     noisy_labels = labels.clone()
     for i in range(n_samples):
-        if np.random.rand() < noise_rate:
+        if rng.rand() < noise_rate:
             available_classes = list(range(n_classes))
             available_classes.remove(labels[i].item())
-            noisy_labels[i] = np.random.choice(available_classes)
+            noisy_labels[i] = rng.choice(available_classes)
     return noisy_labels
 
 def uniform_noise_cp(n_classes, noise_rate):
@@ -37,10 +39,12 @@ def pair_noise_cp(n_classes, noise_rate):
     assert_array_almost_equal(P.sum(axis=1), 1, decimal=6)
     return P
 
-def random_noise_cp(n_classes, noise_rate):
+def random_noise_cp(n_classes, noise_rate, seed=1):
+    rng = np.random.RandomState(seed)
+    
     P = (1 - noise_rate) * np.eye(n_classes, dtype=np.float64)
     for i in range(n_classes):
-        probs = np.random.rand(n_classes)
+        probs = rng.rand(n_classes)
         probs[i] = 0
         probs /= probs.sum()
         P[i, :] += noise_rate * probs
@@ -57,8 +61,9 @@ def random_pair_noise_cp(n_classes, noise_rate, seed=1):
     assert_array_almost_equal(P.sum(axis=1), 1, decimal=6)
     return P
 
-def deterministic(labels, idx_train, noise_rate=0.2):
-
+def deterministic(labels, idx_train, noise_rate=0.2, seed=1):
+    rng = np.random.RandomState(seed)
+    
     labels_np = labels.cpu().numpy() if torch.is_tensor(labels) else labels
     idx_train_np = idx_train.cpu().numpy() if torch.is_tensor(idx_train) else idx_train
 
@@ -66,20 +71,19 @@ def deterministic(labels, idx_train, noise_rate=0.2):
     num_classes = len(np.unique(labels_np))
     
     num_noise = int(len(idx_train_np) * noise_rate)
-    noise_indices = np.random.choice(idx_train_np, num_noise, replace=False)
+    noise_indices = rng.choice(idx_train_np, num_noise, replace=False)
     
     noise_idx, clean_idx = [], []
     for idx in idx_train_np:
         if idx in noise_indices:
             original = labels_np[idx]
             possible = [i for i in range(num_classes) if i != original]
-            corrupted_labels[idx] = np.random.choice(possible)
+            corrupted_labels[idx] = rng.choice(possible)
             noise_idx.append(idx)
         else:
             clean_idx.append(idx)
     
     return corrupted_labels, noise_idx, clean_idx
-
 
 def flip_noise_cp(n_classes, noise_rate, seed=1):
     P = np.eye(n_classes, dtype=np.float64) * (1 - noise_rate)
@@ -155,7 +159,7 @@ def label_process(labels, features, n_classes, noise_type='uniform', noise_rate=
         elif noise_type == 'uniform':
             cp = uniform_noise_cp(n_classes, noise_rate)
         elif noise_type == 'random':
-            cp = random_noise_cp(n_classes, noise_rate)
+            cp = random_noise_cp(n_classes, noise_rate, seed=random_seed)
         elif noise_type == 'pair':
             cp = pair_noise_cp(n_classes, noise_rate)
         elif noise_type == 'random_pair':
@@ -167,7 +171,7 @@ def label_process(labels, features, n_classes, noise_type='uniform', noise_rate=
         elif noise_type == 'deterministic':
             if idx_train is None:
                 raise ValueError("idx_train must be provided for deterministic noise")
-            noisy_labels_np, _, _ = deterministic(labels, idx_train, noise_rate=noise_rate)
+            noisy_labels_np, _, _ = deterministic(labels, idx_train, noise_rate=noise_rate, seed=random_seed)
             noisy_labels = torch.tensor(noisy_labels_np, dtype=torch.long, device=labels.device)
         elif noise_type == 'instance':
             if features is None:
