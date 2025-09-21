@@ -113,10 +113,16 @@ def add_instance_independent_label_noise(labels, cp, random_seed):
 
 def add_instance_dependent_label_noise(noise_rate, feature, labels, num_classes, norm_std, seed):
     num_nodes, feature_size = feature.shape
+    
+    rng = np.random.RandomState(seed)
     flip_dist = stats.truncnorm((0 - noise_rate) / norm_std, (1 - noise_rate) / norm_std, loc=noise_rate, scale=norm_std)
-    flip_rate = flip_dist.rvs(num_nodes)
+    flip_rate = flip_dist.rvs(num_nodes, random_state=rng)
+    
     labels_t = torch.tensor(labels, dtype=torch.long, device=feature.device)
+    
+    torch.manual_seed(seed)
     W = torch.randn(num_classes, feature_size, num_classes, device=feature.device)
+    
     P = []
     for i in range(num_nodes):
         x = feature[i].unsqueeze(0)
@@ -127,7 +133,8 @@ def add_instance_dependent_label_noise(noise_rate, feature, labels, num_classes,
         A[0, y] += 1 - flip_rate[i]
         P.append(A.squeeze(0))
     P = torch.stack(P).cpu().numpy()
-    new_label = np.array([np.random.choice(num_classes, p=P[i]) for i in range(num_nodes)])
+    
+    new_label = np.array([rng.choice(num_classes, p=P[i]) for i in range(num_nodes)])
     return new_label
 
 def label_process(labels, features, n_classes, noise_type='uniform', noise_rate=0, random_seed=5, idx_train=None, debug=True):
