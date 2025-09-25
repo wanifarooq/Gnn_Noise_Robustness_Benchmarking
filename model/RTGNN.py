@@ -75,7 +75,7 @@ class AdaptiveCoTeachingLoss(nn.Module):
         self.training_config = training_config
         self.total_epochs = training_config.epochs
         self.forget_rate_increment = 0.5 / self.total_epochs
-        self.residual_weight_decay = getattr(training_config, "decay_w", 1.0)
+        self.residual_weight_decay = 1.0
 
     def forward(self, first_branch_logits, second_branch_logits, target_labels, current_epoch=0):
         first_branch_loss = F.cross_entropy(first_branch_logits, target_labels, reduction='none')
@@ -228,14 +228,46 @@ class GraphStructureEstimator(nn.Module):
         negative_loss = F.mse_loss(negative_similarities, torch.zeros_like(negative_similarities))
         
         return positive_loss, negative_loss
+    
+class RTGNNTrainingConfig:
+    def __init__(self, config_dict):
+        rtgnn_params = config_dict.get('rtgnn_params', {})
+        training_params = config_dict.get('training', {})
+        model_params = config_dict.get('model', {})
+                
+        self.epochs = training_params.get('epochs', 200)
+        self.lr = training_params.get('lr', 0.001)  
+        self.weight_decay = float(training_params.get('weight_decay', 5e-4))
+        self.patience = training_params.get('patience', 8)
+        self.dropout = model_params.get('dropout', 0.5)
+
+        self.hidden = model_params.get('hidden_channels', 128)
+        self.edge_hidden = rtgnn_params.get('edge_hidden', 64)
+        self.n_layers = model_params.get('n_layers', 2)
+        self.self_loop = model_params.get('self_loop', True)
+        self.mlp_layers = model_params.get('mlp_layers', 2)
+        self.train_eps = model_params.get('train_eps', True)
+        self.heads = model_params.get('heads', 8)
+                
+        self.co_lambda = rtgnn_params.get('co_lambda', 0.1)
+        self.alpha = rtgnn_params.get('alpha', 0.3)
+        self.th = rtgnn_params.get('th', 0.8)
+        self.K = rtgnn_params.get('K', 50)
+        self.tau = rtgnn_params.get('tau', 0.05)
+        self.n_neg = rtgnn_params.get('n_neg', 100)
 
 class RTGNN(nn.Module):
 
-    def __init__(self, input_features, num_classes, training_config, device, gnn_backbone='gcn'):
+    def __init__(self, training_config, device, gnn_backbone='gcn', data_for_training=None):
         super().__init__()
         self.device = device
         self.training_config = training_config
         self.gnn_backbone = gnn_backbone.lower()
+
+        if data_for_training is not None:
+            (self.node_features, self.node_labels, self.train_node_indices, self.val_node_indices, self.test_node_indices, self.adjacency_matrix) = self._prepare_data(data_for_training)
+            input_features = self.node_features.shape[1]
+            num_classes = len(np.unique(self.node_labels))
 
         gnn_specific_config = self._get_gnn_specific_configuration()
         
@@ -261,6 +293,45 @@ class RTGNN(nn.Module):
         self.oversmoothing_evaluator = OversmoothingMetrics(device=device)
         
         print(f"Initialized RTGNN with {self.gnn_backbone.upper()} backbone")
+
+    def _prepare_data(self, data_for_training):
+
+        node_features = data_for_training.x.cpu().numpy()
+        node_labels = data_for_training.y.cpu().numpy()
+        
+        print(f"[DEBUG] Checking label corruption in RTGNN training:")
+        if hasattr(data_for_training, 'y_original'):
+            corrupted_count = (data_for_training.y[data_for_training.train_mask] != data_for_training.y_original[data_for_training.train_mask]).sum().item()
+            print(f"[DEBUG] Training labels corrupted: {corrupted_count}/{data_for_training.train_mask.sum().item()} nodes")
+            val_clean = (data_for_training.y[data_for_training.val_mask] == data_for_training.y_original[data_for_training.val_mask]).all().item()
+            test_clean = (data_for_training.y[data_for_training.test_mask] == data_for_training.y_original[data_for_training.test_mask]).all().item()
+            print(f"[DEBUG] Validation labels clean: {val_clean}, Test labels clean: {test_clean}")
+        
+        adjacency_matrix = to_scipy_sparse_matrix(data_for_training.edge_index, num_nodes=data_for_training.num_nodes)
+        adjacency_matrix = adjacency_matrix + adjacency_matrix.T
+        adjacency_matrix = adjacency_matrix.tolil()
+        adjacency_matrix[adjacency_matrix > 1] = 1
+        adjacency_matrix.setdiag(0)
+        
+        sparse_features = sp.csr_matrix(node_features)
+        row_sums = np.array(sparse_features.sum(1))
+        reciprocal_row_sums = np.power(row_sums, -1).flatten()
+        reciprocal_row_sums[np.isinf(reciprocal_row_sums)] = 0.
+        row_normalization_matrix = sp.diags(reciprocal_row_sums)
+        normalized_features = row_normalization_matrix.dot(sparse_features)
+        normalized_features = torch.FloatTensor(np.array(normalized_features.todense()))
+
+        if hasattr(data_for_training, 'train_mask'):
+            train_node_indices = data_for_training.train_mask.nonzero(as_tuple=True)[0].cpu().numpy().tolist()
+            val_node_indices = data_for_training.val_mask.nonzero(as_tuple=True)[0].cpu().numpy().tolist()
+            test_node_indices = data_for_training.test_mask.nonzero(as_tuple=True)[0].cpu().numpy().tolist()
+        else:
+            num_nodes = data_for_training.num_nodes
+            train_node_indices = list(range(min(140, num_nodes // 5)))
+            val_node_indices = list(range(len(train_node_indices), min(len(train_node_indices) + 500, num_nodes // 2)))
+            test_node_indices = list(range(max(len(train_node_indices) + len(val_node_indices), num_nodes // 2), num_nodes))
+        
+        return normalized_features, node_labels, train_node_indices, val_node_indices, test_node_indices, adjacency_matrix
     
     def _compute_oversmoothing_metrics_for_subset(self, node_embeddings, edge_indices, subset_mask, node_labels=None):
         try:
@@ -393,10 +464,16 @@ class RTGNN(nn.Module):
             
             return performance_metrics, train_oversmoothing, val_oversmoothing
 
-    def train_model(self, node_features, adjacency_matrix, node_labels, train_indices, val_indices, test_indices=None, 
-            noisy_sample_indices=None, clean_sample_indices=None):
+    def train_model(self):
 
         training_start_time = time.time()
+
+        node_features = self.node_features.to(self.device)
+        node_labels = torch.LongTensor(self.node_labels).to(self.device)
+        train_indices = self.train_node_indices
+        val_indices = self.val_node_indices
+        test_indices = self.test_node_indices
+        adjacency_matrix = self.adjacency_matrix
         
         edge_indices, _ = from_scipy_sparse_matrix(adjacency_matrix)
         edge_indices = edge_indices.to(self.device)
@@ -551,7 +628,12 @@ class RTGNN(nn.Module):
             
         print(f"Training completed! Best validation loss: {best_validation_loss:.4f}") #print(f"Training completed! Best validation accuracy: {best_validation_accuracy:.4f}")
 
-    def evaluate_final_performance(self, node_features, node_labels, test_indices):
+    def evaluate_final_performance(self, clean_labels=None):
+
+        node_features = self.node_features.to(self.device)
+        node_labels = torch.LongTensor(clean_labels if clean_labels is not None else self.node_labels).to(self.device)
+        test_indices = self.test_node_indices
+
         if self.best_model_state is None:
             print("Model not trained yet.")
             return {

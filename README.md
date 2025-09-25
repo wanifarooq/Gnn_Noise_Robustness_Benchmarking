@@ -155,6 +155,8 @@ These metrics are employed in the ablation study to better understand the modelâ
 
 ## How to run the code
 
+### Automatic benchmarking of 5 runs
+
 1. Install the required packages:
 
 ```bash
@@ -166,6 +168,63 @@ pip install -r requirements.txt
 3. Run the main script:
 ```bash
 python main.py
+```
+
+### Example of a single experiment run (illustrative)
+
+> This is a schematic example to show the workflow.
+
+```python
+# Necessary imports
+import yaml
+from utilities import initialize_experiment, GCODTrainer
+
+# Load the configuration file
+with open("config.yaml", "r") as f:
+    config = yaml.safe_load(f)
+
+# Initialize parameters for the experiment
+init_data = initialize_experiment(config, run_id=1)
+
+device = init_data['device']
+data_for_training = init_data['data_for_training']
+backbone_model = init_data['backbone_model']
+global_noisy_indices = init_data['global_noisy_indices']
+lr = init_data['lr']
+weight_decay = init_data['weight_decay']
+epochs = init_data['epochs']
+patience = init_data['patience']
+
+# Set specific parameters for GCOD
+gcod_params = config.get('gcod_params', {})
+batch_size = int(gcod_params.get('batch_size', 32))
+uncertainty_lr = float(gcod_params.get('uncertainty_lr', 1.0))
+
+# Create the GCOD trainer
+trainer = GCODTrainer(
+    model=backbone_model,
+    data=data_for_training,
+    noisy_indices=global_noisy_indices,
+    device=device,
+    learning_rate=lr,
+    weight_decay=weight_decay,
+    uncertainty_lr=uncertainty_lr,
+    total_epochs=epochs,
+    patience=patience,
+    batch_size=batch_size,
+    debug=True
+)
+
+# Run the training
+result = trainer.train_full_model()
+
+# Print the results
+print("Single run results:")
+print(f"Accuracy: {result['accuracy']:.4f}")
+print(f"F1 Score: {result['f1']:.4f}")
+print(f"Precision: {result['precision']:.4f}")
+print(f"Recall: {result['recall']:.4f}")
+print(f"Oversmoothing: {result['oversmoothing']:.4f}")
 ```
 
 ## Organization

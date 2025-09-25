@@ -11,6 +11,8 @@ import scipy.sparse as sp
 import numpy as np
 from copy import deepcopy
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
+from torch_geometric.utils import to_scipy_sparse_matrix
+from torch_geometric.data import Data
 
 from model.evaluation import OversmoothingMetrics
 
@@ -19,10 +21,11 @@ class GNNGuardTrainer:
 
     def __init__(self, input_features, hidden_channels, num_classes, dropout=0.5, lr=0.01, 
                  weight_decay=5e-4, attention=True, device=None, similarity_threshold=0.5, 
-                 num_layers=2, attention_dim=16):
+                 num_layers=2, attention_dim=16, data_for_training=None, backbone=None):
 
-        assert device is not None, "Please specify 'device'!"
         self.device = device
+        self.backbone = backbone
+        self.model = None
         self.input_features = input_features
         self.num_classes = num_classes
         self.hidden_channels = hidden_channels
@@ -52,6 +55,7 @@ class GNNGuardTrainer:
         }
         
         self._initialize_model()
+        self.data_for_training = data_for_training
     
     def _initialize_model(self):
 
@@ -63,9 +67,10 @@ class GNNGuardTrainer:
             similarity_threshold=self.similarity_threshold,
             num_layers=self.num_layers,
             attention_dim=self.attention_dim,
-            device=self.device
+            device=self.device,
+            backbone=self.backbone
         ).to(self.device)
-    
+
     def _compute_mask_oversmoothing_metrics(self, node_embeddings, edge_index, node_mask, labels=None):
 
         try:
@@ -117,6 +122,25 @@ class GNNGuardTrainer:
         except Exception as e:
             print(f"Warning: Could not compute oversmoothing metrics for mask: {e}")
             return None
+        
+    def prepare_data(self):
+        # adjacency
+        self.adjacency_matrix = to_scipy_sparse_matrix(
+            self.data_for_training.edge_index, num_nodes=self.data_for_training.num_nodes
+        )
+
+        # split train/val/test
+        if hasattr(self.data_for_training, "train_mask"):
+            self.train_indices = self.data_for_training.train_mask.nonzero(as_tuple=True)[0].cpu().numpy()
+            self.val_indices = self.data_for_training.val_mask.nonzero(as_tuple=True)[0].cpu().numpy()
+            self.test_indices = self.data_for_training.test_mask.nonzero(as_tuple=True)[0].cpu().numpy()
+        else:
+            total_nodes = self.data_for_training.num_nodes
+            self.train_indices = np.arange(min(140, total_nodes // 5))
+            self.val_indices = np.arange(len(self.train_indices),
+                                         min(len(self.train_indices) + 500, total_nodes // 2))
+            self.test_indices = np.arange(max(len(self.train_indices) + len(self.val_indices), total_nodes // 2),
+                                          total_nodes)
     
     def _convert_sparse_matrix_to_torch_tensor(self, sparse_matrix):
         # Convert scipy sparse matrix to PyTorch sparse tensor
@@ -141,25 +165,33 @@ class GNNGuardTrainer:
         return adjacency_tensor + identity_tensor
     
     def _reset_model_parameters(self):
+        if hasattr(self.model, 'gcn_layers'):
+            for gcn_layer in self.model.gcn_layers:
+                gcn_layer.reset_parameters()
+        elif hasattr(self.model, 'initialize'):
+            self.model.initialize()
 
-        for gcn_layer in self.model.gcn_layers:
-            gcn_layer.reset_parameters()
-    
-    def train_model(self, node_features, adjacency_matrix, node_labels, train_indices, 
-                   val_indices, test_indices=None, max_epochs=200, verbose=True, patience=5):
-
+    def train_model(self, node_features=None, node_labels=None, max_epochs=200, verbose=True, patience=5):
         self._reset_model_parameters()
-        
-        # Prepare data
-        if not isinstance(adjacency_matrix, torch.Tensor):
-            adjacency_matrix = self._convert_sparse_matrix_to_torch_tensor(adjacency_matrix)
-        
-        self.node_features = node_features.to(self.device)
-        self.normalized_adjacency = self._add_self_loops_to_sparse_tensor(adjacency_matrix.to(self.device))
-        self.node_labels = node_labels.to(self.device)
-        
-        self._train_with_early_stopping(node_labels, train_indices, val_indices, 
-                                       test_indices, max_epochs, patience, verbose)
+
+        if node_features is not None:
+            self.node_features = node_features.to(self.device)
+        if node_labels is not None:
+            self.node_labels = node_labels.to(self.device)
+
+        self.normalized_adjacency = self._add_self_loops_to_sparse_tensor(
+            self._convert_sparse_matrix_to_torch_tensor(self.adjacency_matrix)
+        )
+
+        self._train_with_early_stopping(
+            self.node_labels,
+            self.train_indices,
+            self.val_indices,
+            self.test_indices,
+            max_epochs,
+            patience,
+            verbose
+        )
     
     def _train_with_early_stopping(self, labels, train_indices, val_indices, test_indices, 
                                   max_epochs, patience, verbose):
@@ -329,7 +361,8 @@ class GNNGuardTrainer:
                   f"EProj: {test_metrics['EProj']:.4f}, MAD: {test_metrics['MAD']:.4f}, "
                   f"NumRank: {test_metrics['NumRank']:.4f}, Erank: {test_metrics['Erank']:.4f}")
     
-    def evaluate_model(self, test_indices):
+    def evaluate_model(self):
+        test_indices = self.test_indices
 
         self.model.eval()
         with torch.no_grad():
@@ -376,11 +409,11 @@ class GNNGuardTrainer:
 
         return self.oversmoothing_metrics_history
 
-
 class GNNGuardModel(nn.Module):
     
     def __init__(self, input_features, hidden_channels, num_classes, dropout=0.5, 
-                 similarity_threshold=0.5, num_layers=2, attention_dim=16, device=None):
+                 similarity_threshold=0.5, num_layers=2, attention_dim=16, device=None,
+                 backbone=None):
 
         super(GNNGuardModel, self).__init__()
         
@@ -393,19 +426,28 @@ class GNNGuardModel(nn.Module):
         self.attention_gate = Parameter(torch.rand(1))
         self.test_parameter = Parameter(torch.rand(1))
         
-        self.gcn_layers = nn.ModuleList()
-        self.gcn_layers.append(GCNConv(input_features, hidden_channels, bias=True))
-        
-        if self.num_layers > 1:
-            self.gcn_layers.append(GCNConv(hidden_channels, self.attention_dim, bias=True))
-        
-        final_input_dim = self.attention_dim if self.num_layers > 1 else hidden_channels
-        self.gcn_layers.append(GCNConv(final_input_dim, num_classes, bias=True))
+        if backbone is not None:
+            self.backbone = backbone.to(device)
+            self.use_backbone = True
+        else:
+            self.use_backbone = False
+
+            self.gcn_layers = nn.ModuleList()
+            self.gcn_layers.append(GCNConv(input_features, hidden_channels, bias=True))
+            if self.num_layers > 1:
+                self.gcn_layers.append(GCNConv(hidden_channels, self.attention_dim, bias=True))
+            final_input_dim = self.attention_dim if self.num_layers > 1 else hidden_channels
+            self.gcn_layers.append(GCNConv(final_input_dim, num_classes, bias=True))
     
     def forward(self, node_features, adjacency_tensor, use_attention=True):
-
         x = node_features.to_dense() if node_features.is_sparse else node_features
         x = x.to(self.device)
+
+        if self.use_backbone:
+            
+            data = Data(x=x, edge_index=adjacency_tensor._indices(), edge_weight=adjacency_tensor._values())
+            out = self.backbone(data)
+            return F.log_softmax(out, dim=1)
         
         for layer_idx, gcn_layer in enumerate(self.gcn_layers[:-1]):
             if use_attention:
@@ -431,6 +473,7 @@ class GNNGuardModel(nn.Module):
         
         x = final_gcn_layer(x, edge_indices, edge_weight=edge_weights)
         return F.log_softmax(x, dim=1)
+
     
     def _compute_attention_coefficients(self, node_features, adjacency_tensor, layer_index, 
                                       is_lil_matrix=False, debug=False):
