@@ -301,7 +301,7 @@ def get_model(model_name, in_channels, hidden_channels, out_channels, **kwargs):
 def initialize_experiment(config, run_id=1):
 
     # Seed e device
-    seed = config['seed'] + run_id * 100
+    seed = config.get('seed', 42) + run_id * 100
     setup_seed_device(seed)
     device = torch.device(config['device'] if torch.cuda.is_available() else 'cpu')
 
@@ -323,8 +323,8 @@ def initialize_experiment(config, run_id=1):
         train_labels,
         train_features,
         num_classes,
-        noise_type=config['noise']['type'],
-        noise_rate=config['noise']['rate'],
+        noise_type=config['noise'].get('type', 'clean'),
+        noise_rate=config['noise'].get('rate', 0),
         random_seed=config['noise'].get('seed', 42) + run_id * 10,
         idx_train=train_indices,
         debug=True
@@ -344,7 +344,7 @@ def initialize_experiment(config, run_id=1):
 
     # backbone model
     backbone_model = get_model(
-        model_name=config['model']['name'],
+        model_name=config['model'].get('name', 'standard'),
         in_channels=data.num_features,
         hidden_channels=config['model'].get('hidden_channels', 64),
         out_channels=num_classes,
@@ -360,7 +360,7 @@ def initialize_experiment(config, run_id=1):
     trainer_params = config.get('training', {})
     lr = float(trainer_params.get('lr', 0.01))
     weight_decay = float(trainer_params.get('weight_decay', 5e-4))
-    epochs = int(trainer_params.get('epochs'))
+    epochs = int(trainer_params.get('epochs', 20))
     patience = int(trainer_params.get('patience', 100))
 
     return {

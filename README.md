@@ -155,29 +155,24 @@ These metrics are employed in the ablation study to better understand the model�
 
 ## How to run the code
 
-### Automatic benchmarking of 5 runs
+This repository allows you to run experiments in three different modes:
+1. **Single experiment run** – execute one experiment.
+2. **Automatic benchmarking of 5 runs** – evaluate performance across multiple runs.
+3. **Multithreading options of single run** – test multiple methods in parallel with the same seed.
 
-1. Install the required packages:
+Before running any experiment, install the required packages:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-2. Set the desired parameters and hyperparameters in **`config.yaml`** file
-
-3. Run the main script:
-```bash
-python main.py
-```
-
-### Example of a single experiment run (illustrative)
-
-> This is a schematic example to show the workflow.
+### Single experiment run
 
 ```python
 # Necessary imports
 import yaml
-from utilities import initialize_experiment, GCODTrainer
+from utilities import initialize_experiment
+from model.GCOD_loss import GCODTrainer
 
 # Load the configuration file
 with open("config.yaml", "r") as f:
@@ -227,11 +222,31 @@ print(f"Recall: {result['recall']:.4f}")
 print(f"Oversmoothing: {result['oversmoothing']:.4f}")
 ```
 
-## Organization
+### Automatic benchmarking of 5 runs
 
-The models are implemented in the `model` repository, and each model has its implementation in its corresponding file. The main file (`main.py`) imports the selected model and the models specified in `config.yaml` are used.
+1. Set the desired parameters and hyperparameters in **`config.yaml`** file
 
-### Structure
+2. Run the main script:
+```bash
+python main.py
+```
+
+### Multithreading options of single run (Threadpooling)
+
+1. Set the desired parameters and hyperparameters in the **config.yaml** file and specify in **main_multithreading.py** the methods you want to test.
+
+2. Run the main multithreading script:
+```bash
+python main_multithreading.py
+```
+
+## Structure
+
+The models are implemented in the `model` directory, with each model in its corresponding file. The main file (`main.py`) imports the `run_experiment` function from `utilities.py`, which in turn imports the models specified in `config.yaml` and sets up everything necessary for benchmarking.
+
+It is possible to add new frameworks simply by adding their code as a new file in the `model` directory and updating the `run_experiment` utility function (if you want to use the automatic main script or the multithreading main script) to also include the new frameworks.
+
+
 ```
 .
 ├── config.yaml

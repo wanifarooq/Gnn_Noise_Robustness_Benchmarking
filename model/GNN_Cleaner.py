@@ -509,14 +509,14 @@ class GNNCleanerTrainer:
                     train_energy_projection = train_oversmoothing_metrics['EProj'] if train_oversmoothing_metrics else 0.0
                     train_mean_absolute_deviation = train_oversmoothing_metrics['MAD'] if train_oversmoothing_metrics else 0.0
                     train_numerical_rank = train_oversmoothing_metrics['NumRank'] if train_oversmoothing_metrics else 0.0
-                    train_effective_rank = train_oversmoothing_metrics['Erank'] if train_oversmoothing_metrics else 0.0
+                    train_e_rank = train_oversmoothing_metrics['Erank'] if train_oversmoothing_metrics else 0.0
                     
                     val_energy_direction = validation_oversmoothing_metrics['EDir'] if validation_oversmoothing_metrics else 0.0
                     val_energy_direction_traditional = validation_oversmoothing_metrics['EDir_traditional'] if validation_oversmoothing_metrics else 0.0
                     val_energy_projection = validation_oversmoothing_metrics['EProj'] if validation_oversmoothing_metrics else 0.0
                     val_mean_absolute_deviation = validation_oversmoothing_metrics['MAD'] if validation_oversmoothing_metrics else 0.0
                     val_numerical_rank = validation_oversmoothing_metrics['NumRank'] if validation_oversmoothing_metrics else 0.0
-                    val_effective_rank = validation_oversmoothing_metrics['Erank'] if validation_oversmoothing_metrics else 0.0
+                    val_e_rank = validation_oversmoothing_metrics['Erank'] if validation_oversmoothing_metrics else 0.0
                     
                     print(f"Epoch {training_epoch+1:03d} | Train Loss: {epoch_training_loss:.4f}, Val Loss: {current_metrics['val_loss']:.4f} | "
                         f"Train Acc: {current_metrics['train_acc']:.4f}, Val Acc: {current_metrics['val_acc']:.4f} | "
@@ -527,7 +527,7 @@ class GNNCleanerTrainer:
                         f"Train EProj: {train_energy_projection:.4f}, Val EProj: {val_energy_projection:.4f} | "
                         f"Train MAD: {train_mean_absolute_deviation:.4f}, Val MAD: {val_mean_absolute_deviation:.4f} | "
                         f"Train NumRank: {train_numerical_rank:.4f}, Val NumRank: {val_numerical_rank:.4f} | "
-                        f"Train EffRank: {train_effective_rank:.4f}, Val EffRank: {val_effective_rank:.4f}")
+                        f"Train Erank: {train_e_rank:.4f}, Val Erank: {val_e_rank:.4f}")
                 else:
 
                     print(f"Epoch {training_epoch+1:03d} | Train Loss: {epoch_training_loss:.4f}, Val Loss: {current_metrics['val_loss']:.4f} | "
@@ -573,17 +573,17 @@ class GNNCleanerTrainer:
             if final_train_oversmoothing is not None:
                 print(f"Train: EDir: {final_train_oversmoothing['EDir']:.4f}, EDir_traditional: {final_train_oversmoothing['EDir_traditional']:.4f}, "
                     f"EProj: {final_train_oversmoothing['EProj']:.4f}, MAD: {final_train_oversmoothing['MAD']:.4f}, "
-                    f"NumRank: {final_train_oversmoothing['NumRank']:.4f}, EffRank: {final_train_oversmoothing['Erank']:.4f}")
+                    f"NumRank: {final_train_oversmoothing['NumRank']:.4f}, Erank: {final_train_oversmoothing['Erank']:.4f}")
             
             if final_validation_oversmoothing is not None:
                 print(f"Val: EDir: {final_validation_oversmoothing['EDir']:.4f}, EDir_traditional: {final_validation_oversmoothing['EDir_traditional']:.4f}, "
                     f"EProj: {final_validation_oversmoothing['EProj']:.4f}, MAD: {final_validation_oversmoothing['MAD']:.4f}, "
-                    f"NumRank: {final_validation_oversmoothing['NumRank']:.4f}, EffRank: {final_validation_oversmoothing['Erank']:.4f}")
+                    f"NumRank: {final_validation_oversmoothing['NumRank']:.4f}, Erank: {final_validation_oversmoothing['Erank']:.4f}")
             
             if final_test_oversmoothing is not None:
                 print(f"Test: EDir: {final_test_oversmoothing['EDir']:.4f}, EDir_traditional: {final_test_oversmoothing['EDir_traditional']:.4f}, "
                     f"EProj: {final_test_oversmoothing['EProj']:.4f}, MAD: {final_test_oversmoothing['MAD']:.4f}, "
-                    f"NumRank: {final_test_oversmoothing['NumRank']:.4f}, EffRank: {final_test_oversmoothing['Erank']:.4f}")
+                    f"NumRank: {final_test_oversmoothing['NumRank']:.4f}, Erank: {final_test_oversmoothing['Erank']:.4f}")
         
         return {
             'accuracy': final_evaluation_metrics['test_acc'],
