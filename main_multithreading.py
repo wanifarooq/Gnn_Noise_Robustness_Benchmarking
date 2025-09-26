@@ -84,7 +84,7 @@ def run_parallel_single_benchmark():
     end_time = time.time()
     
     print("\n" + "-"*50)
-    print("BENCHMARK RESULTS")
+    print("Results")
     print("="*70)
     print(f"Total time: {end_time - start_time:.2f}s")
     print()

@@ -9,7 +9,7 @@ from scipy import stats
 from numpy.testing import assert_array_almost_equal
 from torch_geometric.utils import to_scipy_sparse_matrix
 
-from model.Baseline_loss import train_with_standard_loss
+from model.Standard import train_with_standard_loss
 from model.Positive_Eigenvalues import PositiveEigenvaluesTrainer
 from model.GCOD_loss import GCODTrainer
 from model.NRGNN import NRGNN

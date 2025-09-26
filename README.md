@@ -219,7 +219,14 @@ print(f"Accuracy: {result['accuracy']:.4f}")
 print(f"F1 Score: {result['f1']:.4f}")
 print(f"Precision: {result['precision']:.4f}")
 print(f"Recall: {result['recall']:.4f}")
-print(f"Oversmoothing: {result['oversmoothing']:.4f}")
+oversmoothing_results = result['oversmoothing']
+print(f"Oversmoothing metrics:")
+print(f"NumRank: {oversmoothing_results['NumRank']:.4f}")
+print(f"Erank: {oversmoothing_results['Erank']:.4f}")
+print(f"EDir: {oversmoothing_results['EDir']:.4f}")
+print(f"EDir_trad: {oversmoothing_results['EDir_traditional']:.4e}")
+print(f"EProj: {oversmoothing_results['EProj']:.4f}")
+print(f"MAD: {oversmoothing_results['MAD']:.4f}")
 ```
 
 ### Automatic benchmarking of 5 runs
@@ -246,7 +253,6 @@ The models are implemented in the `model` directory, with each model in its corr
 
 It is possible to add new frameworks simply by adding their code as a new file in the `model` directory and updating the `run_experiment` utility function (if you want to use the automatic main script or the multithreading main script) to also include the new frameworks.
 
-
 ```
 .
 ├── config.yaml
@@ -260,7 +266,7 @@ It is possible to add new frameworks simply by adding their code as a new file i
 ├── LICENSE
 ├── main.py
 ├── model
-│   ├── Baseline_loss.py
+│   ├── Standard.py
 │   ├── CommunityDefense.py
 │   ├── CR_GNN.py
 │   ├── ERASE.py
