@@ -156,15 +156,19 @@ These metrics are employed in the ablation study to better understand the model�
 ## How to run the code
 
 This repository allows you to run experiments in three different modes:
-1. **Single experiment run** – execute one experiment.
+1. **Single experiment run** – execute a single experiment.
 2. **Automatic benchmarking of 5 runs** – evaluate performance across multiple runs.
-3. **Multithreading options of single run** – test multiple methods in parallel with the same seed.
+3. **Multithreading options of single run** – test multiple methods in parallel using the same seed.
 
-Before running any experiment, install the required packages:
+Before running any experiment:
+
+1. Install the required packages:
 
 ```bash
 pip install -r requirements.txt
 ```
+
+2. Set the desired parameters and hyperparameters in the **`config.yaml`** file
 
 ### Single experiment run
 
@@ -220,7 +224,7 @@ print(f"F1 Score: {result['f1']:.4f}")
 print(f"Precision: {result['precision']:.4f}")
 print(f"Recall: {result['recall']:.4f}")
 oversmoothing_results = result['oversmoothing']
-print(f"Oversmoothing metrics:")
+print("Oversmoothing metrics:")
 print(f"NumRank: {oversmoothing_results['NumRank']:.4f}")
 print(f"Erank: {oversmoothing_results['Erank']:.4f}")
 print(f"EDir: {oversmoothing_results['EDir']:.4f}")
@@ -231,28 +235,27 @@ print(f"MAD: {oversmoothing_results['MAD']:.4f}")
 
 ### Automatic benchmarking of 5 runs
 
-1. Set the desired parameters and hyperparameters in **`config.yaml`** file
-
-2. Run the main script:
+Run the main script:
 ```bash
 python main.py
 ```
 
 ### Multithreading options of single run (Threadpooling)
 
-1. Set the desired parameters and hyperparameters in the **config.yaml** file and specify in **main_multithreading.py** the methods you want to test.
+1. Specify in **main_multithreading.py** the methods you want to test.
 
 2. Run the main multithreading script:
 ```bash
 python main_multithreading.py
 ```
 
-## Structure
+## How to add frameworks
 
 The models are implemented in the `model` directory, with each model in its corresponding file. The main file (`main.py`) imports the `run_experiment` function from `utilities.py`, which in turn imports the models specified in `config.yaml` and sets up everything necessary for benchmarking.
 
 It is possible to add new frameworks simply by adding their code as a new file in the `model` directory and updating the `run_experiment` utility function (if you want to use the automatic main script or the multithreading main script) to also include the new frameworks.
 
+## Structure
 ```
 .
 ├── config.yaml
