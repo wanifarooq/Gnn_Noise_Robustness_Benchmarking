@@ -4,22 +4,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import copy
 import time
 
-from utilities import run_experiment
-
-def print_table(headers, rows, col_widths):
-
-    def separator():
-        return "+" + "+".join("-" * (w + 2) for w in col_widths) + "+"
-
-    def row_line(row):
-        return "|" + "|".join(f" {str(val).ljust(w)} " for val, w in zip(row, col_widths)) + "|"
-
-    print(separator())
-    print(row_line(headers))
-    print(separator())
-    for row in rows:
-        print(row_line(row))
-        print(separator())
+from utilities import run_experiment, parse_arguments, print_table
 
 def run_single_experiment_fixed_seed(method_name, config, fixed_run_id=1):
 
@@ -39,23 +24,17 @@ def run_single_experiment_fixed_seed(method_name, config, fixed_run_id=1):
         return method_name, None
 
 def run_parallel_single_benchmark():
+    args = parse_arguments()
+    
     print("\n" + "-"*50)
     print("Parallel single-run")
-    print("="*70)
+    print("-"*50)
     
     with open("config.yaml", "r") as f:
         base_config = yaml.safe_load(f)
     
-    # Define the methods to test
-    methods_to_test = [
-        'standard',
-        'cr_gnn', 
-        'standard',
-        'nrgnn'
-    ]
-    
-    # Fixed run_id (same seed for all)
-    FIXED_RUN_ID = 1
+    methods_to_test = args.methods
+    FIXED_RUN_ID = args.run_id
     
     print(f"Dataset: {base_config['dataset']['name']}")
     print(f"Noise Rate: {base_config['noise']['rate']}")
@@ -85,7 +64,7 @@ def run_parallel_single_benchmark():
     
     print("\n" + "-"*50)
     print("Results")
-    print("="*70)
+    print("-"*50)
     print(f"Total time: {end_time - start_time:.2f}s")
     print()
     

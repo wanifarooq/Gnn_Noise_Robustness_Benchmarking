@@ -240,13 +240,24 @@ Run the main script:
 python main.py
 ```
 
-### Multithreading options of single run (Threadpooling)
+### Multithreading options for single run (Thread pooling)
 
-1. Specify in **main_multithreading.py** the methods you want to test.
-
-2. Run the main multithreading script:
+Run the multithreading main using command-line arguments:
 ```bash
+# Use default methods (standard, cr_gnn, nrgnn)
 python main_multithreading.py
+
+# Specify custom methods
+python main_multithreading.py --methods standard positive_eigenvalues gcod nrgnn
+
+# Short version
+python main_multithreading.py -m standard positive_eigenvalues gcod nrgnn
+
+# Use different run ID for different seed
+python main_multithreading.py -m standard gcod --run-id 5
+
+# Get help
+python main_multithreading.py --help
 ```
 
 ## How to add frameworks
