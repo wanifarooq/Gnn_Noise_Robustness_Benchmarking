@@ -259,6 +259,7 @@ python main_multithreading.py -m standard gcod --run-id 5
 # Get help
 python main_multithreading.py --help
 ```
+**Limitations:** Maximum 4 methods can be tested simultaneously. Parallel workers: GPU max 2 and CPU max 4 (workers are automatically adjusted based on available resources).
 
 ## How to add frameworks
 

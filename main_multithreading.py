@@ -33,7 +33,12 @@ def run_parallel_single_benchmark():
     with open("config.yaml", "r") as f:
         base_config = yaml.safe_load(f)
     
-    methods_to_test = args.methods
+    MAX_METHODS = 4
+    methods_to_test = args.methods[:MAX_METHODS]
+    
+    if len(args.methods) > MAX_METHODS:
+        print(f"Warning: Maximum {MAX_METHODS} methods allowed. Using first {MAX_METHODS}: {methods_to_test}")
+    
     FIXED_RUN_ID = args.run_id
     
     print(f"Dataset: {base_config['dataset']['name']}")
@@ -41,7 +46,11 @@ def run_parallel_single_benchmark():
     print(f"Methods: {methods_to_test}")
     print(f"Fixed run_id: {FIXED_RUN_ID} (same seed for all)")
     
-    max_workers = 2 if torch.cuda.is_available() else len(methods_to_test)
+    if torch.cuda.is_available():
+        max_workers = min(2, len(methods_to_test))
+    else:
+        max_workers = min(4, len(methods_to_test))
+    
     print(f"Using {max_workers} parallel workers")
     print("-"*50)
     
