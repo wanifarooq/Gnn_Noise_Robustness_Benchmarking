@@ -13,14 +13,32 @@ def run_benchmarking():
         config = yaml.safe_load(f)
     print("Loaded configuration file")
 
-    method_name = config['training']['method']
-    dataset_name = config['dataset']['name']
-    noise_rate = config['noise']['rate']
-    
+    defaults = {
+        "dataset": {"name": "cora"},
+        "noise": {"type": "clean", "rate": 0.0},
+        "training": {"method": "standard"}
+    }
+
+    # dataset
+    dataset = config.get("dataset", {})
+    dataset_name = dataset.get("name", defaults["dataset"]["name"])
+
+    # noise
+    noise = config.get("noise", {})
+    noise_type = noise.get("type", defaults["noise"]["type"])
+    noise_rate = noise.get("rate", defaults["noise"]["rate"])
+
+    # training
+    training = config.get("training", {})
+    method_name = training.get("method", defaults["training"]["method"])
+
     print(f"Dataset: {dataset_name}")
     print(f"Method: {method_name}")
+    print(f"Noise Type: {noise_type}")
     print(f"Noise Rate: {noise_rate}")
-    device_str = config['device'] if torch.cuda.is_available() else 'cpu'
+
+    # device
+    device_str = config.get("device", "cpu") if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device_str}")
     if torch.cuda.is_available():
         print(f"CUDA device name: {torch.cuda.get_device_name(torch.device(device_str))}")

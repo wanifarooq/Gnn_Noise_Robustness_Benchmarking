@@ -279,16 +279,13 @@ Run the multithreading main using command-line arguments:
 # Use default methods (standard, cr_gnn, nrgnn)
 python main_multithreading.py
 
-# Specify custom methods
+# Specify custom methods (short version: -m)
 python main_multithreading.py --methods standard positive_eigenvalues gcod nrgnn
 
-# Short version
-python main_multithreading.py -m standard positive_eigenvalues gcod nrgnn
-
-# Use different run ID for different seed
+# Use different run ID for different seed (short version: -r)
 python main_multithreading.py -m standard gcod --run-id 5
 
-# Get help
+# Get help (short version: -h)
 python main_multithreading.py --help
 ```
 **Limitations:** Maximum 4 methods can be tested simultaneously. Parallel workers: GPU max 2 and CPU max 4 (workers are automatically adjusted based on available resources).
