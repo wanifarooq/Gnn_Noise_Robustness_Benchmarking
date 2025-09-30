@@ -280,7 +280,7 @@ Run the multithreading main using command-line arguments:
 python main_multithreading.py
 
 # Specify custom methods (short version: -m)
-python main_multithreading.py --methods standard positive_eigenvalues gcod nrgnn
+python main_multithreading.py --methods standard gcod
 
 # Use different run ID for different seed (short version: -r)
 python main_multithreading.py -m standard gcod --run-id 5
