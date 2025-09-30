@@ -1,6 +1,6 @@
 # Benchmarking Robustness Strategies for Graph Neural Networks under Noise
 
-This study contributes to the analysis of the robustness of Graph Neural Networks by developing a benchmarking framework that systematically evaluates methods designed to address graph noise, including label, structural, and feature noise. The framework reproduces selected robustness strategies under standardized conditions across commonly used datasets, enabling fair and reproducible comparisons. Although numerous robustness approaches have been proposed for GNNs, their evaluations are often inconsistent. This work analyzes the performance of existing robustness strategies under uniform experimental setups and across different types of graph noise, with the goal of identifying the methods that generalize most effectively. Several strategies have been introduced in the literature, including noise-resistant training, structure-learning techniques, and specialized frameworks. However, no standard benchmarking framework currently exists to directly compare these methods under consistent protocols.
+This study contributes to the analysis of the robustness of Graph Neural Networks by developing a benchmarking framework that systematically evaluates methods designed to address graph noise. The framework reproduces selected robustness strategies under standardized conditions across commonly used datasets, enabling fair and reproducible comparisons. Although numerous robustness approaches have been proposed for GNNs, their evaluations are often inconsistent. This work analyzes the performance of existing robustness strategies under uniform experimental setups and across different types of graph noise, with the goal of identifying the methods that generalize most effectively. Several strategies have been introduced in the literature, including noise-resistant training, structure-learning techniques, and specialized frameworks. However, no standard benchmarking framework currently exists to directly compare these methods under consistent protocols.
 
 This work therefore establishes a unified benchmarking effort to identify which strategies perform best under controlled and comparable conditions. To this end, extensive experiments and advanced ablation studies are conducted to evaluate not only standard performance metrics but also oversmoothing measures and alternative experimental setups. Furthermore, the study investigates how different backbone architectures influence model performance. By providing a systematic and in-depth analysis under consistent conditions, this study sheds light on the differences among robustness frameworks and highlights which approaches are most effective in various scenarios.
 
@@ -10,9 +10,10 @@ This work therefore establishes a unified benchmarking effort to identify which 
 
 # Experiments
 
-It is possible to observe here some of the experiments conducted during the work.
+This section presents some of the experiments conducted during the work.
 
-The following figures present the results on the Cora dataset under a uniform setup, with different noise levels. Two types of noise are considered: **Uniform** and **Instance**.
+## Cora
+The following figures show the results on the Cora dataset under a uniform setup, with different noise levels. Two types of noise are considered: **Uniform** and **Instance**.
 
 <p align="center">
   <img src="images/Symmetric.png" alt="Uniform Noise" width="49%">
@@ -21,8 +22,39 @@ The following figures present the results on the Cora dataset under a uniform se
 
 <i>Results on the Cora dataset with (left) Uniform noise and (right) Instance noise.</i>
 
-In addition, the following plots show the behavior of the **MAD**, **$E^{dir}$**, and **Numrank** oversmoothing metrics of the GCOD framework during training and validation.  
-These metrics are employed in the ablation study to better understand the model’s behavior beyond the commonly used evaluation measures.
+## Citeseer and Pubmed
+The following table reports the performance across different datasets:
+
+<p align="center">
+  <img src="images/CiteSeer_and_Pubmed.png" alt="Uniform noise with 0.6 noise ratio on Cora dataset" width="100%">
+</p>
+
+<i>Performance of models on CiteSeer and Pubmed datasets with Uniform noise (ratio 0.6).</i>
+
+## Ablation study
+An ablation study is carried out considering different noise types, backbone architectures and oversmoothing metrics.
+
+### Type of noise
+Results obtained using different noise types to evaluate their impact on performance:
+
+<p align="center">
+  <img src="images/Different_noise_type.png" alt="Uniform noise with 0.6 noise ratio on Cora dataset" width="100%">
+</p>
+
+<i>Performance of GraphCleaner with different noise types (Cora dataset, noise ratio 0.6).</i>
+
+### Different Backbone Architectures
+This analysis investigates the role of the backbone architecture and its influence on performance:
+
+<p align="center">
+  <img src="images/Different_Backbone.png" alt="Uniform noise with 0.6 noise ratio on Cora dataset" width="70%">
+</p>
+
+<i>Results on the Cora dataset with Uniform noise (noise ratio 0.6).</i>
+
+### Oversmoothing metrics
+The following plots illustrate the behavior of the **MAD**, **$E^{dir}$**, and **Numrank** oversmoothing metrics of the GCOD framework during training and validation.  
+These metrics are included in the ablation study to provide insights into the model’s behavior beyond standard evaluation measures.
 
 <p align="center">
   <img src="images/E_dir.png" alt="E_dir" width="32%">
