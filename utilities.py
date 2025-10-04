@@ -26,7 +26,7 @@ from model.GNNGuard import GNNGuardTrainer
 from model.GNNs import GCN, GIN, GAT, GATv2
 
 # Noises
-def simple_uniform_noise(labels, n_classes, noise_rate, seed=1):
+def simple_uniform_noise(labels, n_classes, noise_rate, seed):
     if noise_rate == 0:
         return labels.clone()
     rng = np.random.RandomState(seed)
@@ -54,7 +54,7 @@ def pair_noise_cp(n_classes, noise_rate):
     assert_array_almost_equal(P.sum(axis=1), 1, decimal=6)
     return P
 
-def random_noise_cp(n_classes, noise_rate, seed=1):
+def random_noise_cp(n_classes, noise_rate, seed):
     rng = np.random.RandomState(seed)
     
     P = (1 - noise_rate) * np.eye(n_classes, dtype=np.float64)
@@ -66,7 +66,7 @@ def random_noise_cp(n_classes, noise_rate, seed=1):
     assert_array_almost_equal(P.sum(axis=1), 1, decimal=6)
     return P
 
-def random_pair_noise_cp(n_classes, noise_rate, seed=1):
+def random_pair_noise_cp(n_classes, noise_rate, seed):
     rng = np.random.default_rng(seed)
     P = np.eye(n_classes, dtype=np.float64) * (1 - noise_rate)
     for i in range(n_classes):
@@ -76,7 +76,7 @@ def random_pair_noise_cp(n_classes, noise_rate, seed=1):
     assert_array_almost_equal(P.sum(axis=1), 1, decimal=6)
     return P
 
-def deterministic(labels, idx_train, noise_rate=0.2, seed=1):
+def deterministic(labels, idx_train, noise_rate, seed):
     rng = np.random.RandomState(seed)
     
     labels_np = labels.cpu().numpy() if torch.is_tensor(labels) else labels
@@ -120,13 +120,13 @@ def uniform_mix_noise_cp(n_classes, noise_rate):
     assert_array_almost_equal(P.sum(axis=1), 1, decimal=6)
     return P
 
-def add_instance_independent_label_noise(labels, cp, seed=1):
+def add_instance_independent_label_noise(labels, cp, seed):
     assert_array_almost_equal(cp.sum(axis=1), np.ones(cp.shape[0]), decimal=6)
     rs = np.random.RandomState(seed)
     noisy_labels = np.array([np.where(rs.multinomial(1, cp[label]))[0][0] for label in labels])
     return noisy_labels
 
-def add_instance_dependent_label_noise(noise_rate, feature, labels, num_classes, norm_std, seed=1):
+def add_instance_dependent_label_noise(noise_rate, feature, labels, num_classes, norm_std, seed):
     num_nodes, feature_size = feature.shape
     
     rng = np.random.RandomState(seed)
