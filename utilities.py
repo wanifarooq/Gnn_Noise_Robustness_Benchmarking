@@ -100,7 +100,7 @@ def deterministic(labels, idx_train, noise_rate=0.2, seed=1):
     
     return corrupted_labels, noise_idx, clean_idx
 
-def flip_noise_cp(n_classes, noise_rate, seed=1):
+def flip_noise_cp(n_classes, noise_rate):
     P = np.eye(n_classes, dtype=np.float64) * (1 - noise_rate)
 
     P[0, 1] = noise_rate
@@ -187,7 +187,7 @@ def label_process(labels, features, n_classes, noise_type='uniform', noise_rate=
         elif noise_type == 'random_pair':
             cp = random_pair_noise_cp(n_classes, noise_rate, seed=random_seed)
         elif noise_type == 'flip':
-            cp = flip_noise_cp(n_classes, noise_rate, seed=random_seed)
+            cp = flip_noise_cp(n_classes, noise_rate)
         elif noise_type == 'uniform_mix':
             cp = uniform_mix_revised_noise_cp(n_classes, noise_rate)
         elif noise_type == 'deterministic':
