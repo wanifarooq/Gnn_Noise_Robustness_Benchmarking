@@ -26,10 +26,10 @@ from model.GNNGuard import GNNGuardTrainer
 from model.GNNs import GCN, GIN, GAT, GATv2
 
 # Noises
-def simple_uniform_noise(labels, n_classes, noise_rate, random_seed):
+def simple_uniform_noise(labels, n_classes, noise_rate, seed=1):
     if noise_rate == 0:
         return labels.clone()
-    rng = np.random.RandomState(random_seed)
+    rng = np.random.RandomState(seed)
     
     n_samples = len(labels)
     noisy_labels = labels.clone()
@@ -113,20 +113,20 @@ def flip_noise_cp(n_classes, noise_rate):
     assert_array_almost_equal(P.sum(axis=1), 1, decimal=6)
     return P
 
-def uniform_mix_revised_noise_cp(n_classes, noise_rate):
+def uniform_mix_noise_cp(n_classes, noise_rate):
 
     P = np.eye(n_classes, dtype=np.float64) * (1 - noise_rate)
     P += noise_rate / n_classes
     assert_array_almost_equal(P.sum(axis=1), 1, decimal=6)
     return P
 
-def add_instance_independent_label_noise(labels, cp, random_seed):
+def add_instance_independent_label_noise(labels, cp, seed=1):
     assert_array_almost_equal(cp.sum(axis=1), np.ones(cp.shape[0]), decimal=6)
-    rs = np.random.RandomState(random_seed)
+    rs = np.random.RandomState(seed)
     noisy_labels = np.array([np.where(rs.multinomial(1, cp[label]))[0][0] for label in labels])
     return noisy_labels
 
-def add_instance_dependent_label_noise(noise_rate, feature, labels, num_classes, norm_std, seed):
+def add_instance_dependent_label_noise(noise_rate, feature, labels, num_classes, norm_std, seed=1):
     num_nodes, feature_size = feature.shape
     
     rng = np.random.RandomState(seed)
@@ -177,7 +177,7 @@ def label_process(labels, features, n_classes, noise_type='uniform', noise_rate=
             cp = np.eye(n_classes)
             noisy_labels = labels.clone()
         elif noise_type == 'uniform_simple':
-            noisy_labels = simple_uniform_noise(labels, n_classes, noise_rate, random_seed)
+            noisy_labels = simple_uniform_noise(labels, n_classes, noise_rate, seed=random_seed)
         elif noise_type == 'uniform':
             cp = uniform_noise_cp(n_classes, noise_rate)
         elif noise_type == 'random':
@@ -189,7 +189,7 @@ def label_process(labels, features, n_classes, noise_type='uniform', noise_rate=
         elif noise_type == 'flip':
             cp = flip_noise_cp(n_classes, noise_rate)
         elif noise_type == 'uniform_mix':
-            cp = uniform_mix_revised_noise_cp(n_classes, noise_rate)
+            cp = uniform_mix_noise_cp(n_classes, noise_rate)
         elif noise_type == 'deterministic':
             if idx_train is None:
                 raise ValueError("idx_train must be provided for deterministic noise")
@@ -213,7 +213,7 @@ def label_process(labels, features, n_classes, noise_type='uniform', noise_rate=
 
     if noisy_labels is None:
         if cp is not None:
-            noisy_labels_np = add_instance_independent_label_noise(labels.cpu().numpy(), cp, random_seed)
+            noisy_labels_np = add_instance_independent_label_noise(labels.cpu().numpy(), cp, seed=random_seed)
             noisy_labels = torch.tensor(noisy_labels_np, dtype=torch.long, device=labels.device)
         else:
             noisy_labels = labels.clone()
