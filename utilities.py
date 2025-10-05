@@ -145,7 +145,7 @@ def instance_dependent_noise(noise_rate, feature, labels, num_classes, norm_std,
     new_label = np.array([rng.choice(num_classes, p=P[i]) for i in range(num_nodes)])
     return new_label
 
-def noise_operation(labels, features, n_classes, noise_type='clean', noise_rate=0, random_seed=1, idx_train=None, debug=True):
+def noise_operation(labels, features, n_classes, noise_type='clean', noise_rate=0, noise_seed=1, idx_train=None, debug=True):
     assert 0 <= noise_rate <= 1
 
     allowed_noise_types = [
@@ -170,15 +170,15 @@ def noise_operation(labels, features, n_classes, noise_type='clean', noise_rate=
             cp = np.eye(n_classes)
             noisy_labels = labels.clone()
         elif noise_type == 'uniform_simple':
-            noisy_labels = simple_uniform_noise(labels, n_classes, noise_rate, seed=random_seed)
+            noisy_labels = simple_uniform_noise(labels, n_classes, noise_rate, seed=noise_seed)
         elif noise_type == 'uniform':
             cp = uniform_noise(n_classes, noise_rate)
         elif noise_type == 'random':
-            cp = random_noise_cp(n_classes, noise_rate, seed=random_seed)
+            cp = random_noise_cp(n_classes, noise_rate, seed=noise_seed)
         elif noise_type == 'pair':
             cp = pair_noise(n_classes, noise_rate)
         elif noise_type == 'random_pair':
-            cp = random_pair_noise(n_classes, noise_rate, seed=random_seed)
+            cp = random_pair_noise(n_classes, noise_rate, seed=noise_seed)
         elif noise_type == 'flip':
             cp = flip_noise(n_classes, noise_rate)
         elif noise_type == 'uniform_mix':
@@ -186,7 +186,7 @@ def noise_operation(labels, features, n_classes, noise_type='clean', noise_rate=
         elif noise_type == 'deterministic':
             if idx_train is None:
                 raise ValueError("idx_train must be provided for deterministic noise")
-            noisy_labels_np, _, _ = deterministic(labels, idx_train, noise_rate=noise_rate, seed=random_seed)
+            noisy_labels_np, _, _ = deterministic(labels, idx_train, noise_rate=noise_rate, seed=noise_seed)
             noisy_labels = torch.tensor(noisy_labels_np, dtype=torch.long, device=labels.device)
         elif noise_type == 'instance':
             if features is None:
@@ -197,7 +197,7 @@ def noise_operation(labels, features, n_classes, noise_type='clean', noise_rate=
                 labels=labels.cpu().numpy(),
                 num_classes=n_classes,
                 norm_std=0.1,
-                seed=random_seed
+                seed=noise_seed
             )
             noisy_labels = torch.tensor(noisy_labels_np, dtype=torch.long, device=labels.device)
         else:
@@ -206,7 +206,7 @@ def noise_operation(labels, features, n_classes, noise_type='clean', noise_rate=
 
     if noisy_labels is None:
         if cp is not None:
-            noisy_labels_np = instance_independent_noise(labels.cpu().numpy(), cp, seed=random_seed)
+            noisy_labels_np = instance_independent_noise(labels.cpu().numpy(), cp, seed=noise_seed)
             noisy_labels = torch.tensor(noisy_labels_np, dtype=torch.long, device=labels.device)
         else:
             noisy_labels = labels.clone()
@@ -319,7 +319,7 @@ def initialize_experiment(config, run_id=1):
         num_classes,
         noise_type=config['noise'].get('type', 'clean'),
         noise_rate=config['noise'].get('rate', 0),
-        random_seed=config['noise'].get('seed', 42) + run_id * 10,
+        noise_seed=config['noise'].get('seed', 42) + run_id * 10,
         idx_train=train_indices,
         debug=True
     )
