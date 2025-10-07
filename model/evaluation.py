@@ -92,7 +92,8 @@ class OversmoothingMetrics:
         frobenius_norm_sq = np.sum(X**2)
         
         try:
-            _, s, _ = svd(X, full_matrices=False, compute_uv=False)
+
+            s = svd(X, full_matrices=False, compute_uv=False)
             spectral_norm_sq = s[0]**2 if len(s) > 0 else 1e-8
         except:
             spectral_norm_sq = np.linalg.norm(X, ord=2)**2
@@ -105,7 +106,8 @@ class OversmoothingMetrics:
     def _compute_effective_rank(self, X):
 
         try:
-            _, s, _ = svd(X, full_matrices=False, compute_uv=False)
+
+            s = svd(X, full_matrices=False, compute_uv=False)
             
             s = s[s > 1e-12]
             
@@ -133,12 +135,13 @@ class OversmoothingMetrics:
                 eigenvalues, eigenvectors = eigsh(adj_sym, k=1, which='LA', maxiter=1000)
                 dominant_eigenvector = np.abs(eigenvectors[:, 0])
 
-                dominant_eigenvector = np.maximum(dominant_eigenvector, 1e-8)
+                dominant_eigenvector = np.maximum(dominant_eigenvector, 1e-4)
                 
                 return dominant_eigenvector
             except:
                 degrees = np.array(adj_sym.sum(axis=1)).flatten()
-                return np.maximum(degrees, 1e-8)
+
+                return np.maximum(degrees, 1e-4)
                 
         except Exception as e:
             return np.ones(num_nodes)
@@ -148,6 +151,10 @@ class OversmoothingMetrics:
         num_nodes = X.size(0)
 
         u = self._compute_message_passing_matrix_eigenvector(edge_index, num_nodes, edge_weight)
+        
+        # Normalization
+        u = u / np.max(u)
+        u = np.maximum(u, 1e-4)
         
         total_energy = 0.0
         num_edges = edge_index.size(1)
@@ -174,6 +181,9 @@ class OversmoothingMetrics:
         
         u = self._compute_message_passing_matrix_eigenvector(edge_index, num_nodes, edge_weight)
         u = torch.tensor(u, device=X.device, dtype=X.dtype).unsqueeze(1)
+        
+        # Normalization
+        u = u / torch.norm(u)
 
         P = torch.mm(u, u.t())
         
