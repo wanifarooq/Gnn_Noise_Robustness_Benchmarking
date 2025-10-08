@@ -224,10 +224,11 @@ class AdjacencyMatrixProcessor:
 
 
 class LinearProbeEvaluator:
-
     @staticmethod
     def evaluate_with_linear_probe(learned_features: torch.Tensor, graph_data, 
-                                 predicted_labels_all_nodes: torch.Tensor, clean_node_labels: torch.Tensor) -> Tuple[float, float, float]:
+                                predicted_labels_all_nodes: torch.Tensor, 
+                                clean_node_labels: torch.Tensor,
+                                random_state: int = 42) -> Tuple[float, float, float]:
 
         features_normalized = normalize(learned_features.detach().cpu().numpy(), norm='l2')
         clean_labels_np = clean_node_labels.cpu().numpy()
@@ -238,9 +239,12 @@ class LinearProbeEvaluator:
         
         train_noisy_labels_np = predicted_labels_all_nodes[graph_data.train_mask].cpu().numpy()
         
-        clf = LogisticRegression(solver='lbfgs', multi_class='auto', max_iter=1000).fit(
-            train_features, train_noisy_labels_np.ravel()
-        )
+        clf = LogisticRegression(
+            solver='lbfgs', 
+            multi_class='auto', 
+            max_iter=1000, 
+            random_state=random_state
+        ).fit(train_features, train_noisy_labels_np.ravel())
         
         def accuracy_helper(classifier, features, labels):
             y_pred = classifier.predict(features)
@@ -251,7 +255,6 @@ class LinearProbeEvaluator:
         test_acc = accuracy_helper(clf, test_features, clean_labels_np[graph_data.test_mask.cpu().numpy()])
         
         return train_acc, val_acc, test_acc
-
 
 class EnhancedGNNWrapper(nn.Module):
 
@@ -532,7 +535,11 @@ class ERASETrainer:
         learned_node_features = model(graph_data)
 
         train_accuracy, validation_accuracy, _ = LinearProbeEvaluator.evaluate_with_linear_probe(
-            learned_node_features, graph_data, predicted_labels, graph_data.y
+            learned_node_features, 
+            graph_data, 
+            predicted_labels, 
+            graph_data.y,
+            random_state=self.training_config.get('seed', 42)
         )
 
         validation_loss = self._compute_cross_entropy_loss_for_split(model, graph_data, graph_data.val_mask)
@@ -552,7 +559,12 @@ class ERASETrainer:
         train_noisy_labels = predicted_labels[graph_data.train_mask].cpu().numpy()
         true_labels = graph_data.y.cpu().numpy()
         
-        linear_classifier = LogisticRegression(solver='lbfgs', multi_class='auto', max_iter=1000, random_state=42)
+        linear_classifier = LogisticRegression(
+            solver='lbfgs', 
+            multi_class='auto', 
+            max_iter=1000, 
+            random_state=self.training_config.get('seed', 42)
+        )
         linear_classifier.fit(train_features, train_noisy_labels)
         
         train_predictions = linear_classifier.predict(train_features)
@@ -580,7 +592,11 @@ class ERASETrainer:
         learned_node_features = model(graph_data)
 
         _, _, test_accuracy = LinearProbeEvaluator.evaluate_with_linear_probe(
-            learned_node_features, graph_data, predicted_labels, graph_data.y
+            learned_node_features, 
+            graph_data, 
+            predicted_labels, 
+            graph_data.y,
+            random_state=self.training_config.get('seed', 42)
         )
 
         normalized_features = normalize(learned_node_features.detach().cpu().numpy(), norm='l2')
@@ -591,17 +607,22 @@ class ERASETrainer:
         train_noisy_labels = predicted_labels[graph_data.train_mask].cpu().numpy()
         true_test_labels = graph_data.y.cpu().numpy()
         
-        linear_classifier = LogisticRegression(solver='lbfgs', multi_class='auto', max_iter=1000, random_state=42)
+        linear_classifier = LogisticRegression(
+            solver='lbfgs', 
+            multi_class='auto', 
+            max_iter=1000, 
+            random_state=self.training_config.get('seed', 42)
+        )
         linear_classifier.fit(train_features, train_noisy_labels)
         
         test_predictions = linear_classifier.predict(test_features)
         
         test_f1 = f1_score(true_test_labels[graph_data.test_mask.cpu()], test_predictions, 
-                          average='macro', zero_division=0)
+                        average='macro', zero_division=0)
         test_precision = precision_score(true_test_labels[graph_data.test_mask.cpu()], test_predictions, 
-                                       average='macro', zero_division=0)
+                                    average='macro', zero_division=0)
         test_recall = recall_score(true_test_labels[graph_data.test_mask.cpu()], test_predictions, 
-                                 average='macro', zero_division=0)
+                                average='macro', zero_division=0)
         
         test_loss = self._compute_cross_entropy_loss_for_split(model, graph_data, graph_data.test_mask)
         

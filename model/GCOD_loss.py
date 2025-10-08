@@ -576,6 +576,9 @@ class GCODTrainer:
             ax.grid(True, alpha=0.3)
         
         plt.tight_layout()
+        import os
+        os.makedirs('output', exist_ok=True)
+        plt.savefig('output/oversmoothing_metrics.png', dpi=300, bbox_inches='tight')
         plt.show()
 
     def plot_training_metrics(self):
@@ -602,6 +605,9 @@ class GCODTrainer:
             ax.grid(True, alpha=0.3)
         
         plt.tight_layout()
+        import os
+        os.makedirs('output', exist_ok=True)
+        plt.savefig('output/training_metrics.png', dpi=300, bbox_inches='tight')
         plt.show()
 
     def train_full_model(self):

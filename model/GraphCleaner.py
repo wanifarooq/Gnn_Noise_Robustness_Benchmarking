@@ -20,7 +20,7 @@ from model.evaluation import OversmoothingMetrics
 
 class GraphCleanerNoiseDetector:
 
-    def __init__(self, configuration_params, computation_device):
+    def __init__(self, configuration_params, computation_device, random_seed):
 
         self.config = configuration_params
         self.device = computation_device
@@ -34,6 +34,8 @@ class GraphCleanerNoiseDetector:
         self.weight_decay_factor = float(configuration_params.get('training', {}).get('weight_decay', 5e-4))
         self.training_epochs = configuration_params.get('training', {}).get('epochs', 200)
         self.early_stopping_patience = configuration_params.get('training', {}).get('patience', 10)
+
+        self.random_seed = random_seed
 
         self.oversmoothing_calculator = OversmoothingMetrics(device=computation_device)
         
@@ -467,7 +469,7 @@ class GraphCleanerNoiseDetector:
         # Train binary logistic regression classifier
         binary_noise_classifier = LogisticRegression(
             max_iter=self.classifier_max_iterations, 
-            random_state=42
+            random_state=self.random_seed
         )
         binary_noise_classifier.fit(classifier_training_features, classifier_training_labels)
 
@@ -523,7 +525,7 @@ class GraphCleanerNoiseDetector:
 
         binary_noise_classifier = LogisticRegression(
             max_iter=self.classifier_max_iterations, 
-            random_state=42
+            random_state=self.random_seed
         )
         binary_noise_classifier.fit(classifier_training_features, classifier_training_labels)
 

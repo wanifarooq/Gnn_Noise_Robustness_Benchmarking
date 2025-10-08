@@ -374,7 +374,8 @@ def initialize_experiment(config, run_id=1):
         'weight_decay': weight_decay,
         'epochs': epochs,
         'patience': patience,
-        'method': method
+        'method': method,
+        'seed': seed
     }
 
 def run_experiment(config, run_id=1):
@@ -395,6 +396,7 @@ def run_experiment(config, run_id=1):
     epochs = init_data['epochs']
     patience = init_data['patience']
     method = init_data['method']
+    seed = init_data['seed']
 
     # Standard Training
     if method == 'standard':
@@ -608,7 +610,6 @@ def run_experiment(config, run_id=1):
         print(f"Run {run_id}: Using RTGNN")
         
         rtgnn_training_config = RTGNNTrainingConfig(config)
-        rtgnn_backbone_type = config.get('rtgnn_params', {}).get('gnn_type', config['model']['name'].lower())
         
         rtgnn_trainer = RTGNN(
             training_config=rtgnn_training_config,
@@ -642,7 +643,8 @@ def run_experiment(config, run_id=1):
         
         graphcleaner_detector = GraphCleanerNoiseDetector(
             configuration_params=config, 
-            computation_device=device
+            computation_device=device,
+            random_seed=seed
         )
         
         clean_train_mask, cleaned_data = graphcleaner_detector.clean_training_data(
@@ -769,7 +771,7 @@ def run_experiment(config, run_id=1):
             'use_layer_norm': erase_specific_params.get('use_layer_norm', False),
             'use_residual': erase_specific_params.get('use_residual', False),
             'use_residual_linear': erase_specific_params.get('use_residual_linear', False),
-
+            'seed': seed,
         }
         
         erase_trainer = ERASETrainer(
