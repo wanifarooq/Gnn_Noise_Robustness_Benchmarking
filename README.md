@@ -58,16 +58,16 @@ These oversmoothing metrics are included in the ablation study to provide insigh
 
 <p align="center">
   <img src="images/Loss.png" alt="Loss" width="32%">
-  <img src="images/Accuracy.png" alt="Accuracy" width="32%">
-  <img src="images/F1.png" alt="F1-Score" width="32%">
+  <img src="images/Accuracy.png" alt="Accuracy" width="31.6%">
+  <img src="images/F1.png" alt="F1-Score" width="31.2%">
 </p>
 
 <i>Evolution of Loss (left), Accuracy (center), and F1-Score (right) metrics during training and validation.</i>
 
 <p align="center">
   <img src="images/E_dir.png" alt="E_dir" width="32%">
-  <img src="images/Mad.png" alt="MAD" width="32%">
-  <img src="images/NumRank.png" alt="Numrank" width="32%">
+  <img src="images/Mad.png" alt="MAD" width="31.5%">
+  <img src="images/NumRank.png" alt="Numrank" width="31.2%">
 </p>
 
 <i>Evolution of E<sup>dir</sup> (left), MAD (center), and NumRank (right) metrics during training and validation.</i>
