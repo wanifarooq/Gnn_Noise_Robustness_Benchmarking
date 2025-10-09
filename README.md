@@ -53,8 +53,16 @@ This analysis investigates the role of the backbone architecture and its influen
 <i>Results on the Cora dataset with Uniform noise (noise ratio 0.6).</i>
 
 ### Oversmoothing metrics
-The following plots illustrate the behavior of the **MAD**, **$E^{dir}$**, and **Numrank** oversmoothing metrics of the GCOD framework during training and validation.  
-These metrics are included in the ablation study to provide insights into the model’s behavior beyond standard evaluation measures.
+The following plots illustrate the behavior of classic metrics as well as the oversmoothing metrics **MAD**, **$E^{dir}$**, and **Numrank** of the GCOD framework during training and validation.  
+These oversmoothingmetrics are included in the ablation study to provide insights into the model's behavior beyond standard evaluation measures.
+
+<p align="center">
+  <img src="images/Loss.png" alt="Loss" width="32%">
+  <img src="images/Accuracy.png" alt="Accuracy" width="32%">
+  <img src="images/F1.png" alt="F1-Score" width="32%">
+</p>
+
+<i>Evolution of Loss (left), Accuracy (center), and F1-Score (right) metrics during training and validation.</i>
 
 <p align="center">
   <img src="images/E_dir.png" alt="E_dir" width="32%">
@@ -174,7 +182,7 @@ These metrics are included in the ablation study to provide insights into the mo
 - **gam1**: Coefficient in the coding rate controlling compression and discrimination.
 - **gam2**: Coefficient in the coding rate controlling compression and discrimination.
 - **eps**: Small constant added to stabilize covariance computation.
-- **alpha**: Coefficient for label propagation; influence of neighbors’ labels.
+- **alpha**: Coefficient for label propagation; influence of neighbors' labels.
 - **beta**: Weight combining pseudo-labels with denoised labels.
 - **T**: Propagation depth; number of steps labels are propagated.
 
@@ -301,12 +309,15 @@ It is possible to add new frameworks simply by adding their code as a new file i
 .
 ├── config.yaml
 ├── images
+│   ├── Accuracy.png
 │   ├── Asymmetric.png
 │   ├── CiteSeer_and_Pubmed.png
 │   ├── diagram.png
 │   ├── Different_Backbone.png
 │   ├── Different_noise_type.png
 │   ├── E_dir.png
+│   ├── F1.png
+│   ├── Loss.png
 │   ├── Mad.png
 │   ├── NumRank.png
 │   └── Symmetric.png
