@@ -54,7 +54,7 @@ This analysis investigates the role of the backbone architecture and its influen
 
 ### Oversmoothing metrics
 The following plots illustrate the behavior of classic metrics as well as the oversmoothing metrics **MAD**, **$E^{dir}$**, and **Numrank** of the GCOD framework during training and validation.  
-These oversmoothingmetrics are included in the ablation study to provide insights into the model's behavior beyond standard evaluation measures.
+These oversmoothing metrics are included in the ablation study to provide insights into the model's behavior beyond standard evaluation measures.
 
 <p align="center">
   <img src="images/Loss.png" alt="Loss" width="32%">
