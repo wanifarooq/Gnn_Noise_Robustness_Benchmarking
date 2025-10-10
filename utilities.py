@@ -297,10 +297,10 @@ def initialize_experiment(config, run_id=1):
     # Seed e device
     seed = config.get('seed', 42) + run_id * 100
     setup_seed_device(seed)
-    device = torch.device(config['device'] if torch.cuda.is_available() else 'cpu')
+    device = torch.device(config.get('device', 'cuda') if torch.cuda.is_available() else 'cpu')
 
     # Dataset
-    data, num_classes = load_dataset(config['dataset']['name'], root=config['dataset'].get('root', './data'))
+    data, num_classes = load_dataset(config['dataset'].get('name', 'cora'), root=config['dataset'].get('root', './data'))
     data = data.to(device)
 
     train_mask = data.train_mask
@@ -310,7 +310,7 @@ def initialize_experiment(config, run_id=1):
     data.y_original = data.y.clone()
 
     train_labels = data.y[train_mask]
-    train_features = data.x[train_mask] if config['noise']['type'] == 'instance' else None
+    train_features = data.x[train_mask] if config['noise'].get('type', 'clean') == 'instance' else None
     train_indices = train_mask.nonzero(as_tuple=True)[0]
 
     noisy_train_labels, relative_noisy_indices = noise_operation(
