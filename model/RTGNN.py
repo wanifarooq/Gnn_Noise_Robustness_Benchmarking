@@ -12,7 +12,7 @@ import numpy as np
 import scipy.sparse as sp
 from sklearn.metrics import f1_score, precision_score, recall_score
 
-from model.GNNs import GCN, GIN, GAT, GATv2
+from model.GNNs import GCN, GIN, GAT, GATv2, GPS
 from model.evaluation import OversmoothingMetrics
 
 
@@ -20,27 +20,35 @@ class DualBranchGNNModel(nn.Module):
     
     def __init__(self, gnn_type: str, input_features: int, hidden_dim: int, num_classes: int,
                  dropout_rate: float = 0.5, use_edge_weights: bool = False, attention_heads: int = 4,
-                 num_layers: int = None, device=None, add_self_loops: bool = False):
+                 num_layers: int = None, device=None, add_self_loops: bool = False,
+                 attn_type: str = 'multihead', use_pe: bool = False, pe_dim: int = 8):
         super().__init__()
         self.device = device
         self.gnn_type = gnn_type.lower()
         self.use_edge_weights = use_edge_weights
         self.dropout_rate = dropout_rate
         self.add_self_loops = add_self_loops
+        self.attn_type = attn_type
+        self.use_pe = use_pe
+        self.pe_dim = pe_dim
 
         def create_gnn_branch():
             if self.gnn_type == 'gcn':
                 return GCN(input_features, hidden_dim, num_classes, n_layers=num_layers or 2,
-                           dropout=dropout_rate, self_loop=self.add_self_loops)
+                          dropout=dropout_rate, self_loop=self.add_self_loops)
             elif self.gnn_type == 'gin':
                 return GIN(input_features, hidden_dim, num_classes, n_layers=num_layers or 3,
-                           mlp_layers=2, dropout=dropout_rate)
+                          mlp_layers=2, dropout=dropout_rate)
             elif self.gnn_type == 'gat' and not use_edge_weights:
                 return GAT(input_features, hidden_dim, num_classes, n_layers=num_layers or 3,
-                           heads=attention_heads, dropout=dropout_rate, self_loop=self.add_self_loops)
+                          heads=attention_heads, dropout=dropout_rate, self_loop=self.add_self_loops)
             elif self.gnn_type == 'gatv2' and not use_edge_weights:
                 return GATv2(input_features, hidden_dim, num_classes, n_layers=num_layers or 3,
                             heads=attention_heads, dropout=dropout_rate, self_loop=self.add_self_loops)
+            elif self.gnn_type == 'gps':
+                return GPS(input_features, hidden_dim, num_classes, n_layers=num_layers or 3,
+                          heads=attention_heads, dropout=dropout_rate, 
+                          attn_type=self.attn_type, use_pe=self.use_pe, pe_dim=self.pe_dim)
             else:
                 raise ValueError(f"GNN type {self.gnn_type} not supported")
 
@@ -377,23 +385,33 @@ class RTGNN(nn.Module):
         except Exception as e:
             print(f"Warning: Could not compute oversmoothing metrics for subset: {e}")
             return None
-        
+            
     def _get_gnn_specific_configuration(self):
-
         base_config = {'num_layers': getattr(self.training_config, 'n_layers', 2)}
-        
+            
         if self.gnn_backbone == 'gcn':
             base_config.update({'add_self_loops': getattr(self.training_config, 'self_loop', True)})
+            
         elif self.gnn_backbone == 'gin':
             base_config.update({
                 'mlp_layers': getattr(self.training_config, 'mlp_layers', 2),
                 'train_eps': getattr(self.training_config, 'train_eps', True)
             })
+            
         elif self.gnn_backbone in ['gat', 'gatv2']:
             base_config.update({
                 'attention_heads': getattr(self.training_config, 'heads', 8),
                 'add_self_loops': getattr(self.training_config, 'self_loop', True)
             })
+            
+        elif self.gnn_backbone == 'gps':
+            base_config.update({
+                'attention_heads': getattr(self.training_config, 'heads', 4),
+                'attn_type': getattr(self.training_config, 'attn_type', 'multihead'),
+                'use_pe': getattr(self.training_config, 'use_pe', False),
+                'pe_dim': getattr(self.training_config, 'pe_dim', 8)
+            })
+        
         return base_config
 
     def forward(self, node_features, edge_indices, edge_weights=None):

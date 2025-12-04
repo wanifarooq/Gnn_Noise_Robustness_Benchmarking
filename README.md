@@ -79,7 +79,7 @@ These oversmoothing metrics are included in the ablation study to provide insigh
 - **device**: Specifies the hardware for training (`cpu` or `cuda`).
 
 ## Dataset
-- **name**: The name of the dataset to be used (`cora`, `citeseer`, `pubmed`).
+- **name**: The name of the dataset to be used (`cora`, `citeseer`, `pubmed`, `amazon-ratings`, `tolokers`, `roman-empire`, `minesweeper`, `questions`, `dblp`, `amazon-computers`, `amazon-photo`, `blogcatalog`, `flickr`, `hm-categories`, `pokec-regions`, `web-topics`, `tolokers-2`, `city-reviews`, `artnet-exp`, `web-fraud`, `pattern`, `cluster`, `pascalvoc-sp`, `coco-sp`).
 - **root**: Path where the dataset is stored or will be downloaded.
 
 ## Noise
@@ -88,14 +88,17 @@ These oversmoothing metrics are included in the ablation study to provide insigh
 - **seed**: Random seed used specifically for noise generation.
 
 ## Model
-- **name**: Backbone architecture (`gcn`, `gin`, `gat`, `gatv2`).
+- **name**: Backbone architecture (`gcn`, `gin`, `gat`, `gatv2`, `gps`).
 - **hidden_channels**: Size of hidden representations in each layer.
 - **n_layers**: Number of layers in the model.
 - **dropout**: Dropout probability to prevent overfitting.
 - **self_loop**: Whether to add self-loops to nodes in the graph.
 - **mlp_layers**: Number of layers in an MLP applied on node features.
 - **train_eps**: Whether the epsilon parameter in GIN is trainable.
-- **heads**: Number of attention heads for GAT or GATv2.
+- **heads**: Number of attention heads for GAT, GATv2, or GPS models.
+- **attn_type**: Type of attention mechanism for GPS.
+- **use_pe**: Whether to use positional encoding in GPS.
+- **pe_dim**: Dimension of the positional encoding features.
 
 ## Training
 - **method**: Training method (`standard`, `positive_eigenvalues`, `gcod`, `nrgnn`, `pi_gnn`, `cr_gnn`, `community_defense`, `rtgnn`, `graphcleaner`, `unionnet`, `gnn_cleaner`, `erase`, `gnnguard`).

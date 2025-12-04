@@ -3,11 +3,12 @@ import random
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torch_geometric.datasets import Planetoid
 from torch_geometric.transforms import NormalizeFeatures
 from scipy import stats
 from torch_geometric.utils import to_scipy_sparse_matrix
 import argparse
+import pandas as pd
+from torch_geometric.data import Data
 
 from model.Standard import train_with_standard_loss
 from model.Positive_Eigenvalues import PositiveEigenvaluesTrainer
@@ -22,7 +23,7 @@ from model.UnionNET import UnionNET
 from model.GNN_Cleaner import GNNCleanerTrainer
 from model.ERASE import ERASETrainer
 from model.GNNGuard import GNNGuardTrainer
-from model.GNNs import GCN, GIN, GAT, GATv2
+from model.GNNs import GCN, GIN, GAT, GATv2, GPS
 
 # Noises
 def simple_uniform_noise(labels, n_classes, noise_rate, seed):
@@ -241,13 +242,71 @@ def load_dataset(name, root="./data"):
     name_lower = name.lower()
     
     if name_lower in ["cora", "citeseer", "pubmed"]:
+        from torch_geometric.datasets import Planetoid
         dataset = Planetoid(root=f"{root}/{name}", name=name.capitalize(), transform=NormalizeFeatures(), split='public')
+        data = dataset[0]
+        return data, dataset.num_classes
+    
+    elif name_lower in ["amazon-ratings", "tolokers", "roman-empire", "minesweeper", "questions"]:
+        from torch_geometric.datasets import HeterophilousGraphDataset
+        dataset = HeterophilousGraphDataset(root=f"{root}/{name}", name=name, transform=NormalizeFeatures())
+        data = dataset[0]
+        return data, dataset.num_classes
+    
+    elif name_lower == "dblp":
+        from torch_geometric.datasets import CitationFull
+        dataset = CitationFull(root=f"{root}/{name}", name="dblp", transform=NormalizeFeatures())
+        data = dataset[0]
+        return data, dataset.num_classes
+    
+    elif name_lower in ["amazon-computers", "amazon-photo"]:
+        from torch_geometric.datasets import Amazon
+        amazon_name = name.split('-')[1].capitalize()
+        dataset = Amazon(root=f"{root}/{name}", name=amazon_name, transform=NormalizeFeatures())
+        data = dataset[0]
+        return data, dataset.num_classes
+    
+    elif name_lower in ["blogcatalog", "flickr"]:
+        from torch_geometric.datasets import AttributedGraphDataset
+        dataset = AttributedGraphDataset(root=f"{root}/{name}", name=name.capitalize(), transform=NormalizeFeatures())
+        data = dataset[0]
+        return data, dataset.num_classes
+    
+    elif name_lower in ["hm-categories", "pokec-regions", "web-topics", "tolokers-2", "city-reviews", "artnet-exp", "web-fraud"]:
+        dataset_dir = os.path.join(root, name)
+        
+        if not os.path.exists(dataset_dir):
+            raise FileNotFoundError(f"GraphLAND dataset {name} not found in {dataset_dir}. ")
+        
+        edgelist = pd.read_csv(os.path.join(dataset_dir, "edgelist.csv"))
+        edge_index = torch.tensor(edgelist.values.T, dtype=torch.long)
+        features = pd.read_csv(os.path.join(dataset_dir, "features.csv"))
+        x = torch.tensor(features.values, dtype=torch.float)
+        targets = pd.read_csv(os.path.join(dataset_dir, "targets.csv"))
+        y = torch.tensor(targets.values.squeeze(), dtype=torch.long)
+        
+        split_masks = pd.read_csv(os.path.join(dataset_dir, "split_masks_RL.csv"))
+        train_mask = torch.tensor(split_masks["train"].values, dtype=torch.bool)
+        val_mask = torch.tensor(split_masks["val"].values, dtype=torch.bool)
+        test_mask = torch.tensor(split_masks["test"].values, dtype=torch.bool)
+        
+        data = Data(x=x, edge_index=edge_index, y=y, train_mask=train_mask, val_mask=val_mask, test_mask=test_mask)
+        num_classes = len(torch.unique(y[~torch.isnan(y)]))
+        
+        return data, num_classes
+    
+    elif name_lower in ["pattern", "cluster"]:
+        from torch_geometric.datasets import GNNBenchmarkDataset
+        dataset = GNNBenchmarkDataset(root=f"{root}/{name}", name=name.upper(), split='train', transform=NormalizeFeatures())
+        return dataset, dataset.num_classes
+    
+    elif name_lower in ["pascalvoc-sp", "coco-sp"]:
+        from torch_geometric.datasets import LRGBDataset
+        dataset = LRGBDataset(root=f"{root}/{name}", name=name, split='train', transform=NormalizeFeatures())
+        return dataset, dataset.num_classes
+    
     else:
-        raise ValueError(f"Dataset {name} not supported.")
-    
-    data = dataset[0]
-    
-    return data, dataset.num_classes
+        raise ValueError(f"Dataset {name} not supported. Supported datasets: cora, citeseer, pubmed, amazon-ratings, tolokers, roman-empire, minesweeper, questions, dblp, amazon-computers, amazon-photo, blogcatalog, flickr, hm-categories, pokec-regions, web-topics, tolokers-2, city-reviews, artnet-exp, web-fraud, pattern, cluster, pascalvoc-sp, coco-sp")
 
 def prepare_data_for_method(data, train_mask, val_mask, test_mask, noisy_train_labels, method_name):
 
@@ -277,19 +336,21 @@ def get_model(model_name, in_channels, hidden_channels, out_channels, **kwargs):
     kwargs.pop('in_channels', None)
     kwargs.pop('hidden_channels', None)
     kwargs.pop('out_channels', None)
-
+    
     model_registry = {
-        'gcn':  (GCN, ['n_layers', 'dropout', 'self_loop']),
-        'gin':  (GIN, ['n_layers', 'dropout', 'mlp_layers', 'train_eps']),
-        'gat':  (GAT, ['n_layers', 'dropout', 'heads']),
-        'gatv2': (GATv2, ['n_layers', 'dropout', 'heads']),
+        'gcn':    (GCN, ['n_layers', 'dropout', 'self_loop']),
+        'gin':    (GIN, ['n_layers', 'dropout', 'mlp_layers', 'train_eps']),
+        'gat':    (GAT, ['n_layers', 'dropout', 'heads']),
+        'gatv2':  (GATv2, ['n_layers', 'dropout', 'heads']),
+        'gps':    (GPS, ['n_layers', 'dropout', 'heads', 'attn_type', 'use_pe', 'pe_dim']),
     }
-
+    
     if model_name not in model_registry:
         raise ValueError(f"Model {model_name} not recognized.")
-
+    
     model_cls, valid_params = model_registry[model_name]
     filtered_kwargs = {k: v for k, v in kwargs.items() if k in valid_params}
+    
     return model_cls(in_channels, hidden_channels, out_channels, **filtered_kwargs)
 
 def initialize_experiment(config, run_id=1):
