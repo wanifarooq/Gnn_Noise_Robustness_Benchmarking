@@ -19,7 +19,6 @@ model:
   mlp_layers: 1 # GIN
   train_eps: false # GIN
   heads: 8 # GAT, GATv2, GPS
-  attn_type: multihead # GPS: multihead, performer
   use_pe: false # GPS: positional encoding
   pe_dim: 8 # GPS: PE dimension
 

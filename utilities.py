@@ -273,25 +273,36 @@ def load_dataset(name, root="./data"):
         return data, dataset.num_classes
     
     elif name_lower in ["hm-categories", "pokec-regions", "web-topics", "tolokers-2", "city-reviews", "artnet-exp", "web-fraud"]:
-        dataset_dir = os.path.join(root, name)
         
+        dataset_dir = os.path.join(root, name)
         if not os.path.exists(dataset_dir):
             raise FileNotFoundError(f"GraphLAND dataset {name} not found in {dataset_dir}. ")
         
         edgelist = pd.read_csv(os.path.join(dataset_dir, "edgelist.csv"))
         edge_index = torch.tensor(edgelist.values.T, dtype=torch.long)
         features = pd.read_csv(os.path.join(dataset_dir, "features.csv"))
-        x = torch.tensor(features.values, dtype=torch.float)
+        features_filled = features.fillna(0)
+
+        x = torch.tensor(features_filled.values, dtype=torch.float)
         targets = pd.read_csv(os.path.join(dataset_dir, "targets.csv"))
-        y = torch.tensor(targets.values.squeeze(), dtype=torch.long)
+        targets_values = targets.values.squeeze()
+        valid_label_mask = ~pd.isna(targets_values)
+        targets_values = pd.Series(targets_values).fillna(-1).values
+        y = torch.tensor(targets_values, dtype=torch.long)
+        
+        valid_labels = targets_values[valid_label_mask]
+        num_classes = len(pd.Series(valid_labels).unique())
         
         split_masks = pd.read_csv(os.path.join(dataset_dir, "split_masks_RL.csv"))
         train_mask = torch.tensor(split_masks["train"].values, dtype=torch.bool)
         val_mask = torch.tensor(split_masks["val"].values, dtype=torch.bool)
         test_mask = torch.tensor(split_masks["test"].values, dtype=torch.bool)
+        valid_mask_torch = torch.from_numpy(valid_label_mask)
+        train_mask = train_mask & valid_mask_torch
+        val_mask = val_mask & valid_mask_torch
+        test_mask = test_mask & valid_mask_torch
         
         data = Data(x=x, edge_index=edge_index, y=y, train_mask=train_mask, val_mask=val_mask, test_mask=test_mask)
-        num_classes = len(torch.unique(y[~torch.isnan(y)]))
         
         return data, num_classes
     
@@ -342,7 +353,7 @@ def get_model(model_name, in_channels, hidden_channels, out_channels, **kwargs):
         'gin':    (GIN, ['n_layers', 'dropout', 'mlp_layers', 'train_eps']),
         'gat':    (GAT, ['n_layers', 'dropout', 'heads']),
         'gatv2':  (GATv2, ['n_layers', 'dropout', 'heads']),
-        'gps':    (GPS, ['n_layers', 'dropout', 'heads', 'attn_type', 'use_pe', 'pe_dim']),
+        'gps':    (GPS, ['n_layers', 'dropout', 'heads', 'use_pe', 'pe_dim']),
     }
     
     if model_name not in model_registry:

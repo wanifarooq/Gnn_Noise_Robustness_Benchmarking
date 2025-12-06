@@ -4,14 +4,12 @@ import torch.nn.functional as F
 from torch_geometric.nn import GCNConv, GINConv, GATConv, GATv2Conv
 from torch.nn import (
     BatchNorm1d,
-    Embedding,
     Linear,
     ModuleList,
     ReLU,
     Sequential,
 )
-from torch_geometric.nn import GINEConv, GPSConv, global_add_pool
-from torch_geometric.nn.attention import PerformerAttention
+from torch_geometric.nn import GINEConv, GPSConv
 
 class MLP(nn.Module):
     def __init__(self, in_channels: int, hidden_channels: int, out_channels: int,
@@ -255,33 +253,11 @@ class GATv2(nn.Module):
             for norm in self.norms:
                 norm.reset_parameters()
 
-class RedrawProjection:
-    def __init__(self, model: torch.nn.Module,
-                 redraw_interval: int = None):
-        self.model = model
-        self.redraw_interval = redraw_interval
-        self.num_last_redraw = 0
-
-    def redraw_projections(self):
-        if not self.model.training or self.redraw_interval is None:
-            return
-        if self.num_last_redraw >= self.redraw_interval:
-            fast_attentions = [
-                module for module in self.model.modules()
-                if isinstance(module, PerformerAttention)
-            ]
-            for fast_attention in fast_attentions:
-                fast_attention.redraw_projection_matrix()
-            self.num_last_redraw = 0
-            return
-        self.num_last_redraw += 1
-
 class GPS(nn.Module):
     def __init__(self, in_channels: int, hidden_channels: int, out_channels: int,
-                 n_layers: int = 3, pe_dim: int = 8, heads: int = 4, 
-                 dropout: float = 0.5, attn_type: str = 'multihead',
-                 with_bias: bool = True, norm_info: dict = None, 
-                 act: str = 'F.relu', use_pe: bool = False):
+                 n_layers: int = 3, dropout: float = 0.5, heads: int = 4,
+                 attn_type: str = 'multihead', use_pe: bool = False, pe_dim: int = 8,
+                 with_bias: bool = True, norm_info: dict = None, act: str = 'F.relu'):
         super().__init__()
 
         self.n_layers = n_layers
@@ -298,18 +274,18 @@ class GPS(nn.Module):
         if use_pe:
             self.pe_norm = BatchNorm1d(pe_dim)
             self.pe_lin = Linear(pe_dim, pe_dim)
-            actual_channels = in_channels + pe_dim
+            effective_in_channels = in_channels + pe_dim
         else:
-            actual_channels = in_channels
+            effective_in_channels = in_channels
 
         self.convs = ModuleList()
         self.norms = ModuleList() if self.is_norm else None
 
         for i in range(n_layers):
-            in_dim = actual_channels if i == 0 else hidden_channels
+            in_dim = effective_in_channels if i == 0 else hidden_channels
             out_dim = out_channels if i == n_layers - 1 else hidden_channels
 
-            mlp = Sequential(
+            nn_module = Sequential(
                 Linear(in_dim, hidden_channels),
                 ReLU(),
                 Linear(hidden_channels, out_dim),
@@ -317,29 +293,30 @@ class GPS(nn.Module):
 
             attn_kwargs = {'dropout': dropout}
 
-            conv = GPSConv(out_dim, GINEConv(mlp), heads=heads,
-                          attn_type=attn_type, attn_kwargs=attn_kwargs)
+            conv = GPSConv(
+                out_dim, 
+                GINEConv(nn_module), 
+                heads=heads,
+                attn_type=attn_type,
+                attn_kwargs=attn_kwargs
+            )
             self.convs.append(conv)
 
             if self.is_norm:
                 self.norms.append(self.norm_type(out_dim))
-
-        self.redraw_projection = RedrawProjection(
-            self,
-            redraw_interval=1000 if attn_type == 'performer' else None
-        )
 
     def forward(self, data):
         x, edge_index, batch = data.x, data.edge_index, getattr(data, 'batch', None)
         edge_attr = getattr(data, 'edge_attr', None)
 
         if self.use_pe and hasattr(data, 'pe'):
-            pe = self.pe_norm(data.pe)
-            pe = self.pe_lin(pe)
-            x = torch.cat([x, pe], dim=1)
+            x_pe = self.pe_norm(data.pe)
+            x_pe = self.pe_lin(x_pe)
+            x = torch.cat([x, x_pe], dim=1)
 
         for i, conv in enumerate(self.convs):
             x = conv(x, edge_index, batch, edge_attr=edge_attr)
+            
             if i < self.n_layers - 1:
                 if self.is_norm:
                     x = self.norms[i](x)

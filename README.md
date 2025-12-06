@@ -96,7 +96,6 @@ These oversmoothing metrics are included in the ablation study to provide insigh
 - **mlp_layers**: Number of layers in an MLP applied on node features.
 - **train_eps**: Whether the epsilon parameter in GIN is trainable.
 - **heads**: Number of attention heads for GAT, GATv2, or GPS models.
-- **attn_type**: Type of attention mechanism for GPS.
 - **use_pe**: Whether to use positional encoding in GPS.
 - **pe_dim**: Dimension of the positional encoding features.
 
