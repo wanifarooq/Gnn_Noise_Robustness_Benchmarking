@@ -1,11 +1,12 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.utils import dropout_adj, mask_feature
+from torch_geometric.utils import dropout_edge, mask_feature
 from torch_geometric.data import Data
 from copy import deepcopy
 import time
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
+from collections import defaultdict
 from model.evaluation import OversmoothingMetrics
 
 
@@ -163,6 +164,7 @@ class CRGNNModel:
             }
 
     def train_model(self, backbone_model, graph_data, model_config, model_factory_function):
+        per_epochs_oversmoothing = defaultdict(list)
         graph_data = graph_data.to(self.device)
         num_classes = graph_data.y.max().item() + 1
         
@@ -234,7 +236,8 @@ class CRGNNModel:
                     val_oversmooth_metrics = self._compute_oversmoothing_metrics(
                         embeddings, graph_data.edge_index, val_mask
                     )
-                    
+                    for key, value in train_oversmooth_metrics.items():
+                        per_epochs_oversmoothing[key].append(value)
                     print(f"Epoch {epoch+1:03d} | Train Acc: {train_acc:.4f}, Val Acc: {val_acc:.4f}, Total Loss: {loss:.4f}")
                     print(f"Train EDir: {train_oversmooth_metrics['EDir']:.4f}, Val EDir: {val_oversmooth_metrics['EDir']:.4f} | "
                           f"Train EDir_trad: {train_oversmooth_metrics['EDir_traditional']:.4f}, Val EDir_trad: {val_oversmooth_metrics['EDir_traditional']:.4f} | "
@@ -295,20 +298,20 @@ class CRGNNModel:
         print(f"Test EDir: {test_oversmooth_metrics['EDir']:.4f}, EDir_trad: {test_oversmooth_metrics['EDir_traditional']:.4f}, "
               f"EProj: {test_oversmooth_metrics['EProj']:.4f}, MAD: {test_oversmooth_metrics['MAD']:.4f}, "
               f"NumRank: {test_oversmooth_metrics['NumRank']:.4f}, Erank: {test_oversmooth_metrics['Erank']:.4f}")
-        
         return {
             'accuracy': float(test_acc),
             'f1': float(test_f1),
             'precision': float(test_precision),
             'recall': float(test_recall),
-            'oversmoothing': test_oversmooth_metrics
+            'oversmoothing': test_oversmooth_metrics,
+            'train_oversmoothing' : per_epochs_oversmoothing
         }
 
     def _train_step(self, backbone, adapter, proj_head, class_head, 
                    x, edge_index, labels, mask):
 
-        edge_idx1, _ = dropout_adj(edge_index, p=self.pr, training=True)
-        edge_idx2, _ = dropout_adj(edge_index, p=self.pr, training=True)
+        edge_idx1, _ = dropout_edge(edge_index, p=self.pr, training=True)
+        edge_idx2, _ = dropout_edge(edge_index, p=self.pr, training=True)
         x1, _ = mask_feature(x, p=self.pr)
         x2, _ = mask_feature(x, p=self.pr)
         

@@ -9,6 +9,7 @@ import scipy.sparse as sp
 from torch_geometric.utils import from_scipy_sparse_matrix, to_undirected, negative_sampling
 from torch_geometric.nn import GCNConv
 from sklearn.metrics import f1_score, precision_score, recall_score
+from collections import defaultdict
 
 from model.evaluation import OversmoothingMetrics
 
@@ -428,16 +429,17 @@ class NRGNN:
         total_loss.backward()
         self.optimizer.step()
 
-        self.evaluate_epoch(epoch, train_indices, validation_indices, 
+        metrics = self.evaluate_epoch(epoch, train_indices, validation_indices, 
                           predictor_edges, predictor_weights, 
                           main_model_edges, main_model_weights, 
                           total_loss, start_time)
+        return metrics
 
     def evaluate_epoch(self, epoch, train_indices, validation_indices, 
                       predictor_edges, predictor_weights,
                       main_model_edges, main_model_weights, 
                       total_loss, start_time):
-
+        logging = False
         self.main_model.eval()
         self.node_predictor.eval()
         self.edge_weight_estimator.eval()
@@ -487,6 +489,8 @@ class NRGNN:
                 print(f"  Pred Val Acc: {predictor_validation_accuracy:.4f} | Add Nodes: {len(self.confident_node_indices)} | "
                         f"Time: {time.time() - start_time:.2f}s")
 
+                logging = True
+
             if predictor_validation_accuracy > self.best_predictor_accuracy:
                 self.best_predictor_accuracy = predictor_validation_accuracy
                 self.best_predictor_edge_weights = predictor_weights.detach()
@@ -509,6 +513,8 @@ class NRGNN:
                 if self.debug_mode:
                     print(f"Early stopping at epoch {epoch+1}, best val loss: {self.best_validation_loss:.4f}")
                 raise StopIteration
+        if logging:
+            return train_metrics
 
     def load_best_model_weights(self):
 
@@ -523,11 +529,15 @@ class NRGNN:
         self.prepare_training_data(features, adjacency_matrix, labels, train_indices)
 
         self.initialize_model_components()
+        per_epochs_oversmoothing = defaultdict(list)
         
         start_time = time.time()
         try:
             for epoch in range(self.max_epochs):
-                self.train_single_epoch(epoch, train_indices, validation_indices)
+                results = self.train_single_epoch(epoch, train_indices, validation_indices)
+                if results is not None:
+                    for key, value in results.items():
+                        per_epochs_oversmoothing[key].append(value)
         except StopIteration:
             if self.debug_mode:
                 print(f"Early stopping at epoch {epoch+1}")
@@ -536,6 +546,7 @@ class NRGNN:
         print(f"\nTraining completed in {total_training_time:.2f}s")
         
         self.load_best_model_weights()
+        return per_epochs_oversmoothing
 
     def test(self, test_indices):
         self.main_model.eval()

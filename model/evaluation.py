@@ -218,8 +218,10 @@ class OversmoothingMetrics:
                 distance = 1.0 - cosine_sim
             else:
                 distance = 1.0
-                
-            total_distance += distance.item()
+            if isinstance(distance, float):
+                total_distance += distance
+            else:
+                total_distance += distance.item()
             
         return total_distance / num_edges
     

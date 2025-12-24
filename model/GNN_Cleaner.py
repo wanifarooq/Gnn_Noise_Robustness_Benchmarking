@@ -5,6 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from scipy import sparse
 from sklearn.metrics import f1_score, precision_score, recall_score
+from collections import defaultdict
 
 from model.evaluation import OversmoothingMetrics
 
@@ -440,7 +441,7 @@ class GNNCleanerTrainer:
         return evaluation_results
 
     def execute_full_training(self, enable_debug_output=True):
-
+        per_epochs_oversmoothing = defaultdict(list)
         training_start_time = time.time()
         
         best_validation_loss = float("inf")
@@ -472,9 +473,11 @@ class GNNCleanerTrainer:
 
                 if train_oversmoothing_metrics is not None:
                     self.oversmoothing_training_history['train'].append(train_oversmoothing_metrics)
+                    for key, value in train_oversmoothing_metrics.items():
+                        per_epochs_oversmoothing[key].append(value)
                 if validation_oversmoothing_metrics is not None:
                     self.oversmoothing_training_history['val'].append(validation_oversmoothing_metrics)
-            
+
             # Early stopping
             if current_metrics['val_loss'] < best_validation_loss:
                 best_validation_loss = current_metrics['val_loss']
@@ -590,7 +593,8 @@ class GNNCleanerTrainer:
             'f1': final_evaluation_metrics['test_f1'],
             'precision': final_evaluation_metrics['test_precision'],
             'recall': final_evaluation_metrics['test_recall'],
-            'oversmoothing': final_test_oversmoothing
+            'oversmoothing': final_test_oversmoothing,
+            'train_oversmoothing': per_epochs_oversmoothing
         }
     
     def _compute_oversmoothing_for_node_subset(self, node_embeddings, edge_connectivity, node_subset_mask, node_labels=None):

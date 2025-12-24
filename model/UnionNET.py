@@ -3,7 +3,7 @@ from copy import deepcopy
 import torch
 import torch.nn.functional as F
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
-
+from collections import defaultdict
 from model.evaluation import OversmoothingMetrics
 
 
@@ -190,6 +190,7 @@ class UnionNET:
         return combined_loss
 
     def train_model(self, enable_debug=True):
+        per_epochs_oversmoothing = defaultdict(list)
 
         training_start_time = time.time()
         
@@ -221,6 +222,8 @@ class UnionNET:
                 val_oversmooth_metrics = self._evaluate_oversmoothing_metrics(
                     model_predictions, mask=self.val_node_mask
                 )
+                for key, value in train_oversmooth_metrics.items():
+                    per_epochs_oversmoothing[key].append(value)
                 
                 if enable_debug:
                     print(f"Epoch {current_epoch+1:03d} | Train Acc: {train_accuracy:.4f}, Val Acc: {val_accuracy:.4f} | "
@@ -293,7 +296,8 @@ class UnionNET:
             'f1': test_f1_score,
             'precision': test_precision,
             'recall': test_recall,
-            'oversmoothing': test_oversmooth_metrics
+            'oversmoothing': test_oversmooth_metrics,
+            'train_oversmoothing': per_epochs_oversmoothing
         }
 
     def _evaluate_oversmoothing_metrics(self, node_embeddings, mask=None):

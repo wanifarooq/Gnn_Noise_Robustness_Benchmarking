@@ -13,7 +13,7 @@ from copy import deepcopy
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 from torch_geometric.utils import to_scipy_sparse_matrix
 from torch_geometric.data import Data
-
+from collections import defaultdict
 from model.evaluation import OversmoothingMetrics
 
 
@@ -183,7 +183,7 @@ class GNNGuardTrainer:
             self._convert_sparse_matrix_to_torch_tensor(self.adjacency_matrix)
         )
 
-        self._train_with_early_stopping(
+        result = self._train_with_early_stopping(
             self.node_labels,
             self.train_indices,
             self.val_indices,
@@ -192,13 +192,14 @@ class GNNGuardTrainer:
             patience,
             verbose
         )
+        return result
     
     def _train_with_early_stopping(self, labels, train_indices, val_indices, test_indices, 
                                   max_epochs, patience, verbose):
 
         if verbose:
             print('Training GNNGuard model')
-            
+        per_epochs_oversmoothing = defaultdict(list)
         optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate, 
                              weight_decay=self.weight_decay_coeff)
         
@@ -246,7 +247,8 @@ class GNNGuardTrainer:
                         train_output, edge_connectivity, train_node_mask, labels)
                     val_oversmoothing_metrics = self._compute_mask_oversmoothing_metrics(
                         val_output, edge_connectivity, val_node_mask, labels)
-                
+                    for key, value in train_oversmoothing_metrics.items():
+                        per_epochs_oversmoothing[key].append(value)
                 if train_oversmoothing_metrics is not None:
                     self.oversmoothing_metrics_history['train'].append(train_oversmoothing_metrics)
                 if val_oversmoothing_metrics is not None:
@@ -275,7 +277,8 @@ class GNNGuardTrainer:
         
         if test_indices is not None:
             self._evaluate_final_test_performance(train_indices, val_indices, test_indices, verbose)
-    
+        return per_epochs_oversmoothing
+
     def _log_training_progress(self, epoch, train_loss, val_loss, train_acc, val_acc, 
                              train_f1, val_f1, train_oversmoothing, val_oversmoothing):
         

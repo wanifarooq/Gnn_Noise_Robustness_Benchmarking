@@ -3,6 +3,7 @@ import torch.nn.functional as F
 from sklearn.metrics import f1_score, precision_score, recall_score 
 from copy import deepcopy
 from torch_geometric.loader import NeighborLoader
+from collections import defaultdict
 
 from model.evaluation import OversmoothingMetrics
 
@@ -133,6 +134,8 @@ class PositiveEigenvaluesTrainer:
     def train_with_positive_eigenvalue_constraint(self, max_epochs=200, batch_size=32, 
                                                 patience=20, noisy_indices=None):
 
+        
+        per_epochs_oversmoothing = defaultdict(list)
         train_loader, val_loader, test_loader = self.create_data_loaders(batch_size)
         
         best_validation_loss = float('inf')
@@ -191,6 +194,9 @@ class PositiveEigenvaluesTrainer:
                     f"Train Acc: {metrics['train_acc']:.4f}, Val Acc: {metrics['val_acc']:.4f} | "
                     f"Train F1: {metrics['train_f1']:.4f}, Val F1: {metrics['val_f1']:.4f}")
                 
+
+                for key, value in train_oversmoothing.items():
+                    per_epochs_oversmoothing[key].append(value)
                 train_edir = train_oversmoothing.get('EDir', 0.0) if train_oversmoothing else 0.0
                 train_edir_traditional = train_oversmoothing.get('EDir_traditional', 0.0) if train_oversmoothing else 0.0
                 train_eproj = train_oversmoothing.get('EProj', 0.0) if train_oversmoothing else 0.0
@@ -251,7 +257,8 @@ class PositiveEigenvaluesTrainer:
             'oversmoothing': test_oversmoothing or {
                 'NumRank': 0.0, 'Erank': 0.0, 'EDir': 0.0,
                 'EDir_traditional': 0.0, 'EProj': 0.0, 'MAD': 0.0
-            }
+            },
+            'train_oversmoothing' : per_epochs_oversmoothing
         }
     
     def create_data_loaders(self, batch_size=32):

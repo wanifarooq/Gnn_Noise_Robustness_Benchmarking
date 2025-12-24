@@ -10,9 +10,10 @@ from sklearn.metrics import accuracy_score
 from torch_geometric.data import Data
 import numpy as np
 import scipy.sparse as sp
+from collections import defaultdict
 from sklearn.metrics import f1_score, precision_score, recall_score
 
-from model.GNNs import GCN, GIN, GAT, GATv2, GPS
+from model.gnns import GCN, GIN, GAT, GATv2, GPS
 from model.evaluation import OversmoothingMetrics
 
 
@@ -484,10 +485,13 @@ class RTGNN(nn.Module):
 
     def train_model(self):
 
+
+        per_epochs_oversmoothing = defaultdict(list)
+
         training_start_time = time.time()
 
         node_features = self.node_features.to(self.device)
-        node_labels = torch.LongTensor(self.node_labels).to(self.device)
+        node_labels = torch.as_tensor(self.node_labels, dtype=torch.long, device=self.device)
         train_indices = self.train_node_indices
         val_indices = self.val_node_indices
         test_indices = self.test_node_indices
@@ -496,7 +500,6 @@ class RTGNN(nn.Module):
         edge_indices, _ = from_scipy_sparse_matrix(adjacency_matrix)
         edge_indices = edge_indices.to(self.device)
         node_features = node_features.to(self.device)
-        node_labels = torch.LongTensor(node_labels).to(self.device)
         
         # Generate KNN edges
         knn_edge_indices = self._generate_knn_edge_connections(node_features, edge_indices, train_indices)
@@ -568,6 +571,9 @@ class RTGNN(nn.Module):
                 performance_metrics, train_oversmoothing, val_oversmoothing = self.evaluate_model_performance(
                     node_features, final_edge_indices, final_edge_weights, node_labels, train_indices, val_indices
                 )
+
+                for key, value in train_oversmoothing.items():
+                    per_epochs_oversmoothing[key].append(value)
 
                 train_de_edir = train_oversmoothing['EDir'] if train_oversmoothing else 0.0
                 train_de_traditional = train_oversmoothing['EDir_traditional'] if train_oversmoothing else 0.0
@@ -645,11 +651,13 @@ class RTGNN(nn.Module):
                       f"NumRank: {final_test_oversmoothing['NumRank']:.4f}, Erank: {final_test_oversmoothing['Erank']:.4f}")
             
         print(f"Training completed! Best validation loss: {best_validation_loss:.4f}") #print(f"Training completed! Best validation accuracy: {best_validation_accuracy:.4f}")
+        return per_epochs_oversmoothing
+
 
     def evaluate_final_performance(self, clean_labels=None):
 
         node_features = self.node_features.to(self.device)
-        node_labels = torch.LongTensor(clean_labels if clean_labels is not None else self.node_labels).to(self.device)
+        node_labels = torch.as_tensor(clean_labels if clean_labels is not None else self.node_labels, dtype=torch.long, device=self.device)
         test_indices = self.test_node_indices
 
         if self.best_model_state is None:
@@ -672,7 +680,7 @@ class RTGNN(nn.Module):
         self.eval()
         with torch.no_grad():
             node_features = node_features.to(self.device)
-            node_labels = torch.LongTensor(node_labels).to(self.device)
+            node_labels = torch.as_tensor(node_labels, dtype=torch.long, device=self.device)
             
             first_branch_output, second_branch_output = self.dual_branch_predictor(
                 node_features, 
@@ -744,7 +752,7 @@ class RTGNN(nn.Module):
                 'f1': test_f1,
                 'precision': test_precision,
                 'recall': test_recall,
-                'oversmoothing': oversmoothing_dict
+                'oversmoothing': oversmoothing_dict,
             }
         
     def _generate_knn_edge_connections(self, node_features, original_edge_indices, train_node_indices, k=None):

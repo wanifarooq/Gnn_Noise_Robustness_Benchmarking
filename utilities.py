@@ -9,6 +9,10 @@ from torch_geometric.utils import to_scipy_sparse_matrix
 import argparse
 import pandas as pd
 from torch_geometric.data import Data
+from torch.profiler import profile, ProfilerActivity
+import requests
+import zipfile
+from io import BytesIO
 
 from model.Standard import train_with_standard_loss
 from model.Positive_Eigenvalues import PositiveEigenvaluesTrainer
@@ -23,7 +27,67 @@ from model.UnionNET import UnionNET
 from model.GNN_Cleaner import GNNCleanerTrainer
 from model.ERASE import ERASETrainer
 from model.GNNGuard import GNNGuardTrainer
-from model.GNNs import GCN, GIN, GAT, GATv2, GPS
+from model.gnns import GCN, GIN, GAT, GATv2, GPS
+
+def make_random_splits(num_nodes: int,
+                       train_ratio: float = 0.8,
+                       val_ratio: float = 0.1,
+                       seed: int = 42,
+                       device=None):
+    """
+    Create boolean train/val/test masks for node-level tasks.
+    Deterministic w.r.t. seed.
+    """
+    if train_ratio + val_ratio >= 1.0:
+        raise ValueError("train_ratio + val_ratio must be < 1.0")
+
+    g = torch.Generator()
+    g.manual_seed(int(seed))
+
+    perm = torch.randperm(num_nodes, generator=g)
+    n_train = int(num_nodes * train_ratio)
+    n_val = int(num_nodes * val_ratio)
+    n_test = num_nodes - n_train - n_val
+
+    train_idx = perm[:n_train]
+    val_idx = perm[n_train:n_train + n_val]
+    test_idx = perm[n_train + n_val:]
+
+    dev = device if device is not None else torch.device("cpu")
+
+    train_mask = torch.zeros(num_nodes, dtype=torch.bool, device=dev)
+    val_mask   = torch.zeros(num_nodes, dtype=torch.bool, device=dev)
+    test_mask  = torch.zeros(num_nodes, dtype=torch.bool, device=dev)
+
+    train_mask[train_idx] = True
+    val_mask[val_idx] = True
+    test_mask[test_idx] = True
+
+    return train_mask, val_mask, test_mask
+
+
+def ensure_splits(data,
+                  seed: int,
+                  split_id: int = 0,
+                  train_ratio: float = 0.8,
+                  val_ratio: float = 0.1):
+    """
+    Ensure data has 1D train/val/test masks.
+    If they do not exist, create them.
+    If they exist and are 2D, pick split_id.
+    """
+    num_nodes = data.num_nodes
+    device = data.x.device if hasattr(data, "x") and data.x is not None else torch.device("cpu")
+
+    train_mask, val_mask, test_mask = make_random_splits(
+        num_nodes=num_nodes,
+        train_ratio=train_ratio,
+        val_ratio=val_ratio,
+        seed=seed,
+        device=device
+    )
+   
+    return train_mask, val_mask, test_mask
 
 # Noises
 def simple_uniform_noise(labels, n_classes, noise_rate, seed):
@@ -250,7 +314,19 @@ def load_dataset(name, root="./data"):
     elif name_lower in ["amazon-ratings", "tolokers", "roman-empire", "minesweeper", "questions"]:
         from torch_geometric.datasets import HeterophilousGraphDataset
         dataset = HeterophilousGraphDataset(root=f"{root}/{name}", name=name, transform=NormalizeFeatures())
+        def _fix_split_masks(data):
+            for key in ["train_mask", "val_mask", "test_mask"]:
+                if hasattr(data, key):
+                    m = getattr(data, key)
+                    if m is None:
+                        continue
+                    if m.dim() == 2:
+                        m = m.any(dim=1)
+                    setattr(data, key, m.bool())
+            return data
+
         data = dataset[0]
+        data = _fix_split_masks(data)
         return data, dataset.num_classes
     
     elif name_lower == "dblp":
@@ -276,7 +352,14 @@ def load_dataset(name, root="./data"):
         
         dataset_dir = os.path.join(root, name)
         if not os.path.exists(dataset_dir):
-            raise FileNotFoundError(f"GraphLAND dataset {name} not found in {dataset_dir}. ")
+            url = f"https://zenodo.org/records/16895532/files/{name_lower}.zip"
+            response = requests.get(url, stream=True)
+            response.raise_for_status()
+
+            with zipfile.ZipFile(BytesIO(response.content)) as z:
+                z.extractall("data")
+            
+            #raise FileNotFoundError(f"GraphLAND dataset {name} not found in {dataset_dir}. ")
         
         edgelist = pd.read_csv(os.path.join(dataset_dir, "edgelist.csv"))
         edge_index = torch.tensor(edgelist.values.T, dtype=torch.long)
@@ -284,10 +367,10 @@ def load_dataset(name, root="./data"):
         features_filled = features.fillna(0)
 
         x = torch.tensor(features_filled.values, dtype=torch.float)
-        targets = pd.read_csv(os.path.join(dataset_dir, "targets.csv"))
-        targets_values = targets.values.squeeze()
-        valid_label_mask = ~pd.isna(targets_values)
-        targets_values = pd.Series(targets_values).fillna(-1).values
+        targets_series = pd.read_csv(os.path.join(dataset_dir, "targets.csv")).iloc[:, -1]
+        targets_values = targets_series.fillna(-1).to_numpy()
+
+        valid_label_mask = targets_values != -1
         y = torch.tensor(targets_values, dtype=torch.long)
         
         valid_labels = targets_values[valid_label_mask]
@@ -313,8 +396,82 @@ def load_dataset(name, root="./data"):
     
     elif name_lower in ["pascalvoc-sp", "coco-sp"]:
         from torch_geometric.datasets import LRGBDataset
-        dataset = LRGBDataset(root=f"{root}/{name}", name=name, split='train', transform=NormalizeFeatures())
-        return dataset, dataset.num_classes
+        name_lower = name.lower()
+        from torch_geometric.datasets import LRGBDataset
+        dataset_train = LRGBDataset(root=root, name=name, split='train')
+        dataset_val   = LRGBDataset(root=root, name=name, split='val')
+        dataset_test  = LRGBDataset(root=root, name=name, split='test')
+
+        # Total nodes across ALL graphs (train+val+test)
+        total_nodes = 0
+        for ds in (dataset_train, dataset_val, dataset_test):
+            for g in ds:
+                total_nodes += g.num_nodes
+
+        # Global masks (length == total_nodes)
+        train_mask = torch.zeros(total_nodes, dtype=torch.bool)
+        val_mask   = torch.zeros(total_nodes, dtype=torch.bool)
+        test_mask  = torch.zeros(total_nodes, dtype=torch.bool)
+
+        x_list, edge_index_list, y_list = [], [], []
+        offset = 0
+
+        # Helper to append graphs and set the correct split mask ranges
+        def add_split(split_dataset, split_name):
+            nonlocal offset
+            for g in split_dataset:
+                n = g.num_nodes
+
+                # Append node features and labels
+                x_list.append(g.x)
+                y_list.append(g.y)
+
+                # Shift edges by current offset and append
+                edge_index_list.append(g.edge_index + offset)
+
+                # Mark the corresponding node range in the proper mask
+                if split_name == "train":
+                    train_mask[offset:offset+n] = True
+                elif split_name == "val":
+                    val_mask[offset:offset+n] = True
+                elif split_name == "test":
+                    test_mask[offset:offset+n] = True
+                else:
+                    raise ValueError(f"Unknown split_name: {split_name}")
+
+                offset += n
+
+        add_split(dataset_train, "train")
+        add_split(dataset_val, "val")
+        add_split(dataset_test, "test")
+
+        # Concatenate everything into a single big graph
+        x = torch.cat(x_list, dim=0)
+        edge_index = torch.cat(edge_index_list, dim=1)
+        y = torch.cat(y_list, dim=0)
+
+        # Safety checks
+        assert x.size(0) == total_nodes
+        assert y.size(0) == total_nodes
+        assert train_mask.size(0) == total_nodes
+        assert val_mask.size(0) == total_nodes
+        assert test_mask.size(0) == total_nodes
+        assert (train_mask & val_mask).sum().item() == 0
+        assert (train_mask & test_mask).sum().item() == 0
+        assert (val_mask & test_mask).sum().item() == 0
+
+        data = Data(
+            x=x,
+            edge_index=edge_index,
+            y=y,
+            train_mask=train_mask,
+            val_mask=val_mask,
+            test_mask=test_mask
+        )
+
+        num_classes = int(y.max().item() + 1)
+        return data, num_classes
+
     
     else:
         raise ValueError(f"Dataset {name} not supported. Supported datasets: cora, citeseer, pubmed, amazon-ratings, tolokers, roman-empire, minesweeper, questions, dblp, amazon-computers, amazon-photo, blogcatalog, flickr, hm-categories, pokec-regions, web-topics, tolokers-2, city-reviews, artnet-exp, web-fraud, pattern, cluster, pascalvoc-sp, coco-sp")
@@ -364,6 +521,101 @@ def get_model(model_name, in_channels, hidden_channels, out_channels, **kwargs):
     
     return model_cls(in_channels, hidden_channels, out_channels, **filtered_kwargs)
 
+import inspect
+import torch
+from torch.profiler import profile, ProfilerActivity
+
+def _forward_call(model, data):
+    """
+    Call model forward with the correct signature.
+
+    Tries in this order:
+    1) model(data)
+    2) model(data.x)
+    3) model(data.x, data.edge_index)
+    """
+    # Try to inspect the forward signature (best effort)
+    try:
+        sig = inspect.signature(model.forward)
+        # Number of parameters excluding self
+        n_args = len(sig.parameters) - 1
+    except Exception:
+        n_args = None
+
+    # If forward seems to take 1 arg (besides self), prefer model(data)
+    if n_args == 1:
+        try:
+            return model(data)
+        except TypeError:
+            pass
+
+    # Fallback attempts (works across different model styles)
+    try:
+        return model(data)
+    except TypeError:
+        pass
+
+    try:
+        return model(data.x)
+    except TypeError:
+        pass
+
+    # Most PyG-style GNNs: forward(x, edge_index)
+    return model(data.x, data.edge_index)
+
+def _reduce_oversmoothing(oversmoothing_dict):
+    return {
+        k: float(np.mean(v)) if isinstance(v, (list, tuple, np.ndarray)) else float(v)
+        for k, v in oversmoothing_dict.items()
+    }
+
+
+def profile_model_flops(model, data, device, n_warmup=1, n_iters=1):
+    """
+    Profile FLOPs with torch.profiler (forward pass).
+    """
+    model.eval()
+
+    activities = [ProfilerActivity.CPU]
+    if device.type == "cuda":
+        activities.append(ProfilerActivity.CUDA)
+
+    # Warmup outside profiler
+    with torch.no_grad():
+        for _ in range(n_warmup):
+            _ = _forward_call(model, data)
+        if device.type == "cuda":
+            torch.cuda.synchronize()
+
+    with profile(
+        activities=activities,
+        record_shapes=True,
+        profile_memory=False,
+        with_stack=False,
+        with_flops=True,
+    ) as prof:
+        with torch.no_grad():
+            for _ in range(n_iters):
+                _ = _forward_call(model, data)
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+
+    total_flops = 0
+    for e in prof.key_averages():
+        fl = getattr(e, "flops", None)
+        if fl:
+            total_flops += fl
+
+    table = prof.key_averages().table(
+        sort_by="self_cuda_time_total" if device.type == "cuda" else "self_cpu_time_total",
+        row_limit=15
+    )
+
+    return {"total_flops": int(total_flops), "profiler_table": table}
+
+
+
+
 def initialize_experiment(config, run_id=1):
 
     # Seed e device
@@ -373,14 +625,25 @@ def initialize_experiment(config, run_id=1):
 
     # Dataset
     data, num_classes = load_dataset(config['dataset'].get('name', 'cora'), root=config['dataset'].get('root', './data'))
+    if not isinstance(data, Data):
+        data = data[0]
     data = data.to(device)
-
-    train_mask = data.train_mask
-    val_mask = data.val_mask
-    test_mask = data.test_mask
+    if not hasattr(data, "train_mask"):
+        train_mask, val_mask, test_mask = ensure_splits(data, config["seed"])
+        data.train_mask = train_mask
+        data.val_mask = val_mask
+        data.test_mask = test_mask
+    elif data.train_mask.dim() > 1 and data.train_mask.shape[1] > 1:
+        train_mask = data.train_mask[:,0]
+        val_mask = data.val_mask[:,0]
+        test_mask = data.test_mask[:,0]
+    else:
+        train_mask = data.train_mask
+        val_mask = data.val_mask
+        test_mask = data.test_mask
 
     data.y_original = data.y.clone()
-
+    
     train_labels = data.y[train_mask]
     train_features = data.x[train_mask] if config['noise'].get('type', 'clean') == 'instance' else None
     train_indices = train_mask.nonzero(as_tuple=True)[0]
@@ -422,6 +685,9 @@ def initialize_experiment(config, run_id=1):
         self_loop=config['model'].get('self_loop', True)
     ).to(device)
 
+    flops_info = profile_model_flops(backbone_model, data_for_training, device)
+
+
     # training parameters
     trainer_params = config.get('training', {})
     lr = float(trainer_params.get('lr', 0.01))
@@ -447,7 +713,8 @@ def initialize_experiment(config, run_id=1):
         'epochs': epochs,
         'patience': patience,
         'method': method,
-        'seed': seed
+        'seed': seed,
+        'flops_info' : flops_info,
     }
 
 def run_experiment(config, run_id=1):
@@ -469,6 +736,7 @@ def run_experiment(config, run_id=1):
     patience = init_data['patience']
     method = init_data['method']
     seed = init_data['seed']
+    flops_info = init_data['flops_info']
 
     # Standard Training
     if method == 'standard':
@@ -486,7 +754,9 @@ def run_experiment(config, run_id=1):
             'f1': result['f1'],
             'precision': result['precision'],
             'recall': result['recall'],
-            'oversmoothing': result['oversmoothing']
+            'oversmoothing': result['oversmoothing'],
+            'train_oversmoothing': result['train_oversmoothing'],
+            'flops_info' : flops_info,
         }
     
     # Positive eigenvalues Training
@@ -515,7 +785,9 @@ def run_experiment(config, run_id=1):
             'f1': torch.tensor(result['f1']),
             'precision': torch.tensor(result['precision']),
             'recall': torch.tensor(result['recall']),
-            'oversmoothing': result['oversmoothing']
+            'oversmoothing': result['oversmoothing'],
+            'train_oversmoothing': result['train_oversmoothing'],
+            'flops_info' : flops_info,
         }
 
     # GCOD Training
@@ -546,7 +818,9 @@ def run_experiment(config, run_id=1):
             'f1': result['f1'],
             'precision': result['precision'],
             'recall': result['recall'],
-            'oversmoothing': result['oversmoothing']
+            'oversmoothing': result['oversmoothing'],
+            'train_oversmoothing': result['train_oversmoothing'],
+            'flops_info' : flops_info,
         }
     
     # NRGNN Training
@@ -562,7 +836,7 @@ def run_experiment(config, run_id=1):
         }
         
         nrgnn_model = NRGNN(nrgnn_config, device, base_model=backbone_model)
-        nrgnn_model.fit(data_for_training.x.to(device), to_scipy_sparse_matrix(data_for_training.edge_index, num_nodes=data_for_training.x.size(0)), data_for_training.y.to(device), train_mask.nonzero(as_tuple=True)[0].cpu().numpy(), val_mask.nonzero(as_tuple=True)[0].cpu().numpy())
+        train_oversmoothing = nrgnn_model.fit(data_for_training.x.to(device), to_scipy_sparse_matrix(data_for_training.edge_index, num_nodes=data_for_training.x.size(0)), data_for_training.y.to(device), train_mask.nonzero(as_tuple=True)[0].cpu().numpy(), val_mask.nonzero(as_tuple=True)[0].cpu().numpy())
         
         test_results = nrgnn_model.test(test_mask.nonzero(as_tuple=True)[0].cpu().numpy())
         
@@ -571,7 +845,9 @@ def run_experiment(config, run_id=1):
             'f1': test_results['test_f1'],
             'precision': test_results['test_precision'],
             'recall': test_results['test_recall'],
-            'oversmoothing': test_results['test_oversmoothing']
+            'oversmoothing': test_results['test_oversmoothing'],
+            'train_oversmoothing': train_oversmoothing,
+            'flops_info' : flops_info,
         }
 
     # PI-GNN Training
@@ -597,14 +873,16 @@ def run_experiment(config, run_id=1):
         
         pi_gnn_model = PiGnnModel(backbone_gnn=backbone_model, supplementary_decoder=link_decoder)
         
-        test_results = trainer.train_model(pi_gnn_model, data_for_training, backbone_model, get_model)
+        test_results = trainer.train_model(pi_gnn_model, data_for_training, config, get_model)
         
         return {
             'accuracy': torch.tensor(test_results['accuracy']),
             'f1': torch.tensor(test_results['f1']),
             'precision': torch.tensor(test_results['precision']),
             'recall': torch.tensor(test_results['recall']),
-            'oversmoothing': test_results['oversmoothing']
+            'oversmoothing': test_results['oversmoothing'],
+            'train_oversmoothing': test_results['train_oversmoothing'],
+            'flops_info' : flops_info,
         }
 
     # CR-GNN Training
@@ -629,13 +907,15 @@ def run_experiment(config, run_id=1):
         )
         
         test_results = cr_gnn_model.train_model(backbone_model, data_for_training, backbone_model, get_model)
-        
+
         return {
             'accuracy': torch.tensor(test_results['accuracy']),
             'f1': torch.tensor(test_results['f1']),
             'precision': torch.tensor(test_results['precision']),
             'recall': torch.tensor(test_results['recall']),
-            'oversmoothing': test_results['oversmoothing']
+            'oversmoothing': test_results['oversmoothing'],
+            'train_oversmoothing': _reduce_oversmoothing(test_results['train_oversmoothing']),
+            'flops_info' : flops_info,
         }
 
     # Community Defense Training
@@ -669,12 +949,16 @@ def run_experiment(config, run_id=1):
         print("Defense completed!")
         print(f"Test Accuracy: {test_results['accuracy']:.4f}")
 
+
+        print("test_results['train_oversmoothing']", test_results['train_oversmoothing'])
         return {
             'accuracy': torch.tensor(test_results['accuracy']),
             'f1': torch.tensor(test_results['f1']),
             'precision': torch.tensor(test_results['precision']),
             'recall': torch.tensor(test_results['recall']),
-            'oversmoothing': test_results['oversmoothing']
+            'oversmoothing': test_results['oversmoothing'],
+            'train_oversmoothing': _reduce_oversmoothing(test_results['train_oversmoothing']),
+            'flops_info' : flops_info
         }
 
     # RTGNN Training
@@ -690,7 +974,7 @@ def run_experiment(config, run_id=1):
             data_for_training=data_for_training
         ).to(device)
 
-        rtgnn_trainer.train_model()
+        results = rtgnn_trainer.train_model()
 
         clean_labels = data.y_original.cpu().numpy()
         test_results = rtgnn_trainer.evaluate_final_performance(clean_labels=clean_labels)
@@ -706,7 +990,9 @@ def run_experiment(config, run_id=1):
             'f1': torch.tensor(test_results['f1']),
             'precision': torch.tensor(test_results['precision']),
             'recall': torch.tensor(test_results['recall']),
-            'oversmoothing': test_results['oversmoothing']
+            'oversmoothing': test_results['oversmoothing'],
+            'flops_info' : flops_info,
+            'train_oversmoothing' : results
         }
     
     # GraphCleaner Training 
@@ -747,7 +1033,9 @@ def run_experiment(config, run_id=1):
             'f1': result['f1'],
             'precision': result['precision'],
             'recall': result['recall'],
-            'oversmoothing': result['oversmoothing']
+            'oversmoothing': result['oversmoothing'],
+            'train_oversmoothing': result['train_oversmoothing'],
+            'flops_info' : flops_info,
         }
     
     # UnionNET Training
@@ -773,7 +1061,9 @@ def run_experiment(config, run_id=1):
             'f1': torch.tensor(test_results['f1']),
             'precision': torch.tensor(test_results['precision']),
             'recall': torch.tensor(test_results['recall']),
-            'oversmoothing': test_results['oversmoothing']
+            'oversmoothing': test_results['oversmoothing'],
+            'train_oversmoothing': test_results['train_oversmoothing'],
+            'flops_info' : flops_info,
         }
 
     # GNN Cleaner Training
@@ -808,7 +1098,9 @@ def run_experiment(config, run_id=1):
             'f1': torch.tensor(test_results['f1']),
             'precision': torch.tensor(test_results['precision']),
             'recall': torch.tensor(test_results['recall']),
-            'oversmoothing': test_results['oversmoothing']
+            'oversmoothing': test_results['oversmoothing'],
+            'train_oversmoothing': test_results['train_oversmoothing'],
+            'flops_info' : flops_info,
         }
     
     # ERASE Training
@@ -860,7 +1152,9 @@ def run_experiment(config, run_id=1):
             'f1': torch.tensor(test_results['f1']),
             'precision': torch.tensor(test_results['precision']),
             'recall': torch.tensor(test_results['recall']),
-            'oversmoothing': test_results['oversmoothing']
+            'oversmoothing': test_results['oversmoothing'],
+            'train_oversmoothing': test_results['train_oversmoothing'],
+            'flops_info' : flops_info,
         }
     
     # GNNGuard Training
@@ -887,7 +1181,7 @@ def run_experiment(config, run_id=1):
 
         gnnguard_trainer.prepare_data()
 
-        gnnguard_trainer.train_model(
+        train_oversmoothing = gnnguard_trainer.train_model(
             node_features=data_for_training.x,
             node_labels=data_for_training.y,
             max_epochs=epochs,
@@ -902,7 +1196,9 @@ def run_experiment(config, run_id=1):
             'f1': torch.tensor(test_results['f1']),
             'precision': torch.tensor(test_results['precision']),
             'recall': torch.tensor(test_results['recall']),
-            'oversmoothing': test_results['oversmoothing']
+            'oversmoothing': test_results['oversmoothing'],
+            'train_oversmoothing': train_oversmoothing,
+            'flops_info' : flops_info,
         }
     
     else:

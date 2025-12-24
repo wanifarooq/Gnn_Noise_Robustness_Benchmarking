@@ -7,6 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from sklearn.metrics import f1_score, precision_score, recall_score
+from collections import defaultdict
 
 from model.evaluation import OversmoothingMetrics
 
@@ -71,6 +72,7 @@ def train_with_standard_loss(
     debug=True
 ):
 
+    per_epochs_oversmoothing = defaultdict(list)
     model.to(device)
     optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
 
@@ -117,7 +119,7 @@ def train_with_standard_loss(
             break
 
         if debug and epoch % 20 == 0:
-
+            
             train_oversmoothing = _compute_oversmoothing_for_mask(
                 oversmoothing_evaluator, out, data.edge_index, data.train_mask, data.y
             )
@@ -125,6 +127,8 @@ def train_with_standard_loss(
                 oversmoothing_evaluator, out, data.edge_index, data.val_mask, data.y
             )
 
+            for key, value in train_oversmoothing.items():
+                per_epochs_oversmoothing[key].append(value)
             train_de = train_oversmoothing['EDir']
             train_de_traditional = train_oversmoothing['EDir_traditional']
             train_eproj = train_oversmoothing['EProj']
@@ -191,7 +195,8 @@ def train_with_standard_loss(
         'f1': torch.tensor(test_f1),
         'precision': torch.tensor(test_precision),
         'recall': torch.tensor(test_recall),
-        'oversmoothing': final_test_oversmoothing
+        'oversmoothing': final_test_oversmoothing,
+        'train_oversmoothing' : per_epochs_oversmoothing
     }
 
     return results

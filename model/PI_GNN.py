@@ -6,6 +6,7 @@ import numpy as np
 from sklearn.metrics import f1_score, precision_score, recall_score
 from copy import deepcopy
 import time
+from collections import defaultdict
 
 from model.evaluation import OversmoothingMetrics
 
@@ -252,17 +253,16 @@ class PiGnnTrainer:
             return comprehensive_metrics, train_oversmoothing, val_oversmoothing, test_oversmoothing
 
     def train_model(self, model, graph_data, config=None, model_factory_function=None):
-
+        per_epochs_oversmoothing = defaultdict(list)
         training_start_time = time.time()
         
         graph_data = graph_data.to(self.device)
         model = model.to(self.device)
         num_output_classes = graph_data.y.max().item() + 1
-
         # Create mutual information model
         if model_factory_function and config:
             mi_backbone_gnn = model_factory_function(
-                model_name=config['model_name'],
+                model_name=config['model']['name'],
                 in_channels=graph_data.num_features,
                 hidden_channels=config.get('hidden_channels', 64),
                 out_channels=num_output_classes,
@@ -278,8 +278,8 @@ class PiGnnTrainer:
                 backbone_gnn=mi_backbone_gnn, 
                 supplementary_decoder=mi_link_decoder
             ).to(self.device)
-            main_lr = self._determine_learning_rate(config, config['model_name'])
-            mi_lr = self._determine_learning_rate(config, config['model_name'])
+            main_lr = self._determine_learning_rate(config, config['model']['name'])
+            mi_lr = self._determine_learning_rate(config, config['model']['name'])
         else:
             mutual_information_model = PiGnnModel(
                 backbone_gnn=type(model.backbone_gnn)(
@@ -396,8 +396,9 @@ class PiGnnTrainer:
 
             # logging
             if current_epoch % 20 == 0:
-                self._log_training_progress(current_epoch, current_metrics, train_oversmoothing, val_oversmoothing)
-
+                results = self._log_training_progress(current_epoch, current_metrics, train_oversmoothing, val_oversmoothing)
+                for key, value in results.items():
+                    per_epochs_oversmoothing[key].append(value)
             # Early stopping
             if current_metrics['val_loss'] < best_validation_loss:
                 best_validation_loss = current_metrics['val_loss']
@@ -436,7 +437,8 @@ class PiGnnTrainer:
             'oversmoothing': final_test_oversmoothing if final_test_oversmoothing is not None else {
                 'NumRank': 0.0, 'Erank': 0.0, 'EDir': 0.0,
                 'EDir_traditional': 0.0, 'EProj': 0.0, 'MAD': 0.0
-            }
+            },
+            'train_oversmoothing' : per_epochs_oversmoothing
         }
 
     def _log_training_progress(self, epoch, metrics, train_oversmoothing, val_oversmoothing):
@@ -464,6 +466,7 @@ class PiGnnTrainer:
               f"Train MAD: {train_mad:.4f}, Val MAD: {val_mad:.4f} | "
               f"Train NumRank: {train_num_rank:.4f}, Val NumRank: {val_num_rank:.4f} | "
               f"Train Erank: {train_effective_rank:.4f}, Val Erank: {val_effective_rank:.4f}")
+        return train_oversmoothing
 
     def _log_final_results(self, training_time, final_metrics, train_oversmoothing, val_oversmoothing, test_oversmoothing):
 

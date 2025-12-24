@@ -1,17 +1,155 @@
+# seed: 42
+# device: cuda
+
+# dataset:
+#   name: £[dblp,amazon-computers,hm-categories,web-fraud,tolokers-2,roman-empire,questions]
+#   #cora, citeseer, pubmed, amazon-ratings, tolokers, roman-empire, minesweeper, questions, dblp, amazon-computers, amazon-photo, blogcatalog, flickr, hm-categories, pokec-regions, web-topics, tolokers-2, city-reviews, artnet-exp, web-fraud, pattern, cluster, pascalvoc-sp, coco-sp
+#   root: data
+  
+# noise:
+#   type: £[uniform, clean, random, pair, flip] #uniform_simple # clean, uniform, uniform_simple, random, pair, random_pair, flip, uniform_mix, instance, deterministic
+#   rate: 0.2
+#   seed: 42
+
+# model:
+#   name: £[gcn,gat,gps] #gcn # gcn, gin, gat, gatv2, gps
+#   hidden_channels: 16
+#   n_layers: 2
+#   dropout: 0.5
+#   self_loop: true # GCN
+#   mlp_layers: 1 # GIN
+#   train_eps: false # GIN
+#   heads: 8 # GAT, GATv2, GPS
+#   use_pe: false # GPS: positional encoding
+#   pe_dim: 8 # GPS: PE dimension
+
+# training:
+#   method: £[standard,positive_eigenvalues,gcod,nrgnn,pi_gnn,cr_gnn,community_defense,rtgnn,graphcleaner,unionnet,gnn_cleaner,erase,gnnguard]
+#   # standard, positive_eigenvalues, gcod, nrgnn, pi_gnn, cr_gnn, community_defense, rtgnn, graphcleaner, unionnet, gnn_cleaner, erase, gnnguard
+#   lr: 0.001
+#   weight_decay: 5e-4
+#   epochs: 100
+#   patience: 20
+
+# # Standard training parameters
+# #standard_params:
+
+# # Positive Eigenvalues parameters
+# positive_eigenvalues_params:
+#   batch_size: 32
+
+# # GCOD parameters
+# gcod_params:
+#   batch_size: 32
+#   uncertainty_lr: 1.0
+
+# # NRGNN parameters
+# nrgnn_params:
+#   edge_hidden: 16
+#   n_p: 10
+#   p_u: 0.7
+#   alpha: 0.05
+#   beta: 1.0
+#   t_small: 0.1
+#   n_n: 50
+
+# # PI-GNN parameters
+# pi_gnn_params:
+#   start_epoch: 50
+#   miself: false
+#   norm: null
+#   vanilla: false
+
+# # CR-GNN parameters
+# cr_gnn_params:
+#   T: 2
+#   tau: 0.6
+#   p: 0.9
+#   alpha: 0.2
+#   beta: 0.9
+#   pr: 0.3
+
+# # Community Defense parameters
+# community_defense_params:
+#   community_method: louvain # louvain, spectral
+#   num_communities: null # auto-detect if null
+#   lambda_comm: 1.0
+#   pos_weight: 2.0
+#   neg_weight: 2.0
+#   margin: 1.5
+#   num_neg_samples: 3
+
+# # RTGNN parameters
+# rtgnn_params:
+#   edge_hidden: 16
+#   co_lambda: 0.1
+#   alpha: 0.3
+#   th: 0.8
+#   K: 50
+#   tau: 0.05
+#   n_neg: 100
+
+# # GraphCleaner parameters
+# graphcleaner_params:
+#   k: 5
+#   sample_rate: 0.5
+#   max_iter_classifier: 5000
+#   held_split: valid
+
+# # UnionNET parameters
+# unionnet_params:
+#   k: 10
+#   alpha: 0.5
+#   beta: 1
+#   feat_norm: true
+
+# # GNN Cleaner parameters
+# gnn_cleaner_params:
+#   label_propagation_iterations: 50
+#   similarity_epsilon: 1e-8
+
+# # ERASE parameters
+# erase_params:
+#   n_embedding: 512
+#   n_heads: 8
+#   use_layer_norm: false
+#   use_residual: false
+#   use_residual_linear: false
+    
+#   # MCR2 loss parameters
+#   gam1: 1.0
+#   gam2: 2.0
+#   eps: 0.05
+    
+#   # label propagation parameters
+#   alpha: 0.6
+#   beta: 0.6
+#   T: 3
+
+# # GNNGuard parameters
+# gnnguard_params:
+#   P0: 0.5
+#   K: 2
+#   D2: 16
+#   attention: True
+
+# force: True
+
 seed: 42
 device: cuda
 
 dataset:
-  name: cora #cora, citeseer, pubmed, amazon-ratings, tolokers, roman-empire, minesweeper, questions, dblp, amazon-computers, amazon-photo, blogcatalog, flickr, hm-categories, pokec-regions, web-topics, tolokers-2, city-reviews, artnet-exp, web-fraud, pattern, cluster, pascalvoc-sp, coco-sp
-  root: /data
+  name: cora
+  #cora, citeseer, pubmed, amazon-ratings, tolokers, roman-empire, minesweeper, questions, dblp, amazon-computers, amazon-photo, blogcatalog, flickr, hm-categories, pokec-regions, web-topics, tolokers-2, city-reviews, artnet-exp, web-fraud, pattern, cluster, pascalvoc-sp, coco-sp
+  root: data
   
 noise:
-  type: uniform # clean, uniform, uniform_simple, random, pair, random_pair, flip, uniform_mix, instance, deterministic
+  type: clean #uniform_simple # clean, uniform, uniform_simple, random, pair, random_pair, flip, uniform_mix, instance, deterministic
   rate: 0.2
   seed: 42
 
 model:
-  name: gcn # gcn, gin, gat, gatv2, gps
+  name: gcn #gcn # gcn, gin, gat, gatv2, gps
   hidden_channels: 16
   n_layers: 2
   dropout: 0.5
@@ -23,11 +161,12 @@ model:
   pe_dim: 8 # GPS: PE dimension
 
 training:
-  method: standard # standard, positive_eigenvalues, gcod, nrgnn, pi_gnn, cr_gnn, community_defense, rtgnn, graphcleaner, unionnet, gnn_cleaner, erase, gnnguard
+  method: cr_gnn
+  # standard, positive_eigenvalues, gcod, nrgnn, pi_gnn, cr_gnn, community_defense, rtgnn, graphcleaner, unionnet, gnn_cleaner, erase, gnnguard
   lr: 0.001
   weight_decay: 5e-4
-  epochs: 8000
-  patience: 200
+  epochs: 100
+  patience: 20
 
 # Standard training parameters
 #standard_params:
@@ -130,3 +269,5 @@ gnnguard_params:
   K: 2
   D2: 16
   attention: True
+
+force: True

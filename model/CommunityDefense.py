@@ -9,6 +9,7 @@ import time
 import scipy
 from torch_geometric.utils import from_scipy_sparse_matrix, subgraph
 from torch_geometric.data import Data as PyGData
+from collections import defaultdict
 from sklearn.metrics import accuracy_score, f1_score
 try:
     import networkx as nx
@@ -335,6 +336,7 @@ class GraphCommunityDefenseTrainer:
                                    enable_debug: bool = True):
 
         training_start_time = time.time()
+        per_epochs_oversmoothing = defaultdict(list)
         
         model = gnn_model.to(self.device)
         optimizer = torch.optim.Adam(
@@ -453,6 +455,9 @@ class GraphCommunityDefenseTrainer:
                             f"Erank: Train {train_metrics['Erank']:.4f}, Val {val_metrics['Erank']:.4f}"
                         )
 
+                        for key,value in train_metrics.items():
+                            per_epochs_oversmoothing[key].append(value)
+
                 # Early stopping
                 if validation_loss < best_validation_loss:
                     best_validation_loss = validation_loss
@@ -515,7 +520,8 @@ class GraphCommunityDefenseTrainer:
                 'f1': test_f1_score,
                 'precision': test_precision,
                 'recall': test_recall,
-                'oversmoothing': oversmoothing_results
+                'oversmoothing': oversmoothing_results,
+                'train_oversmoothing' : per_epochs_oversmoothing
             }
             
             training_duration = time.time() - training_start_time

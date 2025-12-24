@@ -7,6 +7,7 @@ from copy import deepcopy
 from torch_geometric.loader import NeighborLoader
 import matplotlib.pyplot as plt
 import numpy as np
+from collections import defaultdict
 
 from model.evaluation import OversmoothingMetrics
 
@@ -611,6 +612,7 @@ class GCODTrainer:
         plt.show()
 
     def train_full_model(self):
+        per_epochs_oversmoothing = defaultdict(list)
         if self.debug:
             print(f"Starting GCOD training for {self.total_epochs} epochs")
             print(f"Training samples: {self.data.train_mask.sum().item()}")
@@ -673,6 +675,9 @@ class GCODTrainer:
                     f"L1: {l1_loss:.4f}, L2: {l2_loss:.4f}, L3: {l3_loss:.4f}")
                 print(f"Uncertainty Stats - Mean: {u_mean:.4f}, Std: {u_std:.4f}, "
                     f"Min: {u_min:.4f}, Max: {u_max:.4f}")
+
+                for key, value in train_oversmoothing.items():
+                    per_epochs_oversmoothing[key].append(value)
 
                 train_os = oversmoothing_metrics.get('train', {})
                 train_edir = train_os.get('EDir', 0.0)
@@ -757,5 +762,6 @@ class GCODTrainer:
             'oversmoothing': test_os if test_os else {
                 'EDir': 0, 'EDir_traditional': 0, 'EProj': 0,
                 'MAD': 0, 'NumRank': 0, 'Erank': 0
-            }
+            },
+            'train_oversmoothing' : per_epochs_oversmoothing
         }

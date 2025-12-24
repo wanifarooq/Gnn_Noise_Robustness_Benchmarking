@@ -9,6 +9,7 @@ from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_sc
 from typing import Tuple, Dict, Any
 import copy
 from scipy.sparse import csr_matrix
+from collections import defaultdict
 
 from model.evaluation import OversmoothingMetrics
 
@@ -364,6 +365,7 @@ class ERASETrainer:
         
     def train_erase_model(self, graph_data, enable_debug_output=False):
         # Create enhanced model
+        
         enhanced_model = self._create_enhanced_gnn_model()
         
         noisy_node_labels = graph_data.y
@@ -432,7 +434,7 @@ class ERASETrainer:
 
     def _execute_training_loop(self, model, graph_data, optimizer, loss_function, 
                                   adjacency_matrix, semantic_labels_matrix, predicted_labels, debug_mode):
-
+            per_epochs_oversmoothing = defaultdict(list)
             best_validation_accuracy = 0
             best_validation_loss = float('inf')
             best_training_accuracy = 0
@@ -459,6 +461,8 @@ class ERASETrainer:
                 if should_compute_oversmoothing:
                     oversmoothing_metrics_by_split = self._compute_oversmoothing_metrics_for_all_splits(model, graph_data)
                     train_oversmoothing = oversmoothing_metrics_by_split.get('train', {})
+                    for key, value in train_oversmoothing.items():
+                        per_epochs_oversmoothing[key] = value
                     validation_oversmoothing = oversmoothing_metrics_by_split.get('val', {})
                 else:
                     train_oversmoothing = {}
@@ -498,7 +502,8 @@ class ERASETrainer:
                 'f1': final_test_results[1],
                 'precision': final_test_results[2],
                 'recall': final_test_results[3],
-                'oversmoothing': final_oversmoothing_metrics.get('test', {})
+                'oversmoothing': final_oversmoothing_metrics.get('test', {}),
+                'train_oversmoothing': per_epochs_oversmoothing
             }
 
     def _execute_single_training_epoch(self, model, graph_data, optimizer, loss_function, 
