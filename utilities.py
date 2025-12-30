@@ -755,7 +755,7 @@ def run_experiment(config, run_id=1):
             'precision': result['precision'],
             'recall': result['recall'],
             'oversmoothing': result['oversmoothing'],
-            'train_oversmoothing': result['train_oversmoothing'],
+            'train_oversmoothing': _reduce_oversmoothing(result['train_oversmoothing']),
             'flops_info' : flops_info,
         }
     
@@ -786,7 +786,7 @@ def run_experiment(config, run_id=1):
             'precision': torch.tensor(result['precision']),
             'recall': torch.tensor(result['recall']),
             'oversmoothing': result['oversmoothing'],
-            'train_oversmoothing': result['train_oversmoothing'],
+            'train_oversmoothing': _reduce_oversmoothing(result['train_oversmoothing']),
             'flops_info' : flops_info,
         }
 
@@ -811,7 +811,7 @@ def run_experiment(config, run_id=1):
             debug=True
         )
 
-        result = trainer.train_full_model()
+        result, train_oversmoothing = trainer.train_full_model()
         
         return {
             'accuracy': result['accuracy'],
@@ -819,7 +819,7 @@ def run_experiment(config, run_id=1):
             'precision': result['precision'],
             'recall': result['recall'],
             'oversmoothing': result['oversmoothing'],
-            'train_oversmoothing': result['train_oversmoothing'],
+            'train_oversmoothing': train_oversmoothing,
             'flops_info' : flops_info,
         }
     
@@ -846,7 +846,7 @@ def run_experiment(config, run_id=1):
             'precision': test_results['test_precision'],
             'recall': test_results['test_recall'],
             'oversmoothing': test_results['test_oversmoothing'],
-            'train_oversmoothing': train_oversmoothing,
+            'train_oversmoothing': _reduce_oversmoothing(train_oversmoothing),
             'flops_info' : flops_info,
         }
 
@@ -881,7 +881,7 @@ def run_experiment(config, run_id=1):
             'precision': torch.tensor(test_results['precision']),
             'recall': torch.tensor(test_results['recall']),
             'oversmoothing': test_results['oversmoothing'],
-            'train_oversmoothing': test_results['train_oversmoothing'],
+            'train_oversmoothing': _reduce_oversmoothing(test_results['train_oversmoothing']),
             'flops_info' : flops_info,
         }
 
@@ -950,7 +950,6 @@ def run_experiment(config, run_id=1):
         print(f"Test Accuracy: {test_results['accuracy']:.4f}")
 
 
-        print("test_results['train_oversmoothing']", test_results['train_oversmoothing'])
         return {
             'accuracy': torch.tensor(test_results['accuracy']),
             'f1': torch.tensor(test_results['f1']),
@@ -992,7 +991,7 @@ def run_experiment(config, run_id=1):
             'recall': torch.tensor(test_results['recall']),
             'oversmoothing': test_results['oversmoothing'],
             'flops_info' : flops_info,
-            'train_oversmoothing' : results
+            'train_oversmoothing' : _reduce_oversmoothing(results)
         }
     
     # GraphCleaner Training 
@@ -1034,7 +1033,7 @@ def run_experiment(config, run_id=1):
             'precision': result['precision'],
             'recall': result['recall'],
             'oversmoothing': result['oversmoothing'],
-            'train_oversmoothing': result['train_oversmoothing'],
+            'train_oversmoothing': _reduce_oversmoothing(result['train_oversmoothing']),
             'flops_info' : flops_info,
         }
     
@@ -1062,7 +1061,7 @@ def run_experiment(config, run_id=1):
             'precision': torch.tensor(test_results['precision']),
             'recall': torch.tensor(test_results['recall']),
             'oversmoothing': test_results['oversmoothing'],
-            'train_oversmoothing': test_results['train_oversmoothing'],
+            'train_oversmoothing': _reduce_oversmoothing(test_results['train_oversmoothing']),
             'flops_info' : flops_info,
         }
 
@@ -1099,7 +1098,7 @@ def run_experiment(config, run_id=1):
             'precision': torch.tensor(test_results['precision']),
             'recall': torch.tensor(test_results['recall']),
             'oversmoothing': test_results['oversmoothing'],
-            'train_oversmoothing': test_results['train_oversmoothing'],
+            'train_oversmoothing': _reduce_oversmoothing(test_results['train_oversmoothing']),
             'flops_info' : flops_info,
         }
     
@@ -1153,7 +1152,7 @@ def run_experiment(config, run_id=1):
             'precision': torch.tensor(test_results['precision']),
             'recall': torch.tensor(test_results['recall']),
             'oversmoothing': test_results['oversmoothing'],
-            'train_oversmoothing': test_results['train_oversmoothing'],
+            'train_oversmoothing': _reduce_oversmoothing(test_results['train_oversmoothing']),
             'flops_info' : flops_info,
         }
     
@@ -1197,7 +1196,7 @@ def run_experiment(config, run_id=1):
             'precision': torch.tensor(test_results['precision']),
             'recall': torch.tensor(test_results['recall']),
             'oversmoothing': test_results['oversmoothing'],
-            'train_oversmoothing': train_oversmoothing,
+            'train_oversmoothing': _reduce_oversmoothing(train_oversmoothing),
             'flops_info' : flops_info,
         }
     

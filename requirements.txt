@@ -1,8 +1,4 @@
-torch_geometric
-torch==2.6.0
-numpy==1.26.4
 pandas==2.2.3
-scipy==1.15.3
 scikit-learn==1.2.2
 networkx
 nni==3.0
@@ -10,3 +6,5 @@ cleanlab==2.7.1
 json-tricks==3.17.3
 matplotlib==3.7.2
 codecarbon
+
+#pip install --force-reinstall torch-geometric torch-sparse torch-scatter torch-cluster torch-cluster pyg-lib -f https://data.pyg.org/whl/torch-2.4.0+cu124.html

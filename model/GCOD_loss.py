@@ -676,7 +676,7 @@ class GCODTrainer:
                 print(f"Uncertainty Stats - Mean: {u_mean:.4f}, Std: {u_std:.4f}, "
                     f"Min: {u_min:.4f}, Max: {u_max:.4f}")
 
-                for key, value in train_oversmoothing.items():
+                for key, value in oversmoothing_metrics.items():
                     per_epochs_oversmoothing[key].append(value)
 
                 train_os = oversmoothing_metrics.get('train', {})
@@ -710,7 +710,7 @@ class GCODTrainer:
         if self.best_model_state is not None:
             self.model.load_state_dict(self.best_model_state)
 
-        return self._final_model_evaluation()
+        return self._final_model_evaluation(), per_epochs_oversmoothing
     
     def _final_model_evaluation(self):
         test_metrics = self.evaluate_model(self.test_loader, 'test')
@@ -763,5 +763,4 @@ class GCODTrainer:
                 'EDir': 0, 'EDir_traditional': 0, 'EProj': 0,
                 'MAD': 0, 'NumRank': 0, 'Erank': 0
             },
-            'train_oversmoothing' : per_epochs_oversmoothing
         }

@@ -14,7 +14,7 @@ def run_benchmarking(base_folder='results'):
     print("Multi-run experiment with parameter sweep")
     print("-"*50)
 
-    with open("config.yaml", "r", encoding="utf-8") as f:
+    with open("config1.yaml", "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
     print("Loaded configuration file")
 
@@ -73,12 +73,27 @@ def run_benchmarking(base_folder='results'):
             test_recalls.append(float(test_metrics['recall']))
             test_flops.append(float(test_metrics['flops_info']['total_flops']))
 
+            # for key in oversmoothing_metrics:
+            #     if '-Train' in key:
+            #         oversmoothing_metrics[key].append(test_metrics['train_oversmoothing'][key.replace('-Train', '')])
+            #     else:    
+            #         oversmoothing_metrics[key].append(test_metrics['oversmoothing'][key])
+
             for key in oversmoothing_metrics:
                 if '-Train' in key:
-                    oversmoothing_metrics[key].append(test_metrics['train_oversmoothing'][key.replace('-Train', '')])
+                    raw_val = test_metrics['train_oversmoothing'][key.replace('-Train', '')]
                 else:    
-                    oversmoothing_metrics[key].append(test_metrics['oversmoothing'][key])
-
+                    raw_val = test_metrics['oversmoothing'][key]
+                
+                # Check if raw_val is a list (or iterable)
+                if isinstance(raw_val, list) or (isinstance(raw_val, (np.ndarray, torch.Tensor)) and hasattr(raw_val, '__len__') and len(raw_val) > 1):
+                    # It is a list (e.g., layer-wise metrics). Take the mean.
+                    # We map float() first to handle lists of Tensors
+                    clean_mean = np.mean([float(x) for x in raw_val])
+                    oversmoothing_metrics[key].append(float(clean_mean))
+                else:
+                    # It is a single scalar
+                    oversmoothing_metrics[key].append(float(raw_val))
             print(f"Run {run} completed - Test Acc: {float(test_metrics['accuracy']):.4f}, F1: {float(test_metrics['f1']):.4f}")
 
         # Compute mean ± std (store as plain floats to simplify JSON)
