@@ -467,7 +467,7 @@ class ERASETrainer:
                     oversmoothing_metrics_by_split = self._compute_oversmoothing_metrics_for_all_splits(model, graph_data)
                     train_oversmoothing = oversmoothing_metrics_by_split.get('train', {})
                     for key, value in train_oversmoothing.items():
-                        per_epochs_oversmoothing[key] = value
+                        per_epochs_oversmoothing[key].append(value)
                     validation_oversmoothing = oversmoothing_metrics_by_split.get('val', {})
                 else:
                     train_oversmoothing = {}
