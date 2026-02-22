@@ -583,12 +583,10 @@ class ERASETrainer:
         train_f1 = self.cls_evaluator.compute_f1(
             train_predictions,
             true_labels[graph_data.train_mask.cpu()],
-            average='weighted'
         )
         validation_f1 = self.cls_evaluator.compute_f1(
             validation_predictions,
             true_labels[graph_data.val_mask.cpu()],
-            average='weighted'
         )
         
         return train_f1, validation_f1
