@@ -1,5 +1,6 @@
 import os
 import random
+import threading
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -14,6 +15,8 @@ import requests
 import zipfile
 from io import BytesIO
 
+_profiler_lock = threading.Lock()
+
 from model.Standard import train_with_standard_loss
 from model.Positive_Eigenvalues import PositiveEigenvaluesTrainer
 from model.GCOD_loss import GCODTrainer
@@ -27,7 +30,7 @@ from model.UnionNET import UnionNET
 from model.GNN_Cleaner import GNNCleanerTrainer
 from model.ERASE import ERASETrainer
 from model.GNNGuard import GNNGuardTrainer
-from model.files.gnns import GCN, GIN, GAT, GATv2, GPS
+from model.gnns import GCN, GIN, GAT, GATv2, GPS
 
 def make_random_splits(num_nodes: int,
                        train_ratio: float = 0.8,
@@ -574,44 +577,45 @@ def profile_model_flops(model, data, device, n_warmup=1, n_iters=1):
     """
     Profile FLOPs with torch.profiler (forward pass).
     """
-    model.eval()
+    with _profiler_lock:
+        model.eval()
 
-    activities = [ProfilerActivity.CPU]
-    if device.type == "cuda":
-        activities.append(ProfilerActivity.CUDA)
-
-    # Warmup outside profiler
-    with torch.no_grad():
-        for _ in range(n_warmup):
-            _ = _forward_call(model, data)
+        activities = [ProfilerActivity.CPU]
         if device.type == "cuda":
-            torch.cuda.synchronize()
+            activities.append(ProfilerActivity.CUDA)
 
-    with profile(
-        activities=activities,
-        record_shapes=True,
-        profile_memory=False,
-        with_stack=False,
-        with_flops=True,
-    ) as prof:
+        # Warmup outside profiler
         with torch.no_grad():
-            for _ in range(n_iters):
+            for _ in range(n_warmup):
                 _ = _forward_call(model, data)
             if device.type == "cuda":
                 torch.cuda.synchronize()
 
-    total_flops = 0
-    for e in prof.key_averages():
-        fl = getattr(e, "flops", None)
-        if fl:
-            total_flops += fl
+        with profile(
+            activities=activities,
+            record_shapes=True,
+            profile_memory=False,
+            with_stack=False,
+            with_flops=True,
+        ) as prof:
+            with torch.no_grad():
+                for _ in range(n_iters):
+                    _ = _forward_call(model, data)
+                if device.type == "cuda":
+                    torch.cuda.synchronize()
 
-    table = prof.key_averages().table(
-        sort_by="self_cuda_time_total" if device.type == "cuda" else "self_cpu_time_total",
-        row_limit=15
-    )
+        total_flops = 0
+        for e in prof.key_averages():
+            fl = getattr(e, "flops", None)
+            if fl:
+                total_flops += fl
 
-    return {"total_flops": int(total_flops), "profiler_table": table}
+        table = prof.key_averages().table(
+            sort_by="self_cuda_time_total" if device.type == "cuda" else "self_cpu_time_total",
+            row_limit=15
+        )
+
+        return {"total_flops": int(total_flops), "profiler_table": table}
 
 
 
