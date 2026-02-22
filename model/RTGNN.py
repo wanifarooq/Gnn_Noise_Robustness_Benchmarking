@@ -12,7 +12,7 @@ import scipy.sparse as sp
 from collections import defaultdict
 
 from model.gnns import GCN, GIN, GAT, GATv2, GPS
-from model.files.gnnsuation import OversmoothingMetrics, ClassificationMetrics
+from model.evaluation import OversmoothingMetrics, ClassificationMetrics
 
 
 class DualBranchGNNModel(nn.Module):
