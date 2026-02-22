@@ -6,10 +6,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from sklearn.metrics import f1_score, precision_score, recall_score
 from collections import defaultdict
 
-from model.evaluation import OversmoothingMetrics
+from model.evaluation import OversmoothingMetrics, ClassificationMetrics
 
 def _compute_oversmoothing_for_mask(oversmoothing_evaluator, embeddings, edge_index, mask, labels=None):
     try:
@@ -78,6 +77,7 @@ def train_with_standard_loss(
 
     criterion = nn.CrossEntropyLoss()
     oversmoothing_evaluator = OversmoothingMetrics(device=device)
+    cls_evaluator = ClassificationMetrics(average='macro')
 
     best_val_loss = float('inf')
     best_model_state = None
@@ -103,8 +103,8 @@ def train_with_standard_loss(
             pred = out.argmax(dim=1)
             train_acc = (pred[train_idx] == data.y[train_idx]).sum().item() / len(train_idx)
             val_acc = (pred[val_idx] == data.y[val_idx]).sum().item() / len(val_idx)
-            train_f1 = f1_score(data.y[train_idx].cpu(), pred[train_idx].cpu(), average='macro')
-            val_f1 = f1_score(data.y[val_idx].cpu(), pred[val_idx].cpu(), average='macro')
+            train_f1 = cls_evaluator.compute_f1(pred[train_idx], data.y[train_idx])
+            val_f1 = cls_evaluator.compute_f1(pred[val_idx], data.y[val_idx])
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
@@ -156,10 +156,12 @@ def train_with_standard_loss(
         test_idx = data.test_mask.nonzero(as_tuple=True)[0]
         test_loss = criterion(out[test_idx], data.y[test_idx])
         pred = out.argmax(dim=1)
-        test_acc = (pred[test_idx] == data.y[test_idx]).sum().item() / len(test_idx)
-        test_f1 = f1_score(data.y[test_idx].cpu(), pred[test_idx].cpu(), average='macro')
-        test_precision = precision_score(data.y[test_idx].cpu(), pred[test_idx].cpu(), average='macro')
-        test_recall = recall_score(data.y[test_idx].cpu(), pred[test_idx].cpu(), average='macro')
+        
+        test_cls_metrics = cls_evaluator.compute_all_metrics(pred[test_idx], data.y[test_idx])
+        test_acc = test_cls_metrics['accuracy']
+        test_f1 = test_cls_metrics['f1']
+        test_precision = test_cls_metrics['precision']
+        test_recall = test_cls_metrics['recall']
 
         final_train_oversmoothing = _compute_oversmoothing_for_mask(
             oversmoothing_evaluator, out, data.edge_index, data.train_mask, data.y

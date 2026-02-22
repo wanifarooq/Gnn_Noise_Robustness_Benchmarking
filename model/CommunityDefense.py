@@ -10,14 +10,12 @@ import scipy
 from torch_geometric.utils import from_scipy_sparse_matrix, subgraph
 from torch_geometric.data import Data as PyGData
 from collections import defaultdict
-from sklearn.metrics import accuracy_score, f1_score
 try:
     import networkx as nx
 except ImportError:
     nx = None
-from sklearn.metrics import f1_score, precision_score, recall_score
 
-from model.evaluation import OversmoothingMetrics
+from model.evaluation import OversmoothingMetrics, ClassificationMetrics
 
 class GraphCommunityDefenseTrainer:
 
@@ -45,6 +43,7 @@ class GraphCommunityDefenseTrainer:
         self.device = device or (torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu"))
         
         self.oversmoothing_evaluator = OversmoothingMetrics(device=self.device)
+        self.cls_evaluator = ClassificationMetrics(average='macro')
         
         self._prepare_graph_structure()
         self.community_assignments = self._detect_communities()
@@ -413,10 +412,10 @@ class GraphCommunityDefenseTrainer:
                 val_pred = validation_logits[self.val_node_mask].argmax(dim=-1).cpu().numpy()
                 val_true = node_labels[self.val_node_mask].cpu().numpy()
 
-                train_acc = accuracy_score(train_true, train_pred)
-                val_acc = accuracy_score(val_true, val_pred)
-                train_f1 = f1_score(train_true, train_pred, average="macro")
-                val_f1 = f1_score(val_true, val_pred, average="macro")
+                train_acc = self.cls_evaluator.compute_accuracy(train_pred, train_true)
+                val_acc = self.cls_evaluator.compute_accuracy(val_pred, val_true)
+                train_f1 = self.cls_evaluator.compute_f1(train_pred, train_true)
+                val_f1 = self.cls_evaluator.compute_f1(val_pred, val_true)
                 train_loss = cross_entropy_loss(
                     logits[self.train_node_mask], node_labels[self.train_node_mask]
                 ).item()
@@ -488,9 +487,10 @@ class GraphCommunityDefenseTrainer:
             test_predictions = predictions[test_mask_np]
 
             test_accuracy = (test_predictions == test_true_labels).mean()
-            test_f1_score = f1_score(test_true_labels, test_predictions, average="macro")
-            test_precision = precision_score(test_true_labels, test_predictions, average="macro", zero_division=0)
-            test_recall = recall_score(test_true_labels, test_predictions, average="macro", zero_division=0)
+            test_cls_metrics = self.cls_evaluator.compute_all_metrics(test_predictions, test_true_labels)
+            test_f1_score = test_cls_metrics['f1']
+            test_precision = test_cls_metrics['precision']
+            test_recall = test_cls_metrics['recall']
 
             test_oversmoothing_metrics = self._compute_oversmoothing_metrics_for_mask(
                 final_logits, edge_index, self.test_node_mask, node_labels

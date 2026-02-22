@@ -3,12 +3,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 import scipy.sparse as sp
 import numpy as np
-from sklearn.metrics import f1_score, precision_score, recall_score
 from copy import deepcopy
 import time
 from collections import defaultdict
 
-from model.evaluation import OversmoothingMetrics
+from model.evaluation import OversmoothingMetrics, ClassificationMetrics
 
 
 def compute_accuracy(output, labels):
@@ -52,6 +51,7 @@ class OversmoothingAnalyzer:
     def __init__(self, device):
         self.device = device
         self.metrics_evaluator = OversmoothingMetrics(device=device)
+        self.cls_evaluator = ClassificationMetrics(average='macro')
     
     def compute_metrics_for_node_subset(self, embeddings, edge_index, node_mask):
         #Compute oversmoothing metrics for a specific subset of nodes
@@ -164,9 +164,9 @@ class PiGnnTrainer:
                 .eq(graph_data.y[graph_data.train_mask])
                 .sum().item() / graph_data.train_mask.sum().item()
             )
-            train_f1 = f1_score(
-                graph_data.y[graph_data.train_mask].cpu(), 
-                predicted_labels[graph_data.train_mask].cpu(), 
+            train_f1 = self.cls_evaluator.compute_f1(
+                predicted_labels[graph_data.train_mask], 
+                graph_data.y[graph_data.train_mask], 
                 average='micro'
             )
             
@@ -185,9 +185,9 @@ class PiGnnTrainer:
                 .eq(graph_data.y[graph_data.val_mask])
                 .sum().item() / graph_data.val_mask.sum().item()
             )
-            val_f1 = f1_score(
-                graph_data.y[graph_data.val_mask].cpu(), 
-                predicted_labels[graph_data.val_mask].cpu(), 
+            val_f1 = self.cls_evaluator.compute_f1(
+                predicted_labels[graph_data.val_mask], 
+                graph_data.y[graph_data.val_mask], 
                 average='micro'
             )
             
@@ -224,9 +224,10 @@ class PiGnnTrainer:
             test_true_labels = graph_data.y[graph_data.test_mask].cpu().numpy()
             test_predicted_labels = final_output[graph_data.test_mask].argmax(dim=1).cpu().numpy()
             
-            test_f1_score = f1_score(test_true_labels, test_predicted_labels, average='macro')
-            test_precision_score = precision_score(test_true_labels, test_predicted_labels, average='macro', zero_division=0)
-            test_recall_score = recall_score(test_true_labels, test_predicted_labels, average='macro', zero_division=0)
+            test_cls_metrics = self.cls_evaluator.compute_all_metrics(test_predicted_labels, test_true_labels)
+            test_f1_score = test_cls_metrics['f1']
+            test_precision_score = test_cls_metrics['precision']
+            test_recall_score = test_cls_metrics['recall']
             
             train_oversmoothing = self.oversmoothing_analyzer.compute_metrics_for_node_subset(
                 final_output, graph_data.edge_index, graph_data.train_mask

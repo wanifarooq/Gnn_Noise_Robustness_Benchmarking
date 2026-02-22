@@ -3,6 +3,90 @@ import numpy as np
 from torch_geometric.utils import to_dense_adj
 from scipy.linalg import svd
 from scipy.sparse.linalg import eigsh
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix, classification_report
+
+
+class ClassificationMetrics:
+    """
+    Standardized classification metrics using sklearn.
+    All methods across the project should use this class for consistent evaluation.
+    
+    Usage:
+        cls_evaluator = ClassificationMetrics()
+        metrics = cls_evaluator.compute_all_metrics(predictions, labels)
+        cls_evaluator.print_metrics(metrics)
+    """
+
+    def __init__(self, average='macro', zero_division=0):
+        self.average = average
+        self.zero_division = zero_division
+
+    def compute_all_metrics(self, predictions, labels, average=None):
+        """
+        Compute accuracy, precision, recall, and F1 score.
+
+        Args:
+            predictions: np.ndarray or torch.Tensor of predicted labels
+            labels: np.ndarray or torch.Tensor of true labels
+            average: str, override default averaging ('macro', 'micro', 'weighted', None)
+
+        Returns:
+            dict with keys: 'accuracy', 'precision', 'recall', 'f1'
+        """
+        avg = average or self.average
+
+        if isinstance(predictions, torch.Tensor):
+            predictions = predictions.detach().cpu().numpy()
+        if isinstance(labels, torch.Tensor):
+            labels = labels.detach().cpu().numpy()
+
+        predictions = np.asarray(predictions)
+        labels = np.asarray(labels)
+
+        return {
+            'accuracy': float(accuracy_score(labels, predictions)),
+            'precision': float(precision_score(labels, predictions, average=avg, zero_division=self.zero_division)),
+            'recall': float(recall_score(labels, predictions, average=avg, zero_division=self.zero_division)),
+            'f1': float(f1_score(labels, predictions, average=avg, zero_division=self.zero_division)),
+        }
+
+    def compute_accuracy(self, predictions, labels):
+        if isinstance(predictions, torch.Tensor):
+            predictions = predictions.detach().cpu().numpy()
+        if isinstance(labels, torch.Tensor):
+            labels = labels.detach().cpu().numpy()
+        return float(accuracy_score(labels, predictions))
+
+    def compute_f1(self, predictions, labels, average=None):
+        avg = average or self.average
+        if isinstance(predictions, torch.Tensor):
+            predictions = predictions.detach().cpu().numpy()
+        if isinstance(labels, torch.Tensor):
+            labels = labels.detach().cpu().numpy()
+        return float(f1_score(labels, predictions, average=avg, zero_division=self.zero_division))
+
+    def get_confusion_matrix(self, predictions, labels):
+        if isinstance(predictions, torch.Tensor):
+            predictions = predictions.detach().cpu().numpy()
+        if isinstance(labels, torch.Tensor):
+            labels = labels.detach().cpu().numpy()
+        return confusion_matrix(labels, predictions)
+
+    def get_classification_report(self, predictions, labels, target_names=None):
+        if isinstance(predictions, torch.Tensor):
+            predictions = predictions.detach().cpu().numpy()
+        if isinstance(labels, torch.Tensor):
+            labels = labels.detach().cpu().numpy()
+        return classification_report(labels, predictions, target_names=target_names, zero_division=self.zero_division)
+
+    def print_metrics(self, metrics):
+        print("Classification Metrics:")
+        print(f"  Accuracy:  {metrics['accuracy']:.6f}")
+        print(f"  Precision: {metrics['precision']:.6f}")
+        print(f"  Recall:    {metrics['recall']:.6f}")
+        print(f"  F1 Score:  {metrics['f1']:.6f}")
+        print("-" * 50)
+
 
 class OversmoothingMetrics:
     

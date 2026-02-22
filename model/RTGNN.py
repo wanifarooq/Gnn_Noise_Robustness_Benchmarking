@@ -6,15 +6,13 @@ import time
 from copy import deepcopy
 from torch_geometric.nn import GCNConv
 from torch_geometric.utils import from_scipy_sparse_matrix, to_scipy_sparse_matrix, negative_sampling
-from sklearn.metrics import accuracy_score
 from torch_geometric.data import Data
 import numpy as np
 import scipy.sparse as sp
 from collections import defaultdict
-from sklearn.metrics import f1_score, precision_score, recall_score
 
 from model.gnns import GCN, GIN, GAT, GATv2, GPS
-from model.evaluation import OversmoothingMetrics
+from model.files.gnnsuation import OversmoothingMetrics, ClassificationMetrics
 
 
 class DualBranchGNNModel(nn.Module):
@@ -300,6 +298,7 @@ class RTGNN(nn.Module):
 
         # Oversmoothing evaluation
         self.oversmoothing_evaluator = OversmoothingMetrics(device=device)
+        self.cls_evaluator = ClassificationMetrics(average='macro')
         
         print(f"Initialized RTGNN with {self.gnn_backbone.upper()} backbone")
 
@@ -448,7 +447,7 @@ class RTGNN(nn.Module):
             
             train_predictions = averaged_output[train_node_indices].argmax(dim=1)
             performance_metrics['train_acc'] = (train_predictions == node_labels[train_node_indices]).float().mean().item()
-            performance_metrics['train_f1'] = f1_score(node_labels[train_node_indices].cpu(), train_predictions.cpu(), average='macro')
+            performance_metrics['train_f1'] = self.cls_evaluator.compute_f1(train_predictions, node_labels[train_node_indices])
             
             val_loss_branch1 = F.cross_entropy(first_branch_output[val_node_indices], node_labels[val_node_indices])
             val_loss_branch2 = F.cross_entropy(second_branch_output[val_node_indices], node_labels[val_node_indices])
@@ -456,7 +455,7 @@ class RTGNN(nn.Module):
             
             val_predictions = averaged_output[val_node_indices].argmax(dim=1)
             performance_metrics['val_acc'] = (val_predictions == node_labels[val_node_indices]).float().mean().item()
-            performance_metrics['val_f1'] = f1_score(node_labels[val_node_indices].cpu(), val_predictions.cpu(), average='macro')
+            performance_metrics['val_f1'] = self.cls_evaluator.compute_f1(val_predictions, node_labels[val_node_indices])
             
             train_mask = torch.zeros(node_features.size(0), dtype=torch.bool, device=self.device)
             train_mask[train_node_indices] = True
@@ -473,7 +472,7 @@ class RTGNN(nn.Module):
                 
                 test_predictions = averaged_output[test_node_indices].argmax(dim=1)
                 performance_metrics['test_acc'] = (test_predictions == node_labels[test_node_indices]).float().mean().item()
-                performance_metrics['test_f1'] = f1_score(node_labels[test_node_indices].cpu(), test_predictions.cpu(), average='macro')
+                performance_metrics['test_f1'] = self.cls_evaluator.compute_f1(test_predictions, node_labels[test_node_indices])
                 
                 test_mask = torch.zeros(node_features.size(0), dtype=torch.bool, device=self.device)
                 test_mask[test_node_indices] = True
@@ -699,9 +698,10 @@ class RTGNN(nn.Module):
             predicted_labels = predicted_test_labels.cpu().numpy()
             
             test_accuracy = (predicted_test_labels == node_labels[test_indices]).float().mean().item()
-            test_f1 = f1_score(true_labels, predicted_labels, average='macro')
-            test_precision = precision_score(true_labels, predicted_labels, average='macro', zero_division=0)
-            test_recall = recall_score(true_labels, predicted_labels, average='macro', zero_division=0)
+            test_cls_metrics = self.cls_evaluator.compute_all_metrics(predicted_labels, true_labels)
+            test_f1 = test_cls_metrics['f1']
+            test_precision = test_cls_metrics['precision']
+            test_recall = test_cls_metrics['recall']
 
             test_mask = torch.zeros(node_features.size(0), dtype=torch.bool, device=self.device)
             test_mask[test_indices] = True

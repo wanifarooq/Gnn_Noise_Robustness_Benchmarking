@@ -5,13 +5,12 @@ import numpy as np
 from torch_geometric.utils import to_dense_adj
 from sklearn.preprocessing import normalize
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 from typing import Tuple, Dict, Any
 import copy
 from scipy.sparse import csr_matrix
 from collections import defaultdict
 
-from model.evaluation import OversmoothingMetrics
+from model.evaluation import OversmoothingMetrics, ClassificationMetrics
 
 
 def normalize_adj_row(adj_matrix):
@@ -45,7 +44,11 @@ class MaximalCodingRateReductionLoss(nn.Module):
         num_features, num_samples = feature_matrix.shape
         identity_matrix = torch.eye(num_features, device=feature_matrix.device)
         scalar = num_features / (num_samples * self.eps)
-        log_determinant = torch.logdet(identity_matrix + self.discrimination_weight * scalar * feature_matrix @ feature_matrix.T)
+        _, log_determinant = torch.linalg.slogdet(
+            identity_matrix +
+            self.discrimination_weight * scalar * feature_matrix @ feature_matrix.T
+        )
+        
         return log_determinant / 2.
 
     def compute_discrimination_loss_theoretical(self, feature_matrix: torch.Tensor) -> torch.Tensor:
@@ -249,7 +252,8 @@ class LinearProbeEvaluator:
         
         def accuracy_helper(classifier, features, labels):
             y_pred = classifier.predict(features)
-            return accuracy_score(labels, y_pred)
+            _cls = ClassificationMetrics()
+            return _cls.compute_accuracy(y_pred, labels)
         
         train_acc = accuracy_helper(clf, train_features, clean_labels_np[graph_data.train_mask.cpu().numpy()])
         val_acc = accuracy_helper(clf, val_features, clean_labels_np[graph_data.val_mask.cpu().numpy()])
@@ -362,6 +366,7 @@ class ERASETrainer:
         self.num_node_classes = num_node_classes
         self.model_creation_function = model_creation_function
         self.oversmoothing_metrics_calculator = OversmoothingMetrics(device=computation_device)
+        self.cls_evaluator = ClassificationMetrics(average='macro')
         
     def train_erase_model(self, graph_data, enable_debug_output=False):
         # Create enhanced model
@@ -575,17 +580,15 @@ class ERASETrainer:
         train_predictions = linear_classifier.predict(train_features)
         validation_predictions = linear_classifier.predict(validation_features)
         
-        train_f1 = f1_score(
-            true_labels[graph_data.train_mask.cpu()], 
-            train_predictions, 
-            average='weighted', 
-            zero_division=0
+        train_f1 = self.cls_evaluator.compute_f1(
+            train_predictions,
+            true_labels[graph_data.train_mask.cpu()],
+            average='weighted'
         )
-        validation_f1 = f1_score(
-            true_labels[graph_data.val_mask.cpu()], 
-            validation_predictions, 
-            average='weighted', 
-            zero_division=0
+        validation_f1 = self.cls_evaluator.compute_f1(
+            validation_predictions,
+            true_labels[graph_data.val_mask.cpu()],
+            average='weighted'
         )
         
         return train_f1, validation_f1
@@ -622,12 +625,10 @@ class ERASETrainer:
         
         test_predictions = linear_classifier.predict(test_features)
         
-        test_f1 = f1_score(true_test_labels[graph_data.test_mask.cpu()], test_predictions, 
-                        average='macro', zero_division=0)
-        test_precision = precision_score(true_test_labels[graph_data.test_mask.cpu()], test_predictions, 
-                                    average='macro', zero_division=0)
-        test_recall = recall_score(true_test_labels[graph_data.test_mask.cpu()], test_predictions, 
-                                average='macro', zero_division=0)
+        test_cls_metrics = self.cls_evaluator.compute_all_metrics(test_predictions, true_test_labels[graph_data.test_mask.cpu()])
+        test_f1 = test_cls_metrics['f1']
+        test_precision = test_cls_metrics['precision']
+        test_recall = test_cls_metrics['recall']
         
         test_loss = self._compute_cross_entropy_loss_for_split(model, graph_data, graph_data.test_mask)
         

@@ -14,7 +14,7 @@ def run_benchmarking(base_folder='results'):
     print("Multi-run experiment with parameter sweep")
     print("-"*50)
 
-    with open("config1.yaml", "r", encoding="utf-8") as f:
+    with open("config3.yaml", "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
     print("Loaded configuration file")
 

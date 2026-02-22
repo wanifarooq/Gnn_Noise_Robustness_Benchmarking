@@ -27,7 +27,7 @@ from model.UnionNET import UnionNET
 from model.GNN_Cleaner import GNNCleanerTrainer
 from model.ERASE import ERASETrainer
 from model.GNNGuard import GNNGuardTrainer
-from model.gnns import GCN, GIN, GAT, GATv2, GPS
+from model.files.gnns import GCN, GIN, GAT, GATv2, GPS
 
 def make_random_splits(num_nodes: int,
                        train_ratio: float = 0.8,

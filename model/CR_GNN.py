@@ -5,9 +5,8 @@ from torch_geometric.utils import dropout_edge, mask_feature
 from torch_geometric.data import Data
 from copy import deepcopy
 import time
-from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 from collections import defaultdict
-from model.evaluation import OversmoothingMetrics
+from model.evaluation import OversmoothingMetrics, ClassificationMetrics
 
 
 class ContrastiveProjectionHead(torch.nn.Module):
@@ -111,6 +110,7 @@ class CRGNNModel:
         self.best_weights = None
         
         self.oversmoothing_evaluator = OversmoothingMetrics(device=self.device)
+        self.cls_evaluator = ClassificationMetrics(average='macro')
 
     def _compute_oversmoothing_metrics(self, embeddings, edge_index, node_mask):
 
@@ -285,9 +285,10 @@ class CRGNNModel:
             y_true = clean_labels[test_mask].cpu().numpy()
             y_pred = preds[test_mask].exp().argmax(dim=1).cpu().numpy()
             
-            test_f1 = f1_score(y_true, y_pred, average='macro')
-            test_precision = precision_score(y_true, y_pred, average='macro', zero_division=0)
-            test_recall = recall_score(y_true, y_pred, average='macro', zero_division=0)
+            test_cls_metrics = self.cls_evaluator.compute_all_metrics(y_pred, y_true)
+            test_f1 = test_cls_metrics['f1']
+            test_precision = test_cls_metrics['precision']
+            test_recall = test_cls_metrics['recall']
             
             test_oversmooth_metrics = self._compute_oversmoothing_metrics(
                 embeddings, graph_data.edge_index, test_mask
@@ -351,7 +352,7 @@ class CRGNNModel:
             h_orig = adapter(h_orig)
             pred_orig = class_head(h_orig)[mask].exp().argmax(dim=1)
             if mask.sum() > 0:
-                acc = accuracy_score(labels[mask].cpu().numpy(), pred_orig.cpu().numpy())
+                acc = self.cls_evaluator.compute_accuracy(pred_orig, labels[mask])
             else:
                 acc = 0.0
         
@@ -370,6 +371,6 @@ class CRGNNModel:
             
             loss = F.nll_loss(preds[mask], labels[mask])
             pred_labels = preds[mask].exp().argmax(dim=1)
-            acc = accuracy_score(labels[mask].cpu().numpy(), pred_labels.cpu().numpy())
+            acc = self.cls_evaluator.compute_accuracy(pred_labels, labels[mask])
             
         return loss, acc

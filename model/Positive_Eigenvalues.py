@@ -1,11 +1,10 @@
 import torch
 import torch.nn.functional as F
-from sklearn.metrics import f1_score, precision_score, recall_score 
 from copy import deepcopy
 from torch_geometric.loader import NeighborLoader
 from collections import defaultdict
 
-from model.evaluation import OversmoothingMetrics
+from model.evaluation import OversmoothingMetrics, ClassificationMetrics
 
 class PositiveEigenvaluesTrainer:
     # Positive eigenvalues constraint method
@@ -18,6 +17,7 @@ class PositiveEigenvaluesTrainer:
         self.learning_rate = learning_rate
         self.weight_decay = weight_decay
         self.oversmoothing_evaluator = OversmoothingMetrics(device=device)
+        self.cls_evaluator = ClassificationMetrics(average='macro')
         
         self.model.to(device)
         self.data = data.to(device)
@@ -300,9 +300,9 @@ class PositiveEigenvaluesTrainer:
         self.model.train()
         
         epoch_loss = 0
-        epoch_accuracy = 0
-        epoch_f1 = 0
         batch_count = 0
+        all_predictions = []
+        all_true_labels = []
         epoch_embeddings_sample = []
         
         for batch in train_loader:
@@ -329,16 +329,10 @@ class PositiveEigenvaluesTrainer:
             
             with torch.no_grad():
                 predictions = output_logits[target_node_indices].argmax(dim=1)
-                batch_accuracy = (predictions == batch.y[target_node_indices]).sum().item() / len(target_node_indices)
-                batch_f1 = f1_score(
-                    batch.y[target_node_indices].cpu(), 
-                    predictions.cpu(), 
-                    average='macro'
-                )
+                all_predictions.extend(predictions.cpu().numpy())
+                all_true_labels.extend(batch.y[target_node_indices].cpu().numpy())
             
             epoch_loss += classification_loss.item()
-            epoch_accuracy += batch_accuracy
-            epoch_f1 += batch_f1
             batch_count += 1
             
             if len(epoch_embeddings_sample) < 3:
@@ -351,10 +345,12 @@ class PositiveEigenvaluesTrainer:
                         'mask': batch_train_mask.cpu()
                     })
         
+        epoch_cls_metrics = self.cls_evaluator.compute_all_metrics(all_predictions, all_true_labels)
+        
         avg_metrics = {
             'loss': epoch_loss / batch_count,
-            'accuracy': epoch_accuracy / batch_count,
-            'f1': epoch_f1 / batch_count,
+            'accuracy': epoch_cls_metrics['accuracy'],
+            'f1': epoch_cls_metrics['f1'],
             'embeddings_sample': epoch_embeddings_sample
         }
         
@@ -365,11 +361,9 @@ class PositiveEigenvaluesTrainer:
         self.model.eval()
         
         total_loss = 0
-        total_accuracy = 0
-        total_f1 = 0
-        total_precision = 0
-        total_recall = 0
         batch_count = 0
+        all_predictions = []
+        all_true_labels = []
         embeddings_samples = []
         
         mask_attr = f'{split_name}_mask'
@@ -393,16 +387,10 @@ class PositiveEigenvaluesTrainer:
                 predictions = output_logits[target_indices].argmax(dim=1)
                 true_labels = batch.y[target_indices]
                 
-                batch_accuracy = (predictions == true_labels).sum().item() / len(target_indices)
-                batch_f1 = f1_score(true_labels.cpu(), predictions.cpu(), average='macro')
-                batch_precision = precision_score(true_labels.cpu(), predictions.cpu(), average='macro')
-                batch_recall = recall_score(true_labels.cpu(), predictions.cpu(), average='macro')
+                all_predictions.extend(predictions.cpu().numpy())
+                all_true_labels.extend(true_labels.cpu().numpy())
                 
                 total_loss += classification_loss.item()
-                total_accuracy += batch_accuracy
-                total_f1 += batch_f1
-                total_precision += batch_precision
-                total_recall += batch_recall
                 batch_count += 1
                 
                 if len(embeddings_samples) < 3:
@@ -412,12 +400,14 @@ class PositiveEigenvaluesTrainer:
                         'mask': batch_mask.cpu()
                     })
         
+        epoch_cls_metrics = self.cls_evaluator.compute_all_metrics(all_predictions, all_true_labels)
+        
         evaluation_results = {
             'loss': total_loss / batch_count,
-            'accuracy': total_accuracy / batch_count,
-            'f1': total_f1 / batch_count,
-            'precision': total_precision / batch_count,
-            'recall': total_recall / batch_count,
+            'accuracy': epoch_cls_metrics['accuracy'],
+            'f1': epoch_cls_metrics['f1'],
+            'precision': epoch_cls_metrics['precision'],
+            'recall': epoch_cls_metrics['recall'],
             'embeddings_samples': embeddings_samples
         }
         

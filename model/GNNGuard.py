@@ -10,11 +10,10 @@ from scipy.sparse import lil_matrix
 import scipy.sparse as sp
 import numpy as np
 from copy import deepcopy
-from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 from torch_geometric.utils import to_scipy_sparse_matrix
 from torch_geometric.data import Data
 from collections import defaultdict
-from model.evaluation import OversmoothingMetrics
+from model.evaluation import OversmoothingMetrics, ClassificationMetrics
 
 
 class GNNGuardTrainer:
@@ -48,6 +47,7 @@ class GNNGuardTrainer:
         
         # Oversmoothing evaluation
         self.oversmoothing_evaluator = OversmoothingMetrics(device=device)
+        self.cls_evaluator = ClassificationMetrics(average='macro')
         self.oversmoothing_metrics_history = {
             'train': [],
             'val': [],
@@ -230,10 +230,10 @@ class GNNGuardTrainer:
                 train_true_labels = labels[train_indices].cpu().numpy()
                 val_true_labels = labels[val_indices].cpu().numpy()
                 
-                train_accuracy = accuracy_score(train_true_labels, train_predictions)
-                val_accuracy = accuracy_score(val_true_labels, val_predictions)
-                train_f1_score = f1_score(train_true_labels, train_predictions, average='macro')
-                val_f1_score = f1_score(val_true_labels, val_predictions, average='macro')
+                train_accuracy = self.cls_evaluator.compute_accuracy(train_predictions, train_true_labels)
+                val_accuracy = self.cls_evaluator.compute_accuracy(val_predictions, val_true_labels)
+                train_f1_score = self.cls_evaluator.compute_f1(train_predictions, train_true_labels)
+                val_f1_score = self.cls_evaluator.compute_f1(val_predictions, val_true_labels)
                 
                 # Compute oversmoothing metrics
                 train_node_mask = torch.zeros(self.node_features.size(0), dtype=torch.bool, device=self.device)
@@ -323,8 +323,8 @@ class GNNGuardTrainer:
             
             test_predictions = final_output[test_indices].max(1)[1].cpu().numpy()
             test_true_labels = self.node_labels[test_indices].cpu().numpy()
-            test_accuracy = accuracy_score(test_true_labels, test_predictions)
-            test_f1_score = f1_score(test_true_labels, test_predictions, average='macro')
+            test_accuracy = self.cls_evaluator.compute_accuracy(test_predictions, test_true_labels)
+            test_f1_score = self.cls_evaluator.compute_f1(test_predictions, test_true_labels)
             test_loss = F.nll_loss(final_output[test_indices], self.node_labels[test_indices])
             
             edge_connectivity = self.normalized_adjacency._indices()
@@ -376,10 +376,11 @@ class GNNGuardTrainer:
             test_predictions = model_output[test_indices].max(1)[1].cpu().numpy()
             test_true_labels = self.node_labels[test_indices].cpu().numpy()
             
-            test_accuracy = accuracy_score(test_true_labels, test_predictions)
-            test_f1_score = f1_score(test_true_labels, test_predictions, average='macro')
-            test_precision = precision_score(test_true_labels, test_predictions, average='macro')
-            test_recall = recall_score(test_true_labels, test_predictions, average='macro')
+            test_cls_metrics = self.cls_evaluator.compute_all_metrics(test_predictions, test_true_labels)
+            test_accuracy = test_cls_metrics['accuracy']
+            test_f1_score = test_cls_metrics['f1']
+            test_precision = test_cls_metrics['precision']
+            test_recall = test_cls_metrics['recall']
             
             # Oversmoothing metrics
             test_node_mask = torch.zeros(self.node_features.size(0), dtype=torch.bool, device=self.device)

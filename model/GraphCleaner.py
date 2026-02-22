@@ -9,13 +9,12 @@ from scipy.sparse import spdiags
 import matplotlib.pyplot as plt
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
-    f1_score, accuracy_score, precision_score, recall_score, 
     matthews_corrcoef, roc_auc_score
 )
 from torch_geometric.utils import to_scipy_sparse_matrix
 from cleanlab.count import estimate_latent, compute_confident_joint
 
-from model.evaluation import OversmoothingMetrics
+from model.evaluation import OversmoothingMetrics, ClassificationMetrics
 
 
 class GraphCleanerNoiseDetector:
@@ -38,6 +37,7 @@ class GraphCleanerNoiseDetector:
         self.random_seed = random_seed
 
         self.oversmoothing_calculator = OversmoothingMetrics(device=computation_device)
+        self.cls_evaluator = ClassificationMetrics(average='macro')
         
 
     def _calculate_oversmoothing_metrics_for_subset(self, node_embeddings, graph_edges, node_subset_mask, node_labels=None):
@@ -129,14 +129,16 @@ class GraphCleanerNoiseDetector:
         training_predictions = model_predictions[graph_data.train_mask].argmax(dim=-1).cpu()
         training_ground_truth = graph_data.y[graph_data.train_mask].cpu()
         metrics_dict['train_loss'] = F.cross_entropy(model_predictions[graph_data.train_mask], graph_data.y_noisy[graph_data.train_mask]).item()
-        metrics_dict['train_acc'] = accuracy_score(training_ground_truth, training_predictions)
-        metrics_dict['train_f1'] = f1_score(training_ground_truth, training_predictions, average='micro')
+        train_cls = self.cls_evaluator.compute_all_metrics(training_predictions, training_ground_truth)
+        metrics_dict['train_acc'] = train_cls['accuracy']
+        metrics_dict['train_f1'] = train_cls['f1']
 
         validation_predictions = model_predictions[graph_data.val_mask].argmax(dim=-1).cpu()
         validation_ground_truth = graph_data.y[graph_data.val_mask].cpu()
         metrics_dict['val_loss'] = F.cross_entropy(model_predictions[graph_data.val_mask], graph_data.y_noisy[graph_data.val_mask]).item()
-        metrics_dict['val_acc'] = accuracy_score(validation_ground_truth, validation_predictions)
-        metrics_dict['val_f1'] = f1_score(validation_ground_truth, validation_predictions, average='micro')
+        val_cls = self.cls_evaluator.compute_all_metrics(validation_predictions, validation_ground_truth)
+        metrics_dict['val_acc'] = val_cls['accuracy']
+        metrics_dict['val_f1'] = val_cls['f1']
         
         return metrics_dict
 
@@ -246,8 +248,9 @@ class GraphCleanerNoiseDetector:
             test_predictions = final_model_output[graph_data.test_mask].argmax(dim=-1).cpu()
             test_ground_truth = graph_data.y[graph_data.test_mask].cpu()
             final_metrics_dict['test_loss'] = F.cross_entropy(final_model_output[graph_data.test_mask], graph_data.y_noisy[graph_data.test_mask]).item()
-            final_metrics_dict['test_acc'] = accuracy_score(test_ground_truth, test_predictions)
-            final_metrics_dict['test_f1'] = f1_score(test_ground_truth, test_predictions, average='micro')
+            test_cls = self.cls_evaluator.compute_all_metrics(test_predictions, test_ground_truth)
+            final_metrics_dict['test_acc'] = test_cls['accuracy']
+            final_metrics_dict['test_f1'] = test_cls['f1']
             
             final_train_oversmoothing = self._calculate_oversmoothing_metrics_for_subset(
                 final_model_output, graph_data.edge_index, graph_data.train_mask, graph_data.y)
@@ -550,10 +553,11 @@ class GraphCleanerNoiseDetector:
 
     def evaluate_detection_performance(self, noise_predictions, ground_truth_labels, confidence_scores, trained_model=None, graph_data=None):
 
-        detection_accuracy = accuracy_score(ground_truth_labels, noise_predictions)
-        detection_f1 = f1_score(ground_truth_labels, noise_predictions)
-        detection_precision = precision_score(ground_truth_labels, noise_predictions)
-        detection_recall = recall_score(ground_truth_labels, noise_predictions)
+        detection_cls_metrics = self.cls_evaluator.compute_all_metrics(noise_predictions, ground_truth_labels)
+        detection_accuracy = detection_cls_metrics['accuracy']
+        detection_f1 = detection_cls_metrics['f1']
+        detection_precision = detection_cls_metrics['precision']
+        detection_recall = detection_cls_metrics['recall']
         detection_mcc = matthews_corrcoef(ground_truth_labels, noise_predictions)
         detection_auc = roc_auc_score(ground_truth_labels, confidence_scores)
         

@@ -4,10 +4,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from scipy import sparse
-from sklearn.metrics import f1_score, precision_score, recall_score
 from collections import defaultdict
 
-from model.evaluation import OversmoothingMetrics
+from model.evaluation import OversmoothingMetrics, ClassificationMetrics
 
 class LabelWeightingNetwork(nn.Module):
 
@@ -80,6 +79,7 @@ class GNNCleanerTrainer:
 
         # Initialize oversmoothing evaluation
         self.oversmoothing_metric_evaluator = OversmoothingMetrics(device=computation_device)
+        self.cls_evaluator = ClassificationMetrics(average='macro')
         self.oversmoothing_training_history = {
             'train': [],
             'val': [],
@@ -371,8 +371,6 @@ class GNNCleanerTrainer:
     @torch.no_grad()
     def _evaluate_model_performance(self, include_test_metrics=False):
 
-        from sklearn.metrics import precision_score, recall_score
-        
         self.gnn_model.eval()
         
         node_features, edge_connectivity = self.data.x.to(self.device), self.data.edge_index.to(self.device)
@@ -391,15 +389,13 @@ class GNNCleanerTrainer:
         train_accuracy = (predicted_labels[self.data.train_mask] == ground_truth_labels[self.data.train_mask]).float().mean().item()
         validation_accuracy = (predicted_labels[self.data.val_mask] == ground_truth_labels[self.data.val_mask]).float().mean().item()
         
-        train_f1_score = f1_score(
-            ground_truth_labels[self.data.train_mask].cpu().numpy(), 
-            predicted_labels[self.data.train_mask].cpu().numpy(), 
-            average='macro'
+        train_f1_score = self.cls_evaluator.compute_f1(
+            predicted_labels[self.data.train_mask], 
+            ground_truth_labels[self.data.train_mask]
         )
-        validation_f1_score = f1_score(
-            ground_truth_labels[self.data.val_mask].cpu().numpy(), 
-            predicted_labels[self.data.val_mask].cpu().numpy(), 
-            average='macro'
+        validation_f1_score = self.cls_evaluator.compute_f1(
+            predicted_labels[self.data.val_mask], 
+            ground_truth_labels[self.data.val_mask]
         )
         
         evaluation_results = {
@@ -413,29 +409,17 @@ class GNNCleanerTrainer:
         
         if include_test_metrics:
             test_loss_value = F.cross_entropy(model_outputs[self.data.test_mask], ground_truth_labels[self.data.test_mask]).item()
-            test_accuracy = (predicted_labels[self.data.test_mask] == ground_truth_labels[self.data.test_mask]).float().mean().item()
-            test_f1_score = f1_score(
-                ground_truth_labels[self.data.test_mask].cpu().numpy(), 
-                predicted_labels[self.data.test_mask].cpu().numpy(), 
-                average='macro'
-            )
-
-            test_precision_score = precision_score(
-                ground_truth_labels[self.data.test_mask].cpu().numpy(), 
-                predicted_labels[self.data.test_mask].cpu().numpy(), 
-                average='macro'
-            )
-            test_recall_score = recall_score(
-                ground_truth_labels[self.data.test_mask].cpu().numpy(), 
-                predicted_labels[self.data.test_mask].cpu().numpy(), 
-                average='macro'
+            
+            test_cls_metrics = self.cls_evaluator.compute_all_metrics(
+                predicted_labels[self.data.test_mask],
+                ground_truth_labels[self.data.test_mask]
             )
             evaluation_results.update({
                 'test_loss': test_loss_value, 
-                'test_acc': test_accuracy, 
-                'test_f1': test_f1_score,
-                'test_precision': test_precision_score,
-                'test_recall': test_recall_score
+                'test_acc': test_cls_metrics['accuracy'], 
+                'test_f1': test_cls_metrics['f1'],
+                'test_precision': test_cls_metrics['precision'],
+                'test_recall': test_cls_metrics['recall']
             })
         
         return evaluation_results

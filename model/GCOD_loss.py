@@ -2,22 +2,21 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from sklearn.metrics import f1_score, precision_score, recall_score
 from copy import deepcopy
 from torch_geometric.loader import NeighborLoader
 import matplotlib.pyplot as plt
 import numpy as np
 from collections import defaultdict
 
-from model.evaluation import OversmoothingMetrics
+from model.evaluation import OversmoothingMetrics, ClassificationMetrics
 
 def evaluate_ce_only(model, data_loader, device='cuda', num_classes=None, mask_name='val'):
     model.eval()
     total_ce_loss = 0.0
-    total_correct = 0
     total_samples = 0
     all_predictions = []
     all_true_labels = []
+    _cls_eval = ClassificationMetrics(average='macro')
 
     with torch.no_grad():
         for batch in data_loader:
@@ -40,15 +39,19 @@ def evaluate_ce_only(model, data_loader, device='cuda', num_classes=None, mask_n
             total_ce_loss += ce_loss.item() * len(target_nodes)
 
             preds = outputs[target_nodes].argmax(dim=1)
-            total_correct += (preds == labels).sum().item()
             total_samples += len(target_nodes)
 
             all_predictions.extend(preds.cpu().numpy())
             all_true_labels.extend(labels.cpu().numpy())
 
     avg_ce_loss = total_ce_loss / total_samples if total_samples > 0 else float('inf')
-    accuracy = total_correct / total_samples if total_samples > 0 else 0.0
-    f1 = f1_score(all_true_labels, all_predictions, average='macro') if total_samples > 0 else 0.0
+    if total_samples > 0:
+        epoch_metrics = _cls_eval.compute_all_metrics(all_predictions, all_true_labels)
+        accuracy = epoch_metrics['accuracy']
+        f1 = epoch_metrics['f1']
+    else:
+        accuracy = 0.0
+        f1 = 0.0
 
     return {'ce_loss': avg_ce_loss, 'accuracy': accuracy, 'f1': f1}
 
@@ -235,6 +238,7 @@ class GCODTrainer:
         )
 
         self.oversmoothing_evaluator = OversmoothingMetrics(device=device)
+        self.cls_evaluator = ClassificationMetrics(average='macro')
         self._setup_data_loaders()
         
         # Early stopping
@@ -428,8 +432,9 @@ class GCODTrainer:
         
         avg_loss = total_loss / num_batches
         avg_ce_loss = total_ce_loss / num_batches
-        accuracy = total_correct / total_samples
-        f1 = f1_score(all_true_labels, all_predictions, average='macro')
+        epoch_cls_metrics = self.cls_evaluator.compute_all_metrics(all_predictions, all_true_labels)
+        accuracy = epoch_cls_metrics['accuracy']
+        f1 = epoch_cls_metrics['f1']
         
         return {'loss': avg_loss, 'ce_loss': avg_ce_loss, 'accuracy': accuracy, 'f1': f1}
 
@@ -734,8 +739,9 @@ class GCODTrainer:
                     all_test_labels.extend(batch.y[target_nodes].cpu().numpy())
         
         if len(all_test_predictions) > 0:
-            test_precision = precision_score(all_test_labels, all_test_predictions, average='macro')
-            test_recall = recall_score(all_test_labels, all_test_predictions, average='macro')
+            _test_cls = self.cls_evaluator.compute_all_metrics(all_test_predictions, all_test_labels)
+            test_precision = _test_cls['precision']
+            test_recall = _test_cls['recall']
         else:
             test_precision = 0.0
             test_recall = 0.0

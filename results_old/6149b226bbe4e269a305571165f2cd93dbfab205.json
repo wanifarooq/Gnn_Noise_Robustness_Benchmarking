@@ -1,0 +1,276 @@
+{
+    "config_hash": "6149b226bbe4e269a305571165f2cd93dbfab205",
+    "config": {
+        "seed": 42,
+        "device": "cuda",
+        "dataset": {
+            "name": "amazon-computers",
+            "root": "data"
+        },
+        "noise": {
+            "type": "uniform",
+            "rate": 0.2,
+            "seed": 42
+        },
+        "model": {
+            "name": "gcn",
+            "hidden_channels": 16,
+            "n_layers": 2,
+            "dropout": 0.5,
+            "self_loop": true,
+            "mlp_layers": 1,
+            "train_eps": false,
+            "heads": 8,
+            "use_pe": false,
+            "pe_dim": 8
+        },
+        "training": {
+            "method": "gcod",
+            "lr": 0.001,
+            "weight_decay": "5e-4",
+            "epochs": 1000,
+            "patience": 20
+        },
+        "positive_eigenvalues_params": {
+            "batch_size": 32
+        },
+        "gcod_params": {
+            "batch_size": 32,
+            "uncertainty_lr": 1.0
+        },
+        "nrgnn_params": {
+            "edge_hidden": 16,
+            "n_p": 10,
+            "p_u": 0.7,
+            "alpha": 0.05,
+            "beta": 1.0,
+            "t_small": 0.1,
+            "n_n": 50
+        },
+        "pi_gnn_params": {
+            "start_epoch": 50,
+            "miself": false,
+            "norm": null,
+            "vanilla": false
+        },
+        "cr_gnn_params": {
+            "T": 2,
+            "tau": 0.6,
+            "p": 0.9,
+            "alpha": 0.2,
+            "beta": 0.9,
+            "pr": 0.3
+        },
+        "community_defense_params": {
+            "community_method": "louvain",
+            "num_communities": null,
+            "lambda_comm": 1.0,
+            "pos_weight": 2.0,
+            "neg_weight": 2.0,
+            "margin": 1.5,
+            "num_neg_samples": 3
+        },
+        "rtgnn_params": {
+            "edge_hidden": 16,
+            "co_lambda": 0.1,
+            "alpha": 0.3,
+            "th": 0.8,
+            "K": 50,
+            "tau": 0.05,
+            "n_neg": 100
+        },
+        "graphcleaner_params": {
+            "k": 5,
+            "sample_rate": 0.5,
+            "max_iter_classifier": 5000,
+            "held_split": "valid"
+        },
+        "unionnet_params": {
+            "k": 10,
+            "alpha": 0.5,
+            "beta": 1,
+            "feat_norm": true
+        },
+        "gnn_cleaner_params": {
+            "label_propagation_iterations": 50,
+            "similarity_epsilon": "1e-8"
+        },
+        "erase_params": {
+            "n_embedding": 512,
+            "n_heads": 8,
+            "use_layer_norm": false,
+            "use_residual": false,
+            "use_residual_linear": false,
+            "gam1": 1.0,
+            "gam2": 2.0,
+            "eps": 0.05,
+            "alpha": 0.6,
+            "beta": 0.6,
+            "T": 3
+        },
+        "gnnguard_params": {
+            "P0": 0.5,
+            "K": 2,
+            "D2": 16,
+            "attention": true
+        }
+    },
+    "test_metrics_mean_std": {
+        "Accuracy": [
+            0.6681686043739319,
+            0.01808759900681457
+        ],
+        "F1": [
+            0.3035426315255205,
+            0.033829335693680164
+        ],
+        "Precision": [
+            0.29886935605976206,
+            0.03731926328692134
+        ],
+        "Recall": [
+            0.3352754739986424,
+            0.029800326587705955
+        ],
+        "FLOPS": [
+            385859138.8,
+            202189.60000000003
+        ]
+    },
+    "oversmoothing_metrics_runs": {
+        "NumRank": [
+            1.0053408257857945,
+            1.0073512484564355,
+            1.0077819214200476,
+            1.006735517581564,
+            1.0049446358721277
+        ],
+        "Erank": [
+            1.6876487731933594,
+            1.7607266902923584,
+            1.791316270828247,
+            1.7797136306762695,
+            1.679107427597046
+        ],
+        "EDir": [
+            291789.7312871304,
+            269341.4402647336,
+            286962.0666079833,
+            323002.9877638011,
+            253060.19624132762
+        ],
+        "EDir_traditional": [
+            497055826611.50165,
+            463704034449.56445,
+            482203833481.47705,
+            548016483970.5297,
+            455596430400.34564
+        ],
+        "EProj": [
+            110456.5078125,
+            103768.46875,
+            105845.21875,
+            121102.0234375,
+            105524.4140625
+        ],
+        "MAD": [
+            0.004285262038430243,
+            0.007013576139314206,
+            0.007705157556715713,
+            0.006660868681651138,
+            0.0033983914895761146
+        ],
+        "NumRank-Train": [
+            NaN,
+            NaN,
+            NaN,
+            NaN,
+            NaN
+        ],
+        "Erank-Train": [
+            NaN,
+            NaN,
+            NaN,
+            NaN,
+            NaN
+        ],
+        "EDir-Train": [
+            NaN,
+            NaN,
+            NaN,
+            NaN,
+            NaN
+        ],
+        "EDir_traditional-Train": [
+            NaN,
+            NaN,
+            NaN,
+            NaN,
+            NaN
+        ],
+        "EProj-Train": [
+            NaN,
+            NaN,
+            NaN,
+            NaN,
+            NaN
+        ],
+        "MAD-Train": [
+            NaN,
+            NaN,
+            NaN,
+            NaN,
+            NaN
+        ]
+    },
+    "oversmoothing_metrics_mean_std": {
+        "NumRank": [
+            1.0064308298231939,
+            0.001110165289976272
+        ],
+        "Erank": [
+            1.7397025585174561,
+            0.04709191388872643
+        ],
+        "EDir": [
+            284831.28443299525,
+            23492.026169378736
+        ],
+        "EDir_traditional": [
+            489315321782.6837,
+            32708460061.520668
+        ],
+        "EProj": [
+            109339.3265625,
+            6283.405689172209
+        ],
+        "MAD": [
+            0.005812651181137484,
+            0.0016676235496365236
+        ],
+        "NumRank-Train": [
+            NaN,
+            NaN
+        ],
+        "Erank-Train": [
+            NaN,
+            NaN
+        ],
+        "EDir-Train": [
+            NaN,
+            NaN
+        ],
+        "EDir_traditional-Train": [
+            NaN,
+            NaN
+        ],
+        "EProj-Train": [
+            NaN,
+            NaN
+        ],
+        "MAD-Train": [
+            NaN,
+            NaN
+        ]
+    }
+}

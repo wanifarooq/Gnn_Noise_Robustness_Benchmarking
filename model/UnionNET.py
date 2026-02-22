@@ -2,9 +2,8 @@ import time
 from copy import deepcopy
 import torch
 import torch.nn.functional as F
-from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 from collections import defaultdict
-from model.evaluation import OversmoothingMetrics
+from model.evaluation import OversmoothingMetrics, ClassificationMetrics
 
 
 class UnionNET:
@@ -57,6 +56,7 @@ class UnionNET:
         self.training_results = {'train': -1, 'val': -1, 'test': -1}
 
         self.oversmoothing_evaluator = OversmoothingMetrics(device=self.device)
+        self.cls_evaluator = ClassificationMetrics(average='macro')
     
     def _normalize_node_features(self, features):
         row_sum = torch.sum(features, dim=1, keepdim=True)
@@ -140,7 +140,7 @@ class UnionNET:
                 loss = F.cross_entropy(model_output[split_mask], target_labels[split_mask])
                 true_labels = target_labels[split_mask].cpu().numpy()
                 predicted_labels = model_output[split_mask].detach().cpu().numpy().argmax(1)
-                accuracy = accuracy_score(true_labels, predicted_labels)
+                accuracy = self.cls_evaluator.compute_accuracy(predicted_labels, true_labels)
                 return model_output, loss, accuracy
         
         return model_output
@@ -205,14 +205,14 @@ class UnionNET:
             
             train_true_labels = self.noisy_node_labels[self.train_node_mask].cpu().numpy()
             train_pred_labels = model_predictions[self.train_node_mask].detach().cpu().numpy().argmax(1)
-            train_accuracy = accuracy_score(train_true_labels, train_pred_labels)
-            train_f1_score = f1_score(train_true_labels, train_pred_labels, average='macro')
+            train_accuracy = self.cls_evaluator.compute_accuracy(train_pred_labels, train_true_labels)
+            train_f1_score = self.cls_evaluator.compute_f1(train_pred_labels, train_true_labels)
             
             _, validation_loss, _ = self._forward_pass('val')
             val_true_labels = self.noisy_node_labels[self.val_node_mask].cpu().numpy()
             val_pred_labels = model_predictions[self.val_node_mask].detach().cpu().numpy().argmax(1)
-            val_accuracy = accuracy_score(val_true_labels, val_pred_labels)
-            val_f1_score = f1_score(val_true_labels, val_pred_labels, average='macro')
+            val_accuracy = self.cls_evaluator.compute_accuracy(val_pred_labels, val_true_labels)
+            val_f1_score = self.cls_evaluator.compute_f1(val_pred_labels, val_true_labels)
             
             # Compute oversmoothing metrics
             if current_epoch % 20 == 0:
@@ -263,10 +263,11 @@ class UnionNET:
 
             test_true_labels = self.clean_node_labels[self.test_node_mask].cpu().numpy()
             test_pred_labels = final_predictions[self.test_node_mask].cpu().numpy().argmax(1)
-            test_accuracy = accuracy_score(test_true_labels, test_pred_labels)
-            test_f1_score = f1_score(test_true_labels, test_pred_labels, average='macro')
-            test_precision = precision_score(test_true_labels, test_pred_labels, average='macro')
-            test_recall = recall_score(test_true_labels, test_pred_labels, average='macro')
+            test_accuracy = self.cls_evaluator.compute_accuracy(test_pred_labels, test_true_labels)
+            test_cls_metrics = self.cls_evaluator.compute_all_metrics(test_pred_labels, test_true_labels)
+            test_f1_score = test_cls_metrics['f1']
+            test_precision = test_cls_metrics['precision']
+            test_recall = test_cls_metrics['recall']
             
             test_loss = F.cross_entropy(
                 final_predictions[self.test_node_mask], 

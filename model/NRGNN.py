@@ -8,10 +8,9 @@ import torch.optim as optim
 import scipy.sparse as sp
 from torch_geometric.utils import from_scipy_sparse_matrix, to_undirected, negative_sampling
 from torch_geometric.nn import GCNConv
-from sklearn.metrics import f1_score, precision_score, recall_score
 from collections import defaultdict
 
-from model.evaluation import OversmoothingMetrics
+from model.evaluation import OversmoothingMetrics, ClassificationMetrics
 
 class NRGNN:
 
@@ -67,6 +66,7 @@ class NRGNN:
         
         # Evaluation
         self.oversmoothing_evaluator = OversmoothingMetrics(device=device)
+        self.cls_evaluator = ClassificationMetrics(average='macro')
         self.oversmoothing_metrics_history = {
             'train': [],
             'val': [],
@@ -462,8 +462,8 @@ class NRGNN:
             
             if self.debug_mode and epoch%20 == 0:
 
-                train_f1 = f1_score(self.node_labels[train_indices].cpu(), main_model_output[train_indices].argmax(dim=1).cpu(), average='macro')
-                validation_f1 = f1_score(self.node_labels[validation_indices].cpu(), main_model_output[validation_indices].argmax(dim=1).cpu(), average='macro')
+                train_f1 = self.cls_evaluator.compute_f1(main_model_output[train_indices].argmax(dim=1), self.node_labels[train_indices])
+                validation_f1 = self.cls_evaluator.compute_f1(main_model_output[validation_indices].argmax(dim=1), self.node_labels[validation_indices])
 
                 # Compute oversmoothing metrics
                 train_oversmoothing = self.compute_oversmoothing_for_node_set(main_model_output, main_model_edges, train_indices)
@@ -561,7 +561,7 @@ class NRGNN:
                 predictor_accuracy = self.compute_accuracy(predictor_probabilities[test_indices], self.node_labels[test_indices])
                 y_true = self.node_labels[test_indices].cpu().numpy()
                 y_pred = predictor_probabilities[test_indices].argmax(dim=1).cpu().numpy()
-                predictor_f1 = f1_score(y_true, y_pred, average='macro')
+                predictor_f1 = self.cls_evaluator.compute_f1(y_pred, y_true)
                 
                 print(f"Predictor Test Acc: {predictor_accuracy:.4f} | Test F1: {predictor_f1:.4f}")
 
@@ -571,9 +571,10 @@ class NRGNN:
                 test_accuracy = self.compute_accuracy(main_model_output[test_indices], self.node_labels[test_indices])
                 y_true = self.node_labels[test_indices].cpu().numpy()
                 y_pred = main_model_output[test_indices].argmax(dim=1).cpu().numpy()
-                test_f1 = f1_score(y_true, y_pred, average='macro')
-                test_precision = precision_score(y_true, y_pred, average='macro', zero_division=0)
-                test_recall = recall_score(y_true, y_pred, average='macro', zero_division=0)
+                test_cls_metrics = self.cls_evaluator.compute_all_metrics(y_pred, y_true)
+                test_f1 = test_cls_metrics['f1']
+                test_precision = test_cls_metrics['precision']
+                test_recall = test_cls_metrics['recall']
                 test_oversmoothing = self.compute_oversmoothing_for_node_set(main_model_output, self.best_edge_indices, test_indices)
                 
                 if test_oversmoothing is not None:
