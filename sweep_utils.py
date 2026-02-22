@@ -13,21 +13,25 @@ SWEEP_PREFIX = "£["
 
 def get_config_hash(config: Dict[str, Any]) -> str:
     """
-    Compute a SHA1 hash from a subset of configuration fields.
-    Useful to uniquely identify an experiment run.
+    Compute a SHA1 hash from all configuration fields that affect results:
+    seed, dataset, noise (incl. rate), model, training, and the active
+    method's specific params.
     """
+    method = config.get("training", {}).get("method", "")
+    method_params_key = f"{method}_params"
+
     keys_to_hash = {
-        "dataset": config.get("dataset", {}).get("name", ""),
-        "noise": config.get("noise", {}).get("type", ""),
         "seed": config.get("seed", ""),
-        "model": config.get("model", {}).get("name", ""),
-        "training": config.get("training", {}).get("method", "")
+        "dataset": config.get("dataset", {}),
+        "noise": config.get("noise", {}),
+        "model": config.get("model", {}),
+        "training": config.get("training", {}),
+        "method_params": config.get(method_params_key, {}),
     }
 
-    # Create a deterministic string representation
-    hash_input = "|".join(f"{k}:{v}" for k, v in keys_to_hash.items())
+    # json.dumps with sort_keys for deterministic ordering
+    hash_input = json.dumps(keys_to_hash, sort_keys=True, default=str)
 
-    # Compute SHA1 hash
     return hashlib.sha1(hash_input.encode("utf-8")).hexdigest()
 
 
