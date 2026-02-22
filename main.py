@@ -56,11 +56,17 @@ def run_benchmarking(base_folder='results'):
         for run in range(1, 6):
             codecarbon_file_name = f"{file_name}_emissions.csv"
             if not os.path.exists(os.path.join(base_folder, codecarbon_file_name)):
-                tracker = EmissionsTracker(output_dir=base_folder,
-                                        output_file = codecarbon_file_name,
-                                        log_level = "critical", allow_multiple_runs=True)
-                tracker.start()
-                run_codecarbon = True
+                try:
+                    tracker = EmissionsTracker(output_dir=base_folder,
+                                            output_file = codecarbon_file_name,
+                                            log_level = "critical", allow_multiple_runs=True)
+                    tracker.start()
+                    run_codecarbon = True
+                except Exception as e:
+                    print(f"[WARNING] Could not start EmissionsTracker: {e}")
+                    print("[WARNING] Carbon emissions data will be missing from results.")
+                    print("[WARNING] On macOS, codecarbon requires sudo access to read hardware power metrics.")
+                    run_codecarbon = False
             print(f"\nRun {run}/5:")
             test_metrics = run_experiment(sweep_config, run_id=run)
             if run_codecarbon:
