@@ -108,7 +108,7 @@ def train_with_standard_loss(
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            best_model_state = model.state_dict()
+            best_model_state = copy.deepcopy(model.state_dict())
             epochs_no_improve = 0
         else:
             epochs_no_improve += 1
@@ -151,8 +151,11 @@ def train_with_standard_loss(
                   f"Train MAD: {train_mad:.4f}, Val MAD: {val_mad:.4f} | "
                   f"Train NumRank: {train_num_rank:.4f}, Val NumRank: {val_num_rank:.4f} | "
                   f"Train Erank: {train_eff_rank:.4f}, Val Erank: {val_eff_rank:.4f}")
+    if best_model_state is not None:
+        model.load_state_dict(best_model_state)
     model.eval()
     with torch.no_grad():
+        out = model(data)
         test_idx = data.test_mask.nonzero(as_tuple=True)[0]
         test_loss = criterion(out[test_idx], data.y[test_idx])
         pred = out.argmax(dim=1)
