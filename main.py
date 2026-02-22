@@ -73,18 +73,14 @@ def run_benchmarking(base_folder='results'):
             test_recalls.append(float(test_metrics['recall']))
             test_flops.append(float(test_metrics['flops_info']['total_flops']))
 
-            # for key in oversmoothing_metrics:
-            #     if '-Train' in key:
-            #         oversmoothing_metrics[key].append(test_metrics['train_oversmoothing'][key.replace('-Train', '')])
-            #     else:    
-            #         oversmoothing_metrics[key].append(test_metrics['oversmoothing'][key])
-
             for key in oversmoothing_metrics:
                 if '-Train' in key:
-                    raw_val = test_metrics['train_oversmoothing'][key.replace('-Train', '')]
-                else:    
+                    base_key = key.replace('-Train', '')
+                    source = test_metrics.get('train_oversmoothing', {})
+                    raw_val = source.get(base_key, float('nan'))
+                else:
                     raw_val = test_metrics['oversmoothing'][key]
-                
+
                 # Check if raw_val is a list (or iterable)
                 if isinstance(raw_val, list) or (isinstance(raw_val, (np.ndarray, torch.Tensor)) and hasattr(raw_val, '__len__') and len(raw_val) > 1):
                     # It is a list (e.g., layer-wise metrics). Take the mean.
