@@ -205,7 +205,7 @@ class GNNGuardTrainer:
         
         # Early stopping
         best_validation_loss = float('inf')
-        patience_counter = patience
+        epochs_no_improve = 0
         best_model_weights = deepcopy(self.model.state_dict())
         
         for epoch in range(max_epochs):
@@ -264,11 +264,11 @@ class GNNGuardTrainer:
                 best_validation_loss = val_loss
                 self.model_output = val_output
                 best_model_weights = deepcopy(self.model.state_dict())
-                patience_counter = patience
+                epochs_no_improve = 0
             else:
-                patience_counter -= 1
-            
-            if patience_counter <= 0:
+                epochs_no_improve += 1
+
+            if epochs_no_improve >= patience:
                 if verbose:
                     print(f'Early stopping at epoch {epoch}, best_val_loss={best_validation_loss:.4f}')
                 break
