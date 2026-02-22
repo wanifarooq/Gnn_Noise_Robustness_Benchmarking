@@ -167,7 +167,7 @@ class PiGnnTrainer:
             train_f1 = self.cls_evaluator.compute_f1(
                 predicted_labels[graph_data.train_mask], 
                 graph_data.y[graph_data.train_mask], 
-                average='micro'
+                average='macro'
             )
             
             performance_metrics.update({
@@ -188,7 +188,7 @@ class PiGnnTrainer:
             val_f1 = self.cls_evaluator.compute_f1(
                 predicted_labels[graph_data.val_mask], 
                 graph_data.y[graph_data.val_mask], 
-                average='micro'
+                average='macro'
             )
             
             performance_metrics.update({
