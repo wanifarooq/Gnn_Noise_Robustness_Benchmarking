@@ -1,0 +1,113 @@
+seed: 42
+device: cpu
+
+dataset:
+  name: cora
+  root: data
+
+noise:
+  type: uniform
+  rate: 0.2
+  seed: 42
+
+model:
+  name: gcn
+  hidden_channels: 16
+  n_layers: 2
+  dropout: 0.5
+  self_loop: true
+  mlp_layers: 1
+  train_eps: false
+  heads: 8
+  use_pe: false
+  pe_dim: 8
+
+training:
+  method: standard
+  lr: 0.001
+  weight_decay: 5e-4
+  epochs: 50
+  patience: 10
+
+positive_eigenvalues_params:
+  batch_size: 32
+
+gcod_params:
+  batch_size: 32
+  uncertainty_lr: 1.0
+
+nrgnn_params:
+  edge_hidden: 16
+  n_p: 10
+  p_u: 0.7
+  alpha: 0.05
+  beta: 1.0
+  t_small: 0.1
+  n_n: 50
+
+pi_gnn_params:
+  start_epoch: 50
+  miself: false
+  norm: null
+  vanilla: false
+
+cr_gnn_params:
+  T: 2
+  tau: 0.6
+  p: 0.9
+  alpha: 0.2
+  beta: 0.9
+  pr: 0.3
+
+community_defense_params:
+  community_method: louvain
+  num_communities: null
+  lambda_comm: 1.0
+  pos_weight: 2.0
+  neg_weight: 2.0
+  margin: 1.5
+  num_neg_samples: 3
+
+rtgnn_params:
+  edge_hidden: 16
+  co_lambda: 0.1
+  alpha: 0.3
+  th: 0.8
+  K: 50
+  tau: 0.05
+  n_neg: 100
+
+graphcleaner_params:
+  k: 5
+  sample_rate: 0.5
+  max_iter_classifier: 5000
+  held_split: valid
+
+unionnet_params:
+  k: 10
+  alpha: 0.5
+  beta: 1
+  feat_norm: true
+
+gnn_cleaner_params:
+  label_propagation_iterations: 50
+  similarity_epsilon: 1e-8
+
+erase_params:
+  n_embedding: 512
+  n_heads: 8
+  use_layer_norm: false
+  use_residual: false
+  use_residual_linear: false
+  gam1: 1.0
+  gam2: 2.0
+  eps: 0.05
+  alpha: 0.6
+  beta: 0.6
+  T: 3
+
+gnnguard_params:
+  P0: 0.5
+  K: 2
+  D2: 16
+  attention: true
