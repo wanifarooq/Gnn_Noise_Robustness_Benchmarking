@@ -99,29 +99,6 @@ class GraphCleanerNoiseDetector:
         else:
             return F.softmax(torch.tensor(prediction_logits), dim=1).cpu().numpy()
 
-    def _calculate_dirichlet_energy(self, graph_data, model_predictions, node_subset_mask):
- 
-        if model_predictions.dim() > 1 and model_predictions.size(1) > 1:
-            prediction_probabilities = F.softmax(model_predictions, dim=1)
-        else:
-            prediction_probabilities = model_predictions
-            
-        graph_edge_index = graph_data.edge_index
-        total_nodes = graph_data.num_nodes
-
-        accumulated_energy = 0.0
-        edge_count = 0
-
-        for edge_idx in range(graph_edge_index.size(1)):
-            source_node, target_node = graph_edge_index[0, edge_idx].item(), graph_edge_index[1, edge_idx].item()
-            
-            if node_subset_mask[source_node] or node_subset_mask[target_node]:
-                probability_difference = torch.norm(prediction_probabilities[source_node] - prediction_probabilities[target_node], p=2) ** 2
-                accumulated_energy += probability_difference.item()
-                edge_count += 1
-        
-        return accumulated_energy / edge_count if edge_count > 0 else 0.0
-
     def _calculate_training_metrics(self, graph_data, neural_network_model, model_predictions):
 
         metrics_dict = {}
