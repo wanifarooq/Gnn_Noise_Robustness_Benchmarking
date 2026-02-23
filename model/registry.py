@@ -23,26 +23,21 @@ def register(method_name: str):
 
 
 def discover_trainers() -> None:
-    """Import every model module so their ``@register`` decorators execute.
+    """Import every method module so their ``@register`` decorators execute.
 
-    Safe to call multiple times — subsequent calls are no-ops.
+    Scans ``model.methods`` via *pkgutil* — adding a new method is just
+    dropping a file in that subpackage.  Safe to call multiple times.
     """
     global _discovered
     if _discovered:
         return
-    import model.Standard            # noqa: F401
-    import model.Positive_Eigenvalues  # noqa: F401
-    import model.GCOD_loss           # noqa: F401
-    import model.NRGNN               # noqa: F401
-    import model.PI_GNN              # noqa: F401
-    import model.CR_GNN              # noqa: F401
-    import model.CommunityDefense    # noqa: F401
-    import model.RTGNN               # noqa: F401
-    import model.GraphCleaner        # noqa: F401
-    import model.UnionNET            # noqa: F401
-    import model.GNN_Cleaner         # noqa: F401
-    import model.ERASE               # noqa: F401
-    import model.GNNGuard            # noqa: F401
+    import importlib
+    import pkgutil
+    import model.methods as _pkg
+
+    for info in pkgutil.iter_modules(_pkg.__path__):
+        if not info.name.startswith('_'):
+            importlib.import_module(f'model.methods.{info.name}')
     _discovered = True
 
 

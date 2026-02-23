@@ -568,7 +568,7 @@ class GraphCleanerNoiseDetector:
 # ── Registry wrapper ─────────────────────────────────────────────────────
 from model.base import BaseTrainer
 from model.registry import register
-from model.Standard import train_with_standard_loss
+from model.methods.Standard import train_with_standard_loss
 
 
 @register('graphcleaner')
