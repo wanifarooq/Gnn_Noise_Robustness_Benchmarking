@@ -749,3 +749,27 @@ class RTGNN(nn.Module):
         )
 
         return cross_entropy_loss + self.training_config.co_lambda * kl_divergence_loss
+
+
+# ── Registry wrapper ─────────────────────────────────────────────────────
+from model.base import BaseTrainer
+from model.registry import register
+
+
+@register('rtgnn')
+class RTGNNMethodTrainer(BaseTrainer):
+    def run(self):
+        d = self.init_data
+
+        rtgnn_config = RTGNNTrainingConfig(self.config)
+        rtgnn_trainer = RTGNN(
+            training_config=rtgnn_config,
+            device=d['device'],
+            gnn_backbone=self.config['model']['name'].lower(),
+            data_for_training=d['data_for_training'],
+        ).to(d['device'])
+
+        train_oversmoothing = rtgnn_trainer.train_model()
+        clean_labels = d['data'].y_original.cpu().numpy()
+        result = rtgnn_trainer.evaluate_final_performance(clean_labels=clean_labels)
+        return self._make_result(result, train_oversmoothing)

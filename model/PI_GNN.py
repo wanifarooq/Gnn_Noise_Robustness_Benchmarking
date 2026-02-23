@@ -351,3 +351,40 @@ class PiGnnTrainer:
 
     def get_training_history(self):
         return self.training_history
+
+
+# ── Registry wrapper ─────────────────────────────────────────────────────
+from model.base import BaseTrainer
+from model.registry import register
+
+
+@register('pi_gnn')
+class PiGnnMethodTrainer(BaseTrainer):
+    def run(self):
+        d = self.init_data
+        pi_params = self.config.get('pi_gnn_params', {})
+
+        trainer = PiGnnTrainer(
+            device=d['device'],
+            epochs=d['epochs'],
+            main_learning_rate=d['lr'],
+            mi_learning_rate=d['lr'],
+            weight_decay=d['weight_decay'],
+            early_stopping_patience=d['patience'],
+            mutual_info_start_epoch=int(pi_params.get('start_epoch', 200)),
+            use_self_mi=bool(pi_params.get('miself', False)),
+            normalization_factor=pi_params.get('norm', None),
+            use_vanilla_training=bool(pi_params.get('vanilla', False)),
+        )
+
+        link_decoder = GraphLinkDecoder()
+        pi_gnn_model = PiGnnModel(
+            backbone_gnn=d['backbone_model'],
+            supplementary_decoder=link_decoder,
+        )
+
+        result = trainer.train_model(
+            pi_gnn_model, d['data_for_training'],
+            self.config, d['get_model'],
+        )
+        return self._make_result(result, result['train_oversmoothing'])

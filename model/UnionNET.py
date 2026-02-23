@@ -281,3 +281,32 @@ class UnionNET:
 
         return results
 
+
+# ── Registry wrapper ─────────────────────────────────────────────────────
+from model.base import BaseTrainer
+from model.registry import register
+
+
+@register('unionnet')
+class UnionNETMethodTrainer(BaseTrainer):
+    def run(self):
+        d = self.init_data
+        unet_params = self.config.get('unionnet_params', {})
+
+        unionnet_config = {
+            'n_epochs': d['epochs'],
+            'lr': d['lr'],
+            'weight_decay': d['weight_decay'],
+            'patience': d['patience'],
+            'k': unet_params.get('k', 5),
+            'alpha': unet_params.get('alpha', 0.5),
+            'beta': unet_params.get('beta', 1.0),
+            'feat_norm': unet_params.get('feat_norm', True),
+        }
+
+        trainer = UnionNET(
+            d['backbone_model'], d['data_for_training'],
+            d['num_classes'], unionnet_config,
+        )
+        result = trainer.train_model(enable_debug=True)
+        return self._make_result(result, result['train_oversmoothing'])

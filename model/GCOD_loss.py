@@ -638,3 +638,31 @@ class GCODTrainer:
             print(f"Test Oversmoothing: {results['oversmoothing']}")
 
         return results
+
+
+# ── Registry wrapper ─────────────────────────────────────────────────────
+from model.base import BaseTrainer
+from model.registry import register
+
+
+@register('gcod')
+class GCODMethodTrainer(BaseTrainer):
+    def run(self):
+        d = self.init_data
+        gcod_params = self.config.get('gcod_params', {})
+
+        trainer = GCODTrainer(
+            model=d['backbone_model'],
+            data=d['data_for_training'],
+            noisy_indices=d['global_noisy_indices'],
+            device=d['device'],
+            learning_rate=d['lr'],
+            weight_decay=d['weight_decay'],
+            uncertainty_lr=float(gcod_params.get('uncertainty_lr', 1.0)),
+            total_epochs=d['epochs'],
+            patience=d['patience'],
+            batch_size=int(gcod_params.get('batch_size', 32)),
+            debug=True,
+        )
+        result, train_oversmoothing = trainer.train_full_model()
+        return self._make_result(result, train_oversmoothing, reduce=False)

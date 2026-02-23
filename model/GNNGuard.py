@@ -420,3 +420,42 @@ class GNNGuardModel(nn.Module):
         ).to(self.device)
         
         return attention_weighted_adjacency
+
+
+# ── Registry wrapper ─────────────────────────────────────────────────────
+from model.base import BaseTrainer
+from model.registry import register
+
+
+@register('gnnguard')
+class GNNGuardMethodTrainer(BaseTrainer):
+    def run(self):
+        d = self.init_data
+        gnnguard_params = self.config.get('gnnguard_params', {})
+
+        trainer = GNNGuardTrainer(
+            input_features=d['data'].num_features,
+            hidden_channels=self.config['model'].get('hidden_channels', 64),
+            num_classes=d['num_classes'],
+            dropout=self.config['model'].get('dropout', 0.5),
+            lr=d['lr'],
+            weight_decay=d['weight_decay'],
+            attention=gnnguard_params.get('attention', True),
+            device=d['device'],
+            similarity_threshold=gnnguard_params.get('P0', 0.5),
+            num_layers=gnnguard_params.get('K', 2),
+            attention_dim=gnnguard_params.get('D2', 16),
+            data_for_training=d['data_for_training'],
+            backbone=d['backbone_model'],
+        )
+        trainer.prepare_data()
+
+        train_oversmoothing = trainer.train_model(
+            node_features=d['data_for_training'].x,
+            node_labels=d['data_for_training'].y,
+            max_epochs=d['epochs'],
+            verbose=True,
+            patience=d['patience'],
+        )
+        result = trainer.evaluate_model()
+        return self._make_result(result, train_oversmoothing)

@@ -677,3 +677,52 @@ def create_enhanced_gnn_model(model_creation_function, gnn_model_name, enhanceme
     )
 
 
+# ── Registry wrapper ─────────────────────────────────────────────────────
+from model.base import BaseTrainer
+from model.registry import register
+
+
+@register('erase')
+class ERASEMethodTrainer(BaseTrainer):
+    def run(self):
+        d = self.init_data
+        data = d['data']
+        erase_params = self.config['erase_params']
+
+        erase_config = {
+            'erase_gnn_type': self.config['model']['name'],
+            'in_channels': data.num_features,
+            'hidden_channels': self.config['model'].get('hidden_channels', 128),
+            'n_embedding': erase_params.get('n_embedding', 512),
+            'n_layers': self.config['model'].get('n_layers', 2),
+            'n_heads': erase_params.get('n_heads', self.config['model'].get('heads', 8)),
+            'dropout': self.config['model'].get('dropout', 0.5),
+            'self_loop': self.config['model'].get('self_loop', True),
+            'mlp_layers': self.config['model'].get('mlp_layers', 2),
+            'train_eps': self.config['model'].get('train_eps', True),
+            'lr': d['lr'],
+            'weight_decay': d['weight_decay'],
+            'total_epochs': d['epochs'],
+            'patience': d['patience'],
+            'gam1': erase_params.get('gam1', 1.0),
+            'gam2': erase_params.get('gam2', 2.0),
+            'eps': erase_params.get('eps', 0.05),
+            'alpha': erase_params.get('alpha', 0.6),
+            'beta': erase_params.get('beta', 0.6),
+            'T': erase_params.get('T', 3),
+            'use_layer_norm': erase_params.get('use_layer_norm', False),
+            'use_residual': erase_params.get('use_residual', False),
+            'use_residual_linear': erase_params.get('use_residual_linear', False),
+            'seed': d['seed'],
+        }
+
+        trainer = ERASETrainer(
+            training_config=erase_config,
+            computation_device=d['device'],
+            num_node_classes=d['num_classes'],
+            model_creation_function=d['get_model'],
+        )
+        result = trainer.train_erase_model(
+            d['data_for_training'], enable_debug_output=True,
+        )
+        return self._make_result(result, result['train_oversmoothing'])

@@ -545,3 +545,32 @@ class GNNCleanerTrainer:
     
     def get_oversmoothing_training_history(self):
         return self.oversmoothing_training_history
+
+
+# ── Registry wrapper ─────────────────────────────────────────────────────
+from model.base import BaseTrainer
+from model.registry import register
+
+
+@register('gnn_cleaner')
+class GNNCleanerMethodTrainer(BaseTrainer):
+    def run(self):
+        d = self.init_data
+        gc_params = self.config.get('gnn_cleaner_params', {})
+
+        gnn_cleaner_config = {
+            'max_epochs': d['epochs'],
+            'model_learning_rate': d['lr'],
+            'net_learning_rate': d['lr'],
+            'weight_decay': d['weight_decay'],
+            'early_stopping_patience': d['patience'],
+            'label_propagation_iterations': gc_params.get('label_propagation_iterations', 50),
+            'similarity_epsilon': gc_params.get('similarity_epsilon', 1e-8),
+        }
+
+        trainer = GNNCleanerTrainer(
+            gnn_cleaner_config, d['data_for_training'],
+            d['device'], d['num_classes'], d['backbone_model'],
+        )
+        result = trainer.execute_full_training(enable_debug_output=True)
+        return self._make_result(result, result['train_oversmoothing'])

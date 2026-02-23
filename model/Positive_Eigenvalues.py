@@ -330,4 +330,30 @@ class PositiveEigenvaluesTrainer:
         }
         
         return evaluation_results
-    
+
+
+# ── Registry wrapper ─────────────────────────────────────────────────────
+from model.base import BaseTrainer
+from model.registry import register
+
+
+@register('positive_eigenvalues')
+class PositiveEigenvaluesMethodTrainer(BaseTrainer):
+    def run(self):
+        d = self.init_data
+        pe_params = self.config.get('positive_eigenvalues_params', {})
+
+        trainer = PositiveEigenvaluesTrainer(
+            model=d['backbone_model'],
+            data=d['data_for_training'],
+            device=d['device'],
+            learning_rate=d['lr'],
+            weight_decay=d['weight_decay'],
+        )
+        result = trainer.train_with_positive_eigenvalue_constraint(
+            max_epochs=d['epochs'],
+            batch_size=int(pe_params.get('batch_size', 32)),
+            patience=d['patience'],
+            noisy_indices=d['global_noisy_indices'],
+        )
+        return self._make_result(result, result['train_oversmoothing'])

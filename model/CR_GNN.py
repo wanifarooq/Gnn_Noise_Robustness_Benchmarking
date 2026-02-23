@@ -313,3 +313,31 @@ class CRGNNModel:
             acc = self.cls_evaluator.compute_accuracy(pred_labels, labels[mask])
             
         return loss, acc
+
+
+# ── Registry wrapper ─────────────────────────────────────────────────────
+from model.base import BaseTrainer
+from model.registry import register
+
+
+@register('cr_gnn')
+class CRGNNMethodTrainer(BaseTrainer):
+    def run(self):
+        d = self.init_data
+        cr_params = self.config.get('cr_gnn_params', {})
+
+        combined_params = {
+            'hidden_channels': self.config['model'].get('hidden_channels', 64),
+            'lr': d['lr'],
+            'weight_decay': d['weight_decay'],
+            'epochs': d['epochs'],
+            'patience': d['patience'],
+        }
+        combined_params.update(cr_params)
+
+        cr_model = CRGNNModel(device=d['device'], **combined_params)
+        result = cr_model.train_model(
+            d['backbone_model'], d['data_for_training'],
+            d['backbone_model'], d['get_model'],
+        )
+        return self._make_result(result, result['train_oversmoothing'])

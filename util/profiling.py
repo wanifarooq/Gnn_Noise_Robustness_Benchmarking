@@ -1,7 +1,6 @@
 """Model construction (registry pattern) and FLOPs profiling."""
 
 import threading
-import numpy as np
 import torch
 from torch.profiler import profile, ProfilerActivity
 
@@ -58,14 +57,6 @@ def _forward_call(model, data):
 
     # Most PyG-style GNNs: forward(x, edge_index)
     return model(data.x, data.edge_index)
-
-
-def _reduce_oversmoothing(oversmoothing_dict):
-    """Average per-epoch lists into scalar values."""
-    return {
-        k: float(np.mean(v)) if isinstance(v, (list, tuple, np.ndarray)) else float(v)
-        for k, v in oversmoothing_dict.items()
-    }
 
 
 def profile_model_flops(model, data, device, n_warmup=1, n_iters=1):

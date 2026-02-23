@@ -563,3 +563,42 @@ class GraphCleanerNoiseDetector:
             'auc': detection_auc,
             'oversmoothing': oversmoothing_results
         }
+
+
+# ── Registry wrapper ─────────────────────────────────────────────────────
+from model.base import BaseTrainer
+from model.registry import register
+from model.Standard import train_with_standard_loss
+
+
+@register('graphcleaner')
+class GraphCleanerMethodTrainer(BaseTrainer):
+    def run(self):
+        d = self.init_data
+
+        detector = GraphCleanerNoiseDetector(
+            configuration_params=self.config,
+            computation_device=d['device'],
+            random_seed=d['seed'],
+        )
+        clean_train_mask, _cleaned_data = detector.clean_training_data(
+            graph_data=d['data_for_training'],
+            neural_network_model=d['backbone_model'],
+            num_classes=d['num_classes'],
+        )
+
+        final_training_data = d['data'].clone()
+        final_training_data.train_mask = clean_train_mask
+        final_training_data.y = d['data_for_training'].y.clone()
+        noisy_indices_after = (
+            (~clean_train_mask & d['data_for_training'].train_mask)
+            .nonzero(as_tuple=True)[0]
+        )
+
+        result = train_with_standard_loss(
+            d['backbone_model'], final_training_data,
+            noisy_indices_after, device=d['device'],
+            total_epochs=d['epochs'], lr=d['lr'],
+            weight_decay=d['weight_decay'], patience=d['patience'],
+        )
+        return self._make_result(result, result['train_oversmoothing'])

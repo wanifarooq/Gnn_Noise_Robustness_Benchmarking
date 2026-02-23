@@ -105,3 +105,21 @@ def train_with_standard_loss(
         print(f"Test Oversmoothing: {results['oversmoothing']}")
 
     return results
+
+
+# ── Registry wrapper ─────────────────────────────────────────────────────
+from model.base import BaseTrainer
+from model.registry import register
+
+
+@register('standard')
+class StandardMethodTrainer(BaseTrainer):
+    def run(self):
+        d = self.init_data
+        result = train_with_standard_loss(
+            d['backbone_model'], d['data_for_training'],
+            d['global_noisy_indices'], d['device'],
+            total_epochs=d['epochs'], lr=d['lr'],
+            weight_decay=d['weight_decay'], patience=d['patience'],
+        )
+        return self._make_result(result, result['train_oversmoothing'])

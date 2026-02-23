@@ -406,3 +406,37 @@ class GraphCommunityDefenseTrainer:
             print(f"Test Oversmoothing: {results['oversmoothing']}")
 
         return results
+
+
+# ── Registry wrapper ─────────────────────────────────────────────────────
+from model.base import BaseTrainer
+from model.registry import register
+
+
+@register('community_defense')
+class CommunityDefenseMethodTrainer(BaseTrainer):
+    def run(self):
+        d = self.init_data
+        comm_params = self.config.get('community_defense_params', {})
+
+        defense_trainer = GraphCommunityDefenseTrainer(
+            graph_data=d['data_for_training'],
+            community_detection_method=comm_params.get('community_method', 'louvain'),
+            num_communities=comm_params.get('num_communities', None),
+            community_loss_weight=float(comm_params.get('lambda_comm', 2.0)),
+            positive_pair_weight=float(comm_params.get('pos_weight', 1.0)),
+            negative_pair_weight=float(comm_params.get('neg_weight', 2.0)),
+            similarity_margin=float(comm_params.get('margin', 1.5)),
+            negative_samples_per_node=int(comm_params.get('num_neg_samples', 3)),
+            device=d['device'],
+            verbose=True,
+        )
+        result = defense_trainer.train_with_community_defense(
+            gnn_model=d['backbone_model'],
+            training_epochs=d['epochs'],
+            early_stopping_patience=d['patience'],
+            learning_rate=d['lr'],
+            weight_decay_rate=d['weight_decay'],
+            enable_debug=True,
+        )
+        return self._make_result(result, result['train_oversmoothing'])

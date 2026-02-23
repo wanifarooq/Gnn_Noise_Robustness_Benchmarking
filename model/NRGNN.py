@@ -552,3 +552,42 @@ class NRGNN:
                 'train_oversmoothing_final': dict(DEFAULT_OVERSMOOTHING),
                 'val_oversmoothing_final': dict(DEFAULT_OVERSMOOTHING),
             }
+
+
+# ── Registry wrapper ─────────────────────────────────────────────────────
+from torch_geometric.utils import to_scipy_sparse_matrix
+
+from model.base import BaseTrainer
+from model.registry import register
+
+
+@register('nrgnn')
+class NRGNNMethodTrainer(BaseTrainer):
+    def run(self):
+        d = self.init_data
+        nrgnn_config = {
+            'lr': d['lr'],
+            'weight_decay': d['weight_decay'],
+            'epochs': d['epochs'],
+            'patience': d['patience'],
+            'nrgnn_params': self.config.get('nrgnn_params', {}),
+        }
+
+        nrgnn_model = NRGNN(nrgnn_config, d['device'], base_model=d['backbone_model'])
+
+        adj = to_scipy_sparse_matrix(
+            d['data_for_training'].edge_index,
+            num_nodes=d['data_for_training'].x.size(0),
+        )
+        train_idx = d['train_mask'].nonzero(as_tuple=True)[0].cpu().numpy()
+        val_idx = d['val_mask'].nonzero(as_tuple=True)[0].cpu().numpy()
+        test_idx = d['test_mask'].nonzero(as_tuple=True)[0].cpu().numpy()
+
+        train_oversmoothing = nrgnn_model.fit(
+            d['data_for_training'].x.to(d['device']),
+            adj,
+            d['data_for_training'].y.to(d['device']),
+            train_idx, val_idx,
+        )
+        result = nrgnn_model.test(test_idx)
+        return self._make_result(result, train_oversmoothing)
