@@ -221,51 +221,6 @@ class GraphCommunityDefenseTrainer:
             
         return community_labels
 
-    def _generate_community_pairs(self, community_labels):
-        #Generate positive and negative pairs
-        row_indices, col_indices = self.adjacency_matrix.nonzero()
-
-        upper_triangular_mask = row_indices < col_indices
-        row_filtered = row_indices[upper_triangular_mask]
-        col_filtered = col_indices[upper_triangular_mask]
-
-        # Positive pairs: same community
-        same_community_mask = community_labels[row_filtered] == community_labels[col_filtered]
-        positive_pairs = np.stack([row_filtered[same_community_mask], col_filtered[same_community_mask]], axis=1) if np.any(same_community_mask) else np.zeros((0, 2), dtype=np.int64)
-
-        # Negative pairs: different communities
-        negative_pairs = []
-        rng = np.random.default_rng(0)
-        
-        for node_idx in range(self.num_nodes):
-            # Find nodes in different communities
-            different_community_nodes = np.where(community_labels != community_labels[node_idx])[0]
-            
-            if different_community_nodes.size == 0:
-                continue
-                
-            if different_community_nodes.size <= self.neg_samples_count:
-                selected_nodes = different_community_nodes
-            else:
-                selected_nodes = rng.choice(
-                    different_community_nodes, 
-                    size=self.neg_samples_count, 
-                    replace=False
-                )
-            
-            for other_node in selected_nodes:
-                if node_idx < other_node:
-                    negative_pairs.append((node_idx, other_node))
-                elif other_node < node_idx:
-                    negative_pairs.append((other_node, node_idx))
-        
-        if negative_pairs:
-            negative_pairs = np.unique(np.array(negative_pairs, dtype=np.int64), axis=0)
-        else:
-            negative_pairs = np.zeros((0, 2), dtype=np.int64)
-
-        return positive_pairs, negative_pairs
-
     def compute_community_regularization_loss(self, node_embeddings: torch.Tensor, community_labels: np.ndarray) -> torch.Tensor:
 
         device = node_embeddings.device
