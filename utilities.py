@@ -149,9 +149,10 @@ def deterministic(labels, idx_train, noise_rate, seed):
     num_noise = int(len(idx_train_np) * noise_rate)
     noise_indices = rng.choice(idx_train_np, num_noise, replace=False)
     
+    noise_indices_set = set(noise_indices)
     noise_idx, clean_idx = [], []
     for idx in idx_train_np:
-        if idx in noise_indices:
+        if idx in noise_indices_set:
             original = labels_np[idx]
             possible = [i for i in range(num_classes) if i != original]
             corrupted_labels[idx] = rng.choice(possible)
@@ -266,9 +267,6 @@ def noise_operation(labels, features, n_classes, noise_type='clean', noise_rate=
                 seed=noise_seed
             )
             noisy_labels = torch.tensor(noisy_labels_np, dtype=torch.long, device=labels.device)
-        else:
-            print(f"[Warning] Noise type '{noise_type}' does not exist. Labels will remain unchanged.")
-            noisy_labels = labels.clone()
 
     if noisy_labels is None:
         if cp is not None:
@@ -303,9 +301,21 @@ def setup_seed_device(seed: int):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Device: {device}")
 
+SUPPORTED_DATASETS = (
+    "cora", "citeseer", "pubmed",
+    "amazon-ratings", "tolokers", "roman-empire", "minesweeper", "questions",
+    "dblp",
+    "amazon-computers", "amazon-photo",
+    "blogcatalog", "flickr",
+    "hm-categories", "pokec-regions", "web-topics", "tolokers-2",
+    "city-reviews", "artnet-exp", "web-fraud",
+    "pattern", "cluster",
+    "pascalvoc-sp", "coco-sp",
+)
+
 def load_dataset(name, root="./data"):
     name_lower = name.lower()
-    
+
     if name_lower in ["cora", "citeseer", "pubmed"]:
         from torch_geometric.datasets import Planetoid
         dataset = Planetoid(root=f"{root}/{name}", name=name.capitalize(), transform=NormalizeFeatures(), split='public')
@@ -397,7 +407,6 @@ def load_dataset(name, root="./data"):
     
     elif name_lower in ["pascalvoc-sp", "coco-sp"]:
         from torch_geometric.datasets import LRGBDataset
-        name_lower = name.lower()
         dataset_train = LRGBDataset(root=root, name=name, split='train')
         dataset_val   = LRGBDataset(root=root, name=name, split='val')
         dataset_test  = LRGBDataset(root=root, name=name, split='test')
@@ -474,7 +483,10 @@ def load_dataset(name, root="./data"):
 
     
     else:
-        raise ValueError(f"Dataset {name} not supported. Supported datasets: cora, citeseer, pubmed, amazon-ratings, tolokers, roman-empire, minesweeper, questions, dblp, amazon-computers, amazon-photo, blogcatalog, flickr, hm-categories, pokec-regions, web-topics, tolokers-2, city-reviews, artnet-exp, web-fraud, pattern, cluster, pascalvoc-sp, coco-sp")
+        raise ValueError(
+            f"Dataset {name} not supported. "
+            f"Supported datasets: {', '.join(SUPPORTED_DATASETS)}"
+        )
 
 def prepare_data_for_method(data, train_mask, val_mask, test_mask, noisy_train_labels, method_name):
 
@@ -521,8 +533,6 @@ def get_model(model_name, in_channels, hidden_channels, out_channels, **kwargs):
     
     return model_cls(in_channels, hidden_channels, out_channels, **filtered_kwargs)
 
-import inspect
-
 def _forward_call(model, data):
     """
     Call model forward with the correct signature.
@@ -532,22 +542,6 @@ def _forward_call(model, data):
     2) model(data.x)
     3) model(data.x, data.edge_index)
     """
-    # Try to inspect the forward signature (best effort)
-    try:
-        sig = inspect.signature(model.forward)
-        # Number of parameters excluding self
-        n_args = len(sig.parameters) - 1
-    except Exception:
-        n_args = None
-
-    # If forward seems to take 1 arg (besides self), prefer model(data)
-    if n_args == 1:
-        try:
-            return model(data)
-        except TypeError:
-            pass
-
-    # Fallback attempts (works across different model styles)
     try:
         return model(data)
     except TypeError:
