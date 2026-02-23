@@ -302,7 +302,6 @@ class GNNGuardModel(nn.Module):
         self.attention_dim = attention_dim
         
         self.attention_gate = Parameter(torch.rand(1))
-        self.test_parameter = Parameter(torch.rand(1))
         
         if backbone is not None:
             self.backbone = backbone.to(device)
