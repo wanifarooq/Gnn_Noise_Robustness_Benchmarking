@@ -4,7 +4,8 @@ from copy import deepcopy
 from torch_geometric.loader import NeighborLoader
 from collections import defaultdict
 
-from model.evaluation import OversmoothingMetrics, ClassificationMetrics
+from model.evaluation import (OversmoothingMetrics, ClassificationMetrics,
+                              compute_oversmoothing_for_mask, evaluate_model)
 
 class PositiveEigenvaluesTrainer:
     # Positive eigenvalues constraint method
@@ -66,71 +67,6 @@ class PositiveEigenvaluesTrainer:
                         module.weight.data = constrained_weight
                         break
     
-    def compute_oversmoothing_metrics_for_subset(self, embeddings, edge_index, node_mask):
-
-        try:
-            masked_node_indices = torch.where(node_mask)[0]
-            masked_embeddings = embeddings[masked_node_indices]
-            
-            node_index_set = set(masked_node_indices.cpu().numpy())
-            
-            edge_mask = torch.tensor([
-                source.item() in node_index_set and target.item() in node_index_set
-                for source, target in edge_index.t()
-            ], device=edge_index.device)
-            
-            if not edge_mask.any():
-                return {
-                    'NumRank': float(min(masked_embeddings.shape)),
-                    'Erank': float(min(masked_embeddings.shape)),
-                    'EDir': 0.0,
-                    'EDir_traditional': 0.0,
-                    'EProj': 0.0,
-                    'MAD': 0.0
-                }
-            
-            filtered_edges = edge_index[:, edge_mask]
-            node_remapping = {
-                original_idx.item(): local_idx 
-                for local_idx, original_idx in enumerate(masked_node_indices)
-            }
-            
-            remapped_edge_index = torch.stack([
-                torch.tensor([node_remapping[src.item()] for src in filtered_edges[0]], 
-                        device=edge_index.device),
-                torch.tensor([node_remapping[tgt.item()] for tgt in filtered_edges[1]], 
-                        device=edge_index.device)
-            ])
-            
-            graph_data_list = [{
-                'X': masked_embeddings,
-                'edge_index': remapped_edge_index,
-                'edge_weight': None
-            }]
-            
-            all_metrics = self.oversmoothing_evaluator.compute_all_metrics(
-                X=masked_embeddings,
-                edge_index=remapped_edge_index,
-                graphs_in_class=graph_data_list
-            )
-
-            default_metrics = {
-                'NumRank': 0.0, 'Erank': 0.0, 'EDir': 0.0,
-                'EDir_traditional': 0.0, 'EProj': 0.0, 'MAD': 0.0
-            }
-            
-            if all_metrics:
-                default_metrics.update(all_metrics)
-            
-            return default_metrics
-            
-        except Exception as e:
-            print(f"Warning: Could not compute oversmoothing metrics: {e}")
-            return {
-                'NumRank': 0.0, 'Erank': 0.0, 'EDir': 0.0,
-                'EDir_traditional': 0.0, 'EProj': 0.0, 'MAD': 0.0
-            }
-
     def train_with_positive_eigenvalue_constraint(self, max_epochs=200, batch_size=32, 
                                                 patience=20, noisy_indices=None):
 
@@ -173,12 +109,12 @@ class PositiveEigenvaluesTrainer:
                 with torch.no_grad():
                     full_embeddings = self.model(self.data)
                 
-                train_oversmoothing = self.compute_oversmoothing_metrics_for_subset(
-                    full_embeddings, self.data.edge_index, self.data.train_mask
+                train_oversmoothing = compute_oversmoothing_for_mask(
+                    self.oversmoothing_evaluator, full_embeddings, self.data.edge_index, self.data.train_mask
                 )
 
-                val_oversmoothing = self.compute_oversmoothing_metrics_for_subset(
-                    full_embeddings, self.data.edge_index, self.data.val_mask
+                val_oversmoothing = compute_oversmoothing_for_mask(
+                    self.oversmoothing_evaluator, full_embeddings, self.data.edge_index, self.data.val_mask
                 )
                 
                 metrics = {
@@ -224,42 +160,24 @@ class PositiveEigenvaluesTrainer:
                     f"Train Acc: {train_metrics['accuracy']:.4f}, Val Acc: {val_metrics['accuracy']:.4f} | "
                     f"Train F1: {train_metrics['f1']:.4f}, Val F1: {val_metrics['f1']:.4f}")
         
-        test_metrics = self.evaluate_on_split(test_loader, 'test')
-        
         self.model.eval()
         with torch.no_grad():
-            full_embeddings = self.model(self.data)
+            get_predictions = lambda: self.model(self.data).argmax(dim=1)
+            get_embeddings = lambda: self.model(self.data)
+            results = evaluate_model(
+                get_predictions, get_embeddings, self.data.y,
+                self.data.train_mask, self.data.val_mask, self.data.test_mask,
+                self.data.edge_index, self.device
+            )
 
-        test_oversmoothing = self.compute_oversmoothing_metrics_for_subset(
-            full_embeddings, self.data.edge_index, self.data.test_mask
-        )
-        
+        results['train_oversmoothing'] = per_epochs_oversmoothing
+
         print(f"\nPositive Eigenvalues Training completed")
-        print(f"Test Accuracy: {test_metrics['accuracy']:.4f}")
-        print(f"Test F1: {test_metrics['f1']:.4f}")
-        print(f"Test Precision: {test_metrics['precision']:.4f}")
-        print(f"Test Recall: {test_metrics['recall']:.4f}")
-        
-        if test_oversmoothing:
-            print("Final Test Oversmoothing Metrics:")
-            print(f"Test DE: {test_oversmoothing.get('EDir', 0.0):.4f}, "
-                f"Test DE_trad: {test_oversmoothing.get('EDir_traditional', 0.0):.4f}, "
-                f"Test EProj: {test_oversmoothing.get('EProj', 0.0):.4f}, "
-                f"Test MAD: {test_oversmoothing.get('MAD', 0.0):.4f}, "
-                f"Test NumRank: {test_oversmoothing.get('NumRank', 0.0):.4f}, "
-                f"Test Erank: {test_oversmoothing.get('Erank', 0.0):.4f}")
-        
-        return {
-            'accuracy': test_metrics['accuracy'],
-            'f1': test_metrics['f1'],
-            'precision': test_metrics['precision'],
-            'recall': test_metrics['recall'],
-            'oversmoothing': test_oversmoothing or {
-                'NumRank': 0.0, 'Erank': 0.0, 'EDir': 0.0,
-                'EDir_traditional': 0.0, 'EProj': 0.0, 'MAD': 0.0
-            },
-            'train_oversmoothing' : per_epochs_oversmoothing
-        }
+        print(f"Test Acc: {results['accuracy']:.4f} | Test F1: {results['f1']:.4f} | "
+              f"Precision: {results['precision']:.4f}, Recall: {results['recall']:.4f}")
+        print(f"Test Oversmoothing: {results['oversmoothing']}")
+
+        return results
     
     def create_data_loaders(self, batch_size=32):
 

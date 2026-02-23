@@ -6,7 +6,8 @@ from torch_geometric.data import Data
 from copy import deepcopy
 import time
 from collections import defaultdict
-from model.evaluation import OversmoothingMetrics, ClassificationMetrics
+from model.evaluation import (OversmoothingMetrics, ClassificationMetrics,
+                              compute_oversmoothing_for_mask, evaluate_model)
 
 
 class ContrastiveProjectionHead(torch.nn.Module):
@@ -112,57 +113,6 @@ class CRGNNModel:
         self.oversmoothing_evaluator = OversmoothingMetrics(device=self.device)
         self.cls_evaluator = ClassificationMetrics(average='macro')
 
-    def _compute_oversmoothing_metrics(self, embeddings, edge_index, node_mask):
-
-        try:
-            masked_node_indices = torch.where(node_mask)[0]
-            masked_embeddings = embeddings[node_mask]
-            mask_set = set(masked_node_indices.cpu().numpy())
-
-            edge_mask = torch.tensor([
-                src.item() in mask_set and tgt.item() in mask_set
-                for src, tgt in edge_index.t()
-            ], device=edge_index.device)
-            
-            if not edge_mask.any():
-                return {
-                    'NumRank': float(min(masked_embeddings.shape)),
-                    'Erank': float(min(masked_embeddings.shape)),
-                    'EDir': 0.0,
-                    'EDir_traditional': 0.0,
-                    'EProj': 0.0,
-                    'MAD': 0.0
-                }
-            
-            masked_edges = edge_index[:, edge_mask]
-            node_mapping = {orig_idx.item(): local_idx 
-                           for local_idx, orig_idx in enumerate(masked_node_indices)}
-            
-            remapped_edges = torch.stack([
-                torch.tensor([node_mapping[src.item()] for src in masked_edges[0]], 
-                           device=edge_index.device),
-                torch.tensor([node_mapping[tgt.item()] for tgt in masked_edges[1]], 
-                           device=edge_index.device)
-            ])
-            
-            graphs_in_class = [{
-                'X': masked_embeddings,
-                'edge_index': remapped_edges,
-                'edge_weight': None
-            }]
-            
-            return self.oversmoothing_evaluator.compute_all_metrics(
-                X=masked_embeddings,
-                edge_index=remapped_edges,
-                graphs_in_class=graphs_in_class
-            )
-        except Exception as e:
-            print(f"Warning: Could not compute oversmoothing metrics for mask: {e}")
-            return {
-                'NumRank': 0.0, 'Erank': 0.0, 'EDir': 0.0,
-                'EDir_traditional': 0.0, 'EProj': 0.0, 'MAD': 0.0
-            }
-
     def train_model(self, backbone_model, graph_data, model_config, model_factory_function):
         per_epochs_oversmoothing = defaultdict(list)
         graph_data = graph_data.to(self.device)
@@ -230,11 +180,11 @@ class CRGNNModel:
                     embeddings = backbone(Data(x=graph_data.x, edge_index=graph_data.edge_index))
                     embeddings = adapter(embeddings)
                     
-                    train_oversmooth_metrics = self._compute_oversmoothing_metrics(
-                        embeddings, graph_data.edge_index, train_mask
+                    train_oversmooth_metrics = compute_oversmoothing_for_mask(
+                        self.oversmoothing_evaluator, embeddings, graph_data.edge_index, train_mask
                     )
-                    val_oversmooth_metrics = self._compute_oversmoothing_metrics(
-                        embeddings, graph_data.edge_index, val_mask
+                    val_oversmooth_metrics = compute_oversmoothing_for_mask(
+                        self.oversmoothing_evaluator, embeddings, graph_data.edge_index, val_mask
                     )
                     for key, value in train_oversmooth_metrics.items():
                         per_epochs_oversmoothing[key].append(value)
@@ -269,44 +219,33 @@ class CRGNNModel:
             adapter.load_state_dict(self.best_weights['adapter'])
             proj_head.load_state_dict(self.best_weights['proj_head'])
             class_head.load_state_dict(self.best_weights['class_head'])
-        
-        test_loss, test_acc = self._evaluate(backbone, adapter, class_head,
-                                           graph_data.x, graph_data.edge_index,
-                                           clean_labels, test_mask)
-        
+
         backbone.eval()
         adapter.eval()
         class_head.eval()
         with torch.no_grad():
-            embeddings = backbone(Data(x=graph_data.x, edge_index=graph_data.edge_index))
-            embeddings = adapter(embeddings)
-            preds = class_head(embeddings)
-            
-            y_true = clean_labels[test_mask].cpu().numpy()
-            y_pred = preds[test_mask].exp().argmax(dim=1).cpu().numpy()
-            
-            test_cls_metrics = self.cls_evaluator.compute_all_metrics(y_pred, y_true)
-            test_f1 = test_cls_metrics['f1']
-            test_precision = test_cls_metrics['precision']
-            test_recall = test_cls_metrics['recall']
-            
-            test_oversmooth_metrics = self._compute_oversmoothing_metrics(
-                embeddings, graph_data.edge_index, test_mask
+            def _get_predictions():
+                h = backbone(Data(x=graph_data.x, edge_index=graph_data.edge_index))
+                h = adapter(h)
+                return class_head(h).exp().argmax(dim=1)
+
+            def _get_embeddings():
+                h = backbone(Data(x=graph_data.x, edge_index=graph_data.edge_index))
+                return adapter(h)
+
+            results = evaluate_model(
+                _get_predictions, _get_embeddings, clean_labels,
+                train_mask, val_mask, test_mask,
+                graph_data.edge_index, self.device
             )
-        
-        print(f"Final Test - Acc: {test_acc:.4f}, F1: {test_f1:.4f}")
-        print("Final Test Oversmoothing Metrics:")
-        print(f"Test EDir: {test_oversmooth_metrics['EDir']:.4f}, EDir_trad: {test_oversmooth_metrics['EDir_traditional']:.4f}, "
-              f"EProj: {test_oversmooth_metrics['EProj']:.4f}, MAD: {test_oversmooth_metrics['MAD']:.4f}, "
-              f"NumRank: {test_oversmooth_metrics['NumRank']:.4f}, Erank: {test_oversmooth_metrics['Erank']:.4f}")
-        return {
-            'accuracy': float(test_acc),
-            'f1': float(test_f1),
-            'precision': float(test_precision),
-            'recall': float(test_recall),
-            'oversmoothing': test_oversmooth_metrics,
-            'train_oversmoothing' : per_epochs_oversmoothing
-        }
+
+        results['train_oversmoothing'] = per_epochs_oversmoothing
+
+        print(f"Final Test - Acc: {results['accuracy']:.4f}, F1: {results['f1']:.4f} | "
+              f"Precision: {results['precision']:.4f}, Recall: {results['recall']:.4f}")
+        print(f"Test Oversmoothing: {results['oversmoothing']}")
+
+        return results
 
     def _train_step(self, backbone, adapter, proj_head, class_head, 
                    x, edge_index, labels, mask):

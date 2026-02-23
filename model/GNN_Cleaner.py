@@ -6,7 +6,8 @@ import torch.nn.functional as F
 from scipy import sparse
 from collections import defaultdict
 
-from model.evaluation import OversmoothingMetrics, ClassificationMetrics
+from model.evaluation import (OversmoothingMetrics, ClassificationMetrics,
+                              compute_oversmoothing_for_mask, evaluate_model)
 
 class LabelWeightingNetwork(nn.Module):
 
@@ -448,11 +449,11 @@ class GNNCleanerTrainer:
                 except:
                     current_embeddings = self.gnn_model(self.data.x.to(self.device), self.data.edge_index.to(self.device))
 
-                train_oversmoothing_metrics = self._compute_oversmoothing_for_node_subset(
-                    current_embeddings, self.data.edge_index.to(self.device), self.data.train_mask, self.data.y_original
+                train_oversmoothing_metrics = compute_oversmoothing_for_mask(
+                    self.oversmoothing_metric_evaluator, current_embeddings, self.data.edge_index.to(self.device), self.data.train_mask
                 )
-                validation_oversmoothing_metrics = self._compute_oversmoothing_for_node_subset(
-                    current_embeddings, self.data.edge_index.to(self.device), self.data.val_mask, self.data.y_original
+                validation_oversmoothing_metrics = compute_oversmoothing_for_mask(
+                    self.oversmoothing_metric_evaluator, current_embeddings, self.data.edge_index.to(self.device), self.data.val_mask
                 )
 
                 if train_oversmoothing_metrics is not None:
@@ -526,106 +527,38 @@ class GNNCleanerTrainer:
             self.gnn_model.load_state_dict(best_model_checkpoint["gnn_model"])
             self.label_weighting_net.load_state_dict(best_model_checkpoint["weighting_network"])
 
-        final_evaluation_metrics = self._evaluate_model_performance(include_test_metrics=True)
-        
-        try:
-            final_embeddings = self.gnn_model(self.data)
-        except:
-            final_embeddings = self.gnn_model(self.data.x.to(self.device), self.data.edge_index.to(self.device))
+        self.gnn_model.eval()
+        with torch.no_grad():
+            def _get_predictions():
+                try:
+                    return self.gnn_model(self.data).argmax(dim=1)
+                except:
+                    return self.gnn_model(self.data.x.to(self.device), self.data.edge_index.to(self.device)).argmax(dim=1)
 
-        final_train_oversmoothing = self._compute_oversmoothing_for_node_subset(
-            final_embeddings, self.data.edge_index.to(self.device), self.data.train_mask, self.data.y_original
-        )
-        final_validation_oversmoothing = self._compute_oversmoothing_for_node_subset(
-            final_embeddings, self.data.edge_index.to(self.device), self.data.val_mask, self.data.y_original
-        )
-        final_test_oversmoothing = self._compute_oversmoothing_for_node_subset(
-            final_embeddings, self.data.edge_index.to(self.device), self.data.test_mask, self.data.y_original
-        )
+            def _get_embeddings():
+                try:
+                    return self.gnn_model(self.data)
+                except:
+                    return self.gnn_model(self.data.x.to(self.device), self.data.edge_index.to(self.device))
 
-        if final_test_oversmoothing is not None:
-            self.oversmoothing_training_history['test'].append(final_test_oversmoothing)
-        
+            results = evaluate_model(
+                _get_predictions, _get_embeddings, self.data.y_original,
+                self.data.train_mask, self.data.val_mask, self.data.test_mask,
+                self.data.edge_index.to(self.device), self.device
+            )
+
+        results['train_oversmoothing'] = per_epochs_oversmoothing
+
         total_training_time = time.time() - training_start_time
-        
+
         if enable_debug_output:
             print(f"\nGNN Cleaner Training Completed")
-            print(f"Final Test Accuracy: {final_evaluation_metrics['test_acc']:.4f}")
-            print(f"Final Test F1 Score: {final_evaluation_metrics['test_f1']:.4f}")
-            print(f"Final Test Precision: {final_evaluation_metrics['test_precision']:.4f}")
-            print(f"Final Test Recall: {final_evaluation_metrics['test_recall']:.4f}")
+            print(f"Test Acc: {results['accuracy']:.4f} | Test F1: {results['f1']:.4f} | "
+                  f"Precision: {results['precision']:.4f}, Recall: {results['recall']:.4f}")
             print(f"Total training time: {total_training_time:.2f} seconds")
-            print("Final Oversmoothing Metrics")
-            
-            if final_train_oversmoothing is not None:
-                print(f"Train: EDir: {final_train_oversmoothing['EDir']:.4f}, EDir_traditional: {final_train_oversmoothing['EDir_traditional']:.4f}, "
-                    f"EProj: {final_train_oversmoothing['EProj']:.4f}, MAD: {final_train_oversmoothing['MAD']:.4f}, "
-                    f"NumRank: {final_train_oversmoothing['NumRank']:.4f}, Erank: {final_train_oversmoothing['Erank']:.4f}")
-            
-            if final_validation_oversmoothing is not None:
-                print(f"Val: EDir: {final_validation_oversmoothing['EDir']:.4f}, EDir_traditional: {final_validation_oversmoothing['EDir_traditional']:.4f}, "
-                    f"EProj: {final_validation_oversmoothing['EProj']:.4f}, MAD: {final_validation_oversmoothing['MAD']:.4f}, "
-                    f"NumRank: {final_validation_oversmoothing['NumRank']:.4f}, Erank: {final_validation_oversmoothing['Erank']:.4f}")
-            
-            if final_test_oversmoothing is not None:
-                print(f"Test: EDir: {final_test_oversmoothing['EDir']:.4f}, EDir_traditional: {final_test_oversmoothing['EDir_traditional']:.4f}, "
-                    f"EProj: {final_test_oversmoothing['EProj']:.4f}, MAD: {final_test_oversmoothing['MAD']:.4f}, "
-                    f"NumRank: {final_test_oversmoothing['NumRank']:.4f}, Erank: {final_test_oversmoothing['Erank']:.4f}")
-        
-        return {
-            'accuracy': final_evaluation_metrics['test_acc'],
-            'f1': final_evaluation_metrics['test_f1'],
-            'precision': final_evaluation_metrics['test_precision'],
-            'recall': final_evaluation_metrics['test_recall'],
-            'oversmoothing': final_test_oversmoothing,
-            'train_oversmoothing': per_epochs_oversmoothing
-        }
+            print(f"Test Oversmoothing: {results['oversmoothing']}")
+
+        return results
     
-    def _compute_oversmoothing_for_node_subset(self, node_embeddings, edge_connectivity, node_subset_mask, node_labels=None):
-
-        try:
-            subset_node_indices = torch.where(node_subset_mask)[0]
-            subset_embeddings = node_embeddings[node_subset_mask]
-            
-            subset_node_set = set(subset_node_indices.cpu().numpy())
-            edge_subset_mask = torch.tensor([
-                source_node.item() in subset_node_set and target_node.item() in subset_node_set
-                for source_node, target_node in edge_connectivity.t()
-            ], device=edge_connectivity.device)
-            
-            if not edge_subset_mask.any():
-                return {
-                    'NumRank': float(min(subset_embeddings.shape)),
-                    'Erank': float(min(subset_embeddings.shape)),
-                    'EDir': 0.0,
-                    'EDir_traditional': 0.0,
-                    'EProj': 0.0,
-                    'MAD': 0.0
-                }
-            
-            subset_edges = edge_connectivity[:, edge_subset_mask]
-            node_index_mapping = {original_idx.item(): local_idx for local_idx, original_idx in enumerate(subset_node_indices)}
-            
-            remapped_edge_connectivity = torch.stack([
-                torch.tensor([node_index_mapping[source_node.item()] for source_node in subset_edges[0]], device=edge_connectivity.device),
-                torch.tensor([node_index_mapping[target_node.item()] for target_node in subset_edges[1]], device=edge_connectivity.device)
-            ])
-            
-            subset_graph_data = [{
-                'X': subset_embeddings,
-                'edge_index': remapped_edge_connectivity,
-                'edge_weight': None
-            }]
-            
-            return self.oversmoothing_metric_evaluator.compute_all_metrics(
-                X=subset_embeddings,
-                edge_index=remapped_edge_connectivity,
-                graphs_in_class=subset_graph_data
-            )
-            
-        except Exception as computation_error:
-            print(f"Warning: Could not compute oversmoothing metrics for node subset: {computation_error}")
-            return None
-
     def get_oversmoothing_training_history(self):
         return self.oversmoothing_training_history

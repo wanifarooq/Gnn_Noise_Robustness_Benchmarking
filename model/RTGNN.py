@@ -12,7 +12,9 @@ import scipy.sparse as sp
 from collections import defaultdict
 
 from model.gnns import GCN, GIN, GAT, GATv2, GPS
-from model.evaluation import OversmoothingMetrics, ClassificationMetrics
+from model.evaluation import (OversmoothingMetrics, ClassificationMetrics,
+                              compute_oversmoothing_for_mask, evaluate_model,
+                              DEFAULT_OVERSMOOTHING)
 
 
 class DualBranchGNNModel(nn.Module):
@@ -341,51 +343,6 @@ class RTGNN(nn.Module):
         
         return normalized_features, node_labels, train_node_indices, val_node_indices, test_node_indices, adjacency_matrix
     
-    def _compute_oversmoothing_metrics_for_subset(self, node_embeddings, edge_indices, subset_mask, node_labels=None):
-        try:
-            subset_node_indices = torch.where(subset_mask)[0]
-            subset_embeddings = node_embeddings[subset_mask]
-            
-            subset_nodes_set = set(subset_node_indices.cpu().numpy())
-            edge_in_subset_mask = torch.tensor([
-                source.item() in subset_nodes_set and target.item() in subset_nodes_set
-                for source, target in edge_indices.t()
-            ], device=edge_indices.device)
-            
-            if not edge_in_subset_mask.any():
-                return {
-                    'NumRank': float(min(subset_embeddings.shape)),
-                    'Erank': float(min(subset_embeddings.shape)),
-                    'EDir': 0.0,
-                    'EDir_traditional': 0.0,
-                    'EProj': 0.0,
-                    'MAD': 0.0
-                }
-            
-            subset_edges = edge_indices[:, edge_in_subset_mask]
-            node_index_mapping = {original_idx.item(): local_idx for local_idx, original_idx in enumerate(subset_node_indices)}
-            
-            remapped_edges = torch.stack([
-                torch.tensor([node_index_mapping[source.item()] for source in subset_edges[0]], device=edge_indices.device),
-                torch.tensor([node_index_mapping[target.item()] for target in subset_edges[1]], device=edge_indices.device)
-            ])
-
-            subset_graph_data = [{
-                'X': subset_embeddings,
-                'edge_index': remapped_edges,
-                'edge_weight': None
-            }]
-            
-            return self.oversmoothing_evaluator.compute_all_metrics(
-                X=subset_embeddings,
-                edge_index=remapped_edges,
-                graphs_in_class=subset_graph_data
-            )
-            
-        except Exception as e:
-            print(f"Warning: Could not compute oversmoothing metrics for subset: {e}")
-            return None
-            
     def _get_gnn_specific_configuration(self):
         base_config = {'num_layers': getattr(self.training_config, 'n_layers', 2)}
             
@@ -462,8 +419,8 @@ class RTGNN(nn.Module):
             val_mask = torch.zeros(node_features.size(0), dtype=torch.bool, device=self.device)
             val_mask[val_node_indices] = True
             
-            train_oversmoothing = self._compute_oversmoothing_metrics_for_subset(averaged_embeddings, final_edge_indices, train_mask, node_labels)
-            val_oversmoothing = self._compute_oversmoothing_metrics_for_subset(averaged_embeddings, final_edge_indices, val_mask, node_labels)
+            train_oversmoothing = compute_oversmoothing_for_mask(self.oversmoothing_evaluator, averaged_embeddings, final_edge_indices, train_mask)
+            val_oversmoothing = compute_oversmoothing_for_mask(self.oversmoothing_evaluator, averaged_embeddings, final_edge_indices, val_mask)
 
             if test_node_indices is not None:
                 test_loss_branch1 = F.cross_entropy(first_branch_output[test_node_indices], node_labels[test_node_indices])
@@ -476,7 +433,7 @@ class RTGNN(nn.Module):
                 
                 test_mask = torch.zeros(node_features.size(0), dtype=torch.bool, device=self.device)
                 test_mask[test_node_indices] = True
-                test_oversmoothing = self._compute_oversmoothing_metrics_for_subset(averaged_embeddings, final_edge_indices, test_mask, node_labels)
+                test_oversmoothing = compute_oversmoothing_for_mask(self.oversmoothing_evaluator, averaged_embeddings, final_edge_indices, test_mask)
                 
                 return performance_metrics, train_oversmoothing, val_oversmoothing, test_oversmoothing
             
@@ -657,7 +614,6 @@ class RTGNN(nn.Module):
 
         node_features = self.node_features.to(self.device)
         node_labels = torch.as_tensor(clean_labels if clean_labels is not None else self.node_labels, dtype=torch.long, device=self.device)
-        test_indices = self.test_node_indices
 
         if self.best_model_state is None:
             print("Model not trained yet.")
@@ -666,94 +622,52 @@ class RTGNN(nn.Module):
                 'f1': 0.0,
                 'precision': 0.0,
                 'recall': 0.0,
-                'oversmoothing': {
-                    'EDir': 0.0,
-                    'EDir_traditional': 0.0,
-                    'EProj': 0.0,
-                    'MAD': 0.0,
-                    'NumRank': 0.0,
-                    'Erank': 0.0
-                }
+                'oversmoothing': dict(DEFAULT_OVERSMOOTHING),
+                'train_oversmoothing_final': dict(DEFAULT_OVERSMOOTHING),
+                'val_oversmoothing_final': dict(DEFAULT_OVERSMOOTHING),
             }
 
         self.eval()
         with torch.no_grad():
-            node_features = node_features.to(self.device)
-            node_labels = torch.as_tensor(node_labels, dtype=torch.long, device=self.device)
-            
-            first_branch_output, second_branch_output = self.dual_branch_predictor(
-                node_features, 
-                self.best_model_state['edges'], 
-                self.best_model_state['weights']
+            num_nodes = node_features.size(0)
+            train_mask = torch.zeros(num_nodes, dtype=torch.bool, device=self.device)
+            train_mask[self.train_node_indices] = True
+            val_mask = torch.zeros(num_nodes, dtype=torch.bool, device=self.device)
+            val_mask[self.val_node_indices] = True
+            test_mask = torch.zeros(num_nodes, dtype=torch.bool, device=self.device)
+            test_mask[self.test_node_indices] = True
+
+            best_edges = self.best_model_state['edges']
+            best_weights = self.best_model_state['weights']
+
+            def _get_predictions():
+                out1, out2 = self.dual_branch_predictor(node_features, best_edges, best_weights)
+                return ((out1 + out2) / 2).argmax(dim=1)
+
+            def _get_embeddings():
+                graph_data = Data(x=node_features, edge_index=best_edges)
+                if best_weights is not None:
+                    graph_data.edge_attr = best_weights.unsqueeze(-1) if best_weights.dim() == 1 else best_weights
+                graph_data = graph_data.to(self.device)
+                try:
+                    first_emb = self.dual_branch_predictor.first_branch.get_embeddings(graph_data) if hasattr(self.dual_branch_predictor.first_branch, 'get_embeddings') else self.dual_branch_predictor.first_branch(graph_data)
+                    second_emb = self.dual_branch_predictor.second_branch.get_embeddings(graph_data) if hasattr(self.dual_branch_predictor.second_branch, 'get_embeddings') else self.dual_branch_predictor.second_branch(graph_data)
+                    return (first_emb + second_emb) / 2
+                except Exception:
+                    out1, out2 = self.dual_branch_predictor(node_features, best_edges, best_weights)
+                    return (out1 + out2) / 2
+
+            results = evaluate_model(
+                _get_predictions, _get_embeddings, node_labels,
+                train_mask, val_mask, test_mask,
+                best_edges, self.device
             )
 
-            test_loss_branch1 = F.cross_entropy(first_branch_output[test_indices], node_labels[test_indices])
-            test_loss_branch2 = F.cross_entropy(second_branch_output[test_indices], node_labels[test_indices])
-            test_loss = (test_loss_branch1 + test_loss_branch2) / 2
+            print(f"Test Acc: {results['accuracy']:.4f} | Test F1: {results['f1']:.4f} | "
+                  f"Precision: {results['precision']:.4f}, Recall: {results['recall']:.4f}")
+            print(f"Test Oversmoothing: {results['oversmoothing']}")
 
-            averaged_test_predictions = (first_branch_output[test_indices] + second_branch_output[test_indices]) / 2
-            predicted_test_labels = averaged_test_predictions.argmax(dim=1)
-            
-            true_labels = node_labels[test_indices].cpu().numpy()
-            predicted_labels = predicted_test_labels.cpu().numpy()
-            
-            test_accuracy = (predicted_test_labels == node_labels[test_indices]).float().mean().item()
-            test_cls_metrics = self.cls_evaluator.compute_all_metrics(predicted_labels, true_labels)
-            test_f1 = test_cls_metrics['f1']
-            test_precision = test_cls_metrics['precision']
-            test_recall = test_cls_metrics['recall']
-
-            test_mask = torch.zeros(node_features.size(0), dtype=torch.bool, device=self.device)
-            test_mask[test_indices] = True
-            
-            graph_data = Data(x=node_features, edge_index=self.best_model_state['edges'])
-            if self.best_model_state['weights'] is not None:
-                graph_data.edge_attr = self.best_model_state['weights'].unsqueeze(-1) if self.best_model_state['weights'].dim() == 1 else self.best_model_state['weights']
-            graph_data = graph_data.to(self.device)
-            
-            first_embeddings = self.dual_branch_predictor.first_branch.get_embeddings(graph_data) if hasattr(self.dual_branch_predictor.first_branch, 'get_embeddings') else self.dual_branch_predictor.first_branch(graph_data)
-            second_embeddings = self.dual_branch_predictor.second_branch.get_embeddings(graph_data) if hasattr(self.dual_branch_predictor.second_branch, 'get_embeddings') else self.dual_branch_predictor.second_branch(graph_data)
-            averaged_embeddings = (first_embeddings + second_embeddings) / 2
-
-            test_oversmoothing = self._compute_oversmoothing_metrics_for_subset(
-                averaged_embeddings, self.best_model_state['edges'], test_mask, node_labels
-            )
-
-            if test_oversmoothing is not None:
-                oversmoothing_dict = {
-                    'EDir': test_oversmoothing['EDir'],
-                    'EDir_traditional': test_oversmoothing['EDir_traditional'],
-                    'EProj': test_oversmoothing['EProj'],
-                    'MAD': test_oversmoothing['MAD'],
-                    'NumRank': test_oversmoothing['NumRank'],
-                    'Erank': test_oversmoothing['Erank']
-                }
-            else:
-                oversmoothing_dict = {
-                    'EDir': 0.0,
-                    'EDir_traditional': 0.0,
-                    'EProj': 0.0,
-                    'MAD': 0.0,
-                    'NumRank': 0.0,
-                    'Erank': 0.0
-                }
-
-            print(f"Test Loss: {test_loss:.4f} | Test Acc: {test_accuracy:.4f} | Test F1: {test_f1:.4f}")
-            print(f"Test Precision: {test_precision:.4f} | Test Recall: {test_recall:.4f}")
-            
-            if test_oversmoothing is not None:
-                print(f"Test Oversmoothing - EDir: {oversmoothing_dict['EDir']:.4f}, "
-                      f"EDir_traditional: {oversmoothing_dict['EDir_traditional']:.4f}, "
-                      f"EProj: {oversmoothing_dict['EProj']:.4f}, MAD: {oversmoothing_dict['MAD']:.4f}, "
-                      f"NumRank: {oversmoothing_dict['NumRank']:.4f}, Erank: {oversmoothing_dict['Erank']:.4f}")
-            
-            return {
-                'accuracy': test_accuracy,
-                'f1': test_f1,
-                'precision': test_precision,
-                'recall': test_recall,
-                'oversmoothing': oversmoothing_dict,
-            }
+            return results
         
     def _generate_knn_edge_connections(self, node_features, original_edge_indices, train_node_indices, k=None):
         #Generate KNN edges

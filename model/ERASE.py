@@ -10,7 +10,8 @@ import copy
 from scipy.sparse import csr_matrix
 from collections import defaultdict
 
-from model.evaluation import OversmoothingMetrics, ClassificationMetrics
+from model.evaluation import (OversmoothingMetrics, ClassificationMetrics,
+                              compute_oversmoothing_for_mask, evaluate_model)
 
 
 def normalize_adj_row(adj_matrix):
@@ -447,8 +448,6 @@ class ERASETrainer:
             max_epochs = self.training_config.get('total_epochs', 200)
             patience_limit = self.training_config.get('patience', 50)
 
-            best_oversmoothing_metrics = None
-            
             for current_epoch in range(max_epochs):
  
                 epoch_training_results = self._execute_single_training_epoch(
@@ -464,11 +463,15 @@ class ERASETrainer:
 
                 should_compute_oversmoothing = (current_epoch + 1) % 20 == 0
                 if should_compute_oversmoothing:
-                    oversmoothing_metrics_by_split = self._compute_oversmoothing_metrics_for_all_splits(model, graph_data)
-                    train_oversmoothing = oversmoothing_metrics_by_split.get('train', {})
+                    model.eval()
+                    with torch.no_grad():
+                        learned_features = model(graph_data)
+                    train_oversmoothing = compute_oversmoothing_for_mask(
+                        self.oversmoothing_metrics_calculator, learned_features, graph_data.edge_index, graph_data.train_mask)
+                    validation_oversmoothing = compute_oversmoothing_for_mask(
+                        self.oversmoothing_metrics_calculator, learned_features, graph_data.edge_index, graph_data.val_mask)
                     for key, value in train_oversmoothing.items():
                         per_epochs_oversmoothing[key].append(value)
-                    validation_oversmoothing = oversmoothing_metrics_by_split.get('val', {})
                 else:
                     train_oversmoothing = {}
                     validation_oversmoothing = {}
@@ -485,8 +488,6 @@ class ERASETrainer:
                     best_validation_accuracy = validation_accuracy
                     patience_counter = 0
                     best_model_state = copy.deepcopy(model.state_dict())
-                    if should_compute_oversmoothing:
-                        best_oversmoothing_metrics = oversmoothing_metrics_by_split
                 else:
                     patience_counter += 1
 
@@ -496,20 +497,42 @@ class ERASETrainer:
                     break
 
             model.load_state_dict(best_model_state)
-            final_test_results = self._evaluate_final_test_performance(model, graph_data, predicted_labels)
-            final_oversmoothing_metrics = self._compute_oversmoothing_metrics_for_all_splits(model, graph_data)
+            model.eval()
+            with torch.no_grad():
+                learned_features = model(graph_data)
+
+            # Fit LogisticRegression probe for predictions
+            normalized_features = normalize(learned_features.detach().cpu().numpy(), norm='l2')
+            train_features = normalized_features[graph_data.train_mask.cpu()]
+            train_noisy_labels = predicted_labels[graph_data.train_mask].cpu().numpy()
+
+            fitted_classifier = LogisticRegression(
+                solver='lbfgs', multi_class='auto', max_iter=1000,
+                random_state=self.training_config.get('seed', 42)
+            ).fit(train_features, train_noisy_labels)
+
+            def _get_predictions():
+                norm_feats = normalize(learned_features.detach().cpu().numpy(), norm='l2')
+                preds = fitted_classifier.predict(norm_feats)
+                return torch.tensor(preds, device=self.computation_device, dtype=torch.long)
+
+            def _get_embeddings():
+                return learned_features
+
+            results = evaluate_model(
+                _get_predictions, _get_embeddings, graph_data.y,
+                graph_data.train_mask, graph_data.val_mask, graph_data.test_mask,
+                graph_data.edge_index, self.computation_device
+            )
+            results['train_oversmoothing'] = per_epochs_oversmoothing
 
             if debug_mode:
-                self._print_final_results(final_test_results, final_oversmoothing_metrics)
+                print(f"\nERASE Training completed!")
+                print(f"Test Acc: {results['accuracy']:.4f} | Test F1: {results['f1']:.4f} | "
+                      f"Precision: {results['precision']:.4f}, Recall: {results['recall']:.4f}")
+                print(f"Test Oversmoothing: {results['oversmoothing']}")
 
-            return {
-                'accuracy': final_test_results[0],
-                'f1': final_test_results[1],
-                'precision': final_test_results[2],
-                'recall': final_test_results[3],
-                'oversmoothing': final_oversmoothing_metrics.get('test', {}),
-                'train_oversmoothing': per_epochs_oversmoothing
-            }
+            return results
 
     def _execute_single_training_epoch(self, model, graph_data, optimizer, loss_function, 
                                      adjacency_matrix, semantic_labels_matrix, predicted_labels):
@@ -591,111 +614,7 @@ class ERASETrainer:
         
         return train_f1, validation_f1
 
-    @torch.no_grad()
-    def _evaluate_final_test_performance(self, model, graph_data, predicted_labels):
-
-        model.eval()
-        learned_node_features = model(graph_data)
-
-        _, _, test_accuracy = LinearProbeEvaluator.evaluate_with_linear_probe(
-            learned_node_features, 
-            graph_data, 
-            predicted_labels, 
-            graph_data.y,
-            random_state=self.training_config.get('seed', 42)
-        )
-
-        normalized_features = normalize(learned_node_features.detach().cpu().numpy(), norm='l2')
-        
-        train_features = normalized_features[graph_data.train_mask.cpu()]
-        test_features = normalized_features[graph_data.test_mask.cpu()]
-        
-        train_noisy_labels = predicted_labels[graph_data.train_mask].cpu().numpy()
-        true_test_labels = graph_data.y.cpu().numpy()
-        
-        linear_classifier = LogisticRegression(
-            solver='lbfgs', 
-            multi_class='auto', 
-            max_iter=1000, 
-            random_state=self.training_config.get('seed', 42)
-        )
-        linear_classifier.fit(train_features, train_noisy_labels)
-        
-        test_predictions = linear_classifier.predict(test_features)
-        
-        test_cls_metrics = self.cls_evaluator.compute_all_metrics(test_predictions, true_test_labels[graph_data.test_mask.cpu()])
-        test_f1 = test_cls_metrics['f1']
-        test_precision = test_cls_metrics['precision']
-        test_recall = test_cls_metrics['recall']
-        
-        test_loss = self._compute_cross_entropy_loss_for_split(model, graph_data, graph_data.test_mask)
-        
-        return test_accuracy, test_f1, test_precision, test_recall, test_loss.item()
-
-    @torch.no_grad()
-    def _compute_cross_entropy_loss_for_split(self, model, graph_data, split_mask):
-
-        learned_features = model(graph_data)
-        split_true_labels = graph_data.y[split_mask]
-        cross_entropy_loss = torch.nn.CrossEntropyLoss()
-        split_loss = cross_entropy_loss(learned_features[split_mask], split_true_labels)
-        return split_loss
-
-    @torch.no_grad()
-    def _compute_oversmoothing_metrics_for_all_splits(self, model, graph_data):
-
-        model.eval()
-        learned_node_features = model(graph_data)
-        
-        def extract_subgraph_for_split(node_mask):
-
-            split_nodes = torch.where(node_mask)[0]
-            node_index_mapping = {node.item(): idx for idx, node in enumerate(split_nodes)}
-            
-            edge_mask = torch.isin(graph_data.edge_index[0], split_nodes) & torch.isin(graph_data.edge_index[1], split_nodes)
-            filtered_edge_index = graph_data.edge_index[:, edge_mask]
-            
-            if filtered_edge_index.size(1) > 0:
-                remapped_edge_index = torch.zeros_like(filtered_edge_index)
-                for edge_idx in range(filtered_edge_index.size(1)):
-                    remapped_edge_index[0, edge_idx] = node_index_mapping[filtered_edge_index[0, edge_idx].item()]
-                    remapped_edge_index[1, edge_idx] = node_index_mapping[filtered_edge_index[1, edge_idx].item()]
-                return learned_node_features[node_mask], remapped_edge_index
-            else:
-                return learned_node_features[node_mask], torch.empty((2, 0), dtype=torch.long, device=graph_data.edge_index.device)
-
-        oversmoothing_metrics_by_split = {}
-        for split_name, split_mask in [('train', graph_data.train_mask), ('val', graph_data.val_mask), ('test', graph_data.test_mask)]:
-            split_features, split_edge_index = extract_subgraph_for_split(split_mask)
-            
-            if split_edge_index.size(1) > 0:
-                subgraphs_for_evaluation = [{
-                    'X': split_features,
-                    'edge_index': split_edge_index,
-                    'edge_weight': None
-                }]
-                
-                split_oversmoothing_metrics = self.oversmoothing_metrics_calculator.compute_all_metrics(
-                    X=split_features,
-                    edge_index=split_edge_index,
-                    edge_weight=None,
-                    graphs_in_class=subgraphs_for_evaluation
-                )
-                oversmoothing_metrics_by_split[split_name] = split_oversmoothing_metrics
-            else:
-
-                oversmoothing_metrics_by_split[split_name] = {
-                    'EDir': 0.0,
-                    'NumRank': float(min(split_features.shape)),
-                    'Erank': float(min(split_features.shape)),
-                    'EDir_traditional': 0.0,
-                    'EProj': 0.0,
-                    'MAD': 0.0
-                }
-        
-        return oversmoothing_metrics_by_split
-
-    def _print_epoch_debug_information(self, epoch_number, train_acc, val_acc, train_f1, val_f1, 
+    def _print_epoch_debug_information(self, epoch_number, train_acc, val_acc, train_f1, val_f1,
                                      train_oversmoothing, val_oversmoothing, should_print_oversmoothing=True):
 
         print(f"Epoch {epoch_number+1:03d} | Train Acc: {train_acc:.4f}, Val Acc: {val_acc:.4f} | "
@@ -725,36 +644,6 @@ class ERASETrainer:
         elif should_print_oversmoothing:
             print("[Oversmoothing Metrics] Computed every 20 epochs - skipping this epoch")
 
-    def _print_final_results(self, test_results, final_oversmoothing_metrics):
-
-        test_acc, test_f1, test_precision, test_recall, test_loss = test_results
-        
-        final_train_oversmoothing = final_oversmoothing_metrics.get('train', {})
-        final_val_oversmoothing = final_oversmoothing_metrics.get('val', {})
-        final_test_oversmoothing = final_oversmoothing_metrics.get('test', {})
-
-        print(f"\nERASE Training completed!")
-        print(f"Test Accuracy: {test_acc:.4f}")
-        print(f"Test F1: {test_f1:.4f}")
-        print(f"Test Precision: {test_precision:.4f}")
-        print(f"Test Recall: {test_recall:.4f}")
-        print("Final Oversmoothing Metrics:")
-
-        if final_train_oversmoothing:
-            print(f"Train: EDir: {final_train_oversmoothing['EDir']:.4f}, EDir_traditional: {final_train_oversmoothing['EDir_traditional']:.4f}, "
-                f"EProj: {final_train_oversmoothing['EProj']:.4f}, MAD: {final_train_oversmoothing['MAD']:.4f}, "
-                f"NumRank: {final_train_oversmoothing['NumRank']:.4f}, Erank: {final_train_oversmoothing['Erank']:.4f}")
-
-        if final_val_oversmoothing:
-            print(f"Val: EDir: {final_val_oversmoothing['EDir']:.4f}, EDir_traditional: {final_val_oversmoothing['EDir_traditional']:.4f}, "
-                f"EProj: {final_val_oversmoothing['EProj']:.4f}, MAD: {final_val_oversmoothing['MAD']:.4f}, "
-                f"NumRank: {final_val_oversmoothing['NumRank']:.4f}, Erank: {final_val_oversmoothing['Erank']:.4f}")
-
-        if final_test_oversmoothing:
-            print(f"Test: EDir: {final_test_oversmoothing['EDir']:.4f}, EDir_traditional: {final_test_oversmoothing['EDir_traditional']:.4f}, "
-                f"EProj: {final_test_oversmoothing['EProj']:.4f}, MAD: {final_test_oversmoothing['MAD']:.4f}, "
-                f"NumRank: {final_test_oversmoothing['NumRank']:.4f}, Erank: {final_test_oversmoothing['Erank']:.4f}")
-
 
 def create_enhanced_gnn_model(model_creation_function, gnn_model_name, enhancement_configuration=None, **model_creation_kwargs):
 
@@ -780,17 +669,26 @@ def create_enhanced_gnn_model(model_creation_function, gnn_model_name, enhanceme
     )
 
 
-def analyze_oversmoothing_evolution_during_training(erase_trainer, trained_model, graph_data, 
+def analyze_oversmoothing_evolution_during_training(erase_trainer, trained_model, graph_data,
                                                    epochs_to_analyze=None):
 
     if epochs_to_analyze is None:
         epochs_to_analyze = list(range(10, 201, 10))
-    
-    oversmoothing_evolution = {
-        epoch: erase_trainer._compute_oversmoothing_metrics_for_all_splits(trained_model, graph_data) 
-        for epoch in epochs_to_analyze
-    }
-    
+
+    oversmoothing_evolution = {}
+    trained_model.eval()
+    with torch.no_grad():
+        learned_features = trained_model(graph_data)
+    for epoch in epochs_to_analyze:
+        oversmoothing_evolution[epoch] = {
+            split_name: compute_oversmoothing_for_mask(
+                erase_trainer.oversmoothing_metrics_calculator, learned_features,
+                graph_data.edge_index, split_mask)
+            for split_name, split_mask in [('train', graph_data.train_mask),
+                                           ('val', graph_data.val_mask),
+                                           ('test', graph_data.test_mask)]
+        }
+
     return oversmoothing_evolution
 
 

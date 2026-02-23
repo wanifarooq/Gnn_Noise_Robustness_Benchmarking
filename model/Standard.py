@@ -1,6 +1,4 @@
 import copy
-import random
-import math
 import numpy as np
 import torch
 import torch.nn as nn
@@ -8,59 +6,8 @@ import torch.nn.functional as F
 import torch.optim as optim
 from collections import defaultdict
 
-from model.evaluation import OversmoothingMetrics, ClassificationMetrics
-
-def _compute_oversmoothing_for_mask(oversmoothing_evaluator, embeddings, edge_index, mask, labels=None):
-    try:
-        mask_indices = torch.where(mask)[0]
-        mask_embeddings = embeddings[mask]
-        
-        mask_set = set(mask_indices.cpu().numpy())
-        edge_mask = torch.tensor([
-            src.item() in mask_set and tgt.item() in mask_set
-            for src, tgt in edge_index.t()
-        ], device=edge_index.device)
-        
-        if not edge_mask.any():
-            return {
-                'NumRank': float(min(mask_embeddings.shape)),
-                'Erank': float(min(mask_embeddings.shape)),
-                'EDir': 0.0,
-                'EDir_traditional': 0.0,
-                'EProj': 0.0,
-                'MAD': 0.0
-            }
-        
-        masked_edges = edge_index[:, edge_mask]
-        node_mapping = {orig_idx.item(): local_idx for local_idx, orig_idx in enumerate(mask_indices)}
-        
-        remapped_edges = torch.stack([
-            torch.tensor([node_mapping[src.item()] for src in masked_edges[0]], device=edge_index.device),
-            torch.tensor([node_mapping[tgt.item()] for tgt in masked_edges[1]], device=edge_index.device)
-        ])
-        
-        graphs_in_class = [{
-            'X': mask_embeddings,
-            'edge_index': remapped_edges,
-            'edge_weight': None
-        }]
-        
-        return oversmoothing_evaluator.compute_all_metrics(
-            X=mask_embeddings,
-            edge_index=remapped_edges,
-            graphs_in_class=graphs_in_class
-        )
-        
-    except Exception as e:
-        print(f"Warning: Could not compute oversmoothing metrics for mask: {e}")
-        return {
-            'NumRank': 0.0,
-            'Erank': 0.0,
-            'EDir': 0.0,
-            'EDir_traditional': 0.0,
-            'EProj': 0.0,
-            'MAD': 0.0
-        }
+from model.evaluation import (OversmoothingMetrics, ClassificationMetrics,
+                              compute_oversmoothing_for_mask, evaluate_model)
 
 def train_with_standard_loss(
     model, data, noisy_indices, device,
@@ -119,89 +66,42 @@ def train_with_standard_loss(
             break
 
         if debug and epoch % 20 == 0:
-            
-            train_oversmoothing = _compute_oversmoothing_for_mask(
-                oversmoothing_evaluator, out, data.edge_index, data.train_mask, data.y
+            train_oversmoothing = compute_oversmoothing_for_mask(
+                oversmoothing_evaluator, out, data.edge_index, data.train_mask
             )
-            val_oversmoothing = _compute_oversmoothing_for_mask(
-                oversmoothing_evaluator, out, data.edge_index, data.val_mask, data.y
+            val_oversmoothing = compute_oversmoothing_for_mask(
+                oversmoothing_evaluator, out, data.edge_index, data.val_mask
             )
 
             for key, value in train_oversmoothing.items():
                 per_epochs_oversmoothing[key].append(value)
-            train_de = train_oversmoothing['EDir']
-            train_de_traditional = train_oversmoothing['EDir_traditional']
-            train_eproj = train_oversmoothing['EProj']
-            train_mad = train_oversmoothing['MAD']
-            train_num_rank = train_oversmoothing['NumRank']
-            train_eff_rank = train_oversmoothing['Erank']
-
-            val_de = val_oversmoothing['EDir']
-            val_de_traditional = val_oversmoothing['EDir_traditional']
-            val_eproj = val_oversmoothing['EProj']
-            val_mad = val_oversmoothing['MAD']
-            val_num_rank = val_oversmoothing['NumRank']
-            val_eff_rank = val_oversmoothing['Erank']
 
             print(f"Epoch {epoch:03d} | Train Acc: {train_acc:.4f}, Val Acc: {val_acc:.4f} | "
                   f"Train F1: {train_f1:.4f}, Val F1: {val_f1:.4f}")
-            print(f"Train DE: {train_de:.4f}, Val DE: {val_de:.4f} | "
-                  f"Train DE_trad: {train_de_traditional:.4f}, Val DE_trad: {val_de_traditional:.4f} | "
-                  f"Train EProj: {train_eproj:.4f}, Val EProj: {val_eproj:.4f} | "
-                  f"Train MAD: {train_mad:.4f}, Val MAD: {val_mad:.4f} | "
-                  f"Train NumRank: {train_num_rank:.4f}, Val NumRank: {val_num_rank:.4f} | "
-                  f"Train Erank: {train_eff_rank:.4f}, Val Erank: {val_eff_rank:.4f}")
+            print(f"Train DE: {train_oversmoothing['EDir']:.4f}, Val DE: {val_oversmoothing['EDir']:.4f} | "
+                  f"Train DE_trad: {train_oversmoothing['EDir_traditional']:.4f}, Val DE_trad: {val_oversmoothing['EDir_traditional']:.4f} | "
+                  f"Train EProj: {train_oversmoothing['EProj']:.4f}, Val EProj: {val_oversmoothing['EProj']:.4f} | "
+                  f"Train MAD: {train_oversmoothing['MAD']:.4f}, Val MAD: {val_oversmoothing['MAD']:.4f} | "
+                  f"Train NumRank: {train_oversmoothing['NumRank']:.4f}, Val NumRank: {val_oversmoothing['NumRank']:.4f} | "
+                  f"Train Erank: {train_oversmoothing['Erank']:.4f}, Val Erank: {val_oversmoothing['Erank']:.4f}")
+
     if best_model_state is not None:
         model.load_state_dict(best_model_state)
     model.eval()
     with torch.no_grad():
-        out = model(data)
-        test_idx = data.test_mask.nonzero(as_tuple=True)[0]
-        test_loss = criterion(out[test_idx], data.y[test_idx])
-        pred = out.argmax(dim=1)
-        
-        test_cls_metrics = cls_evaluator.compute_all_metrics(pred[test_idx], data.y[test_idx])
-        test_acc = test_cls_metrics['accuracy']
-        test_f1 = test_cls_metrics['f1']
-        test_precision = test_cls_metrics['precision']
-        test_recall = test_cls_metrics['recall']
-
-        final_train_oversmoothing = _compute_oversmoothing_for_mask(
-            oversmoothing_evaluator, out, data.edge_index, data.train_mask, data.y
-        )
-        final_val_oversmoothing = _compute_oversmoothing_for_mask(
-            oversmoothing_evaluator, out, data.edge_index, data.val_mask, data.y
-        )
-        test_oversmoothing = _compute_oversmoothing_for_mask(
-            oversmoothing_evaluator, out, data.edge_index, data.test_mask, data.y
+        get_predictions = lambda: model(data).argmax(dim=1)
+        get_embeddings = lambda: model(data)
+        results = evaluate_model(
+            get_predictions, get_embeddings, data.y,
+            data.train_mask, data.val_mask, data.test_mask,
+            data.edge_index, device
         )
 
-    expected_keys = ['NumRank', 'Erank', 'EDir', 'EDir_traditional', 'EProj', 'MAD']
-
-    def normalize_metrics(d):
-        if d is None:
-            return {k: 0.0 for k in expected_keys}
-        return {k: d.get(k, 0.0) for k in expected_keys}
-
-    final_train_oversmoothing = normalize_metrics(final_train_oversmoothing)
-    final_val_oversmoothing = normalize_metrics(final_val_oversmoothing)
-    final_test_oversmoothing = normalize_metrics(test_oversmoothing)
+    results['train_oversmoothing'] = per_epochs_oversmoothing
 
     if debug:
-        print(f"Test Loss: {test_loss:.4f} | Test Acc: {test_acc:.4f} | Test F1: {test_f1:.4f} | "
-              f"Precision: {test_precision:.4f}, Recall: {test_recall:.4f}")
-        print("Final Oversmoothing Metrics:")
-        print(f"Train: {final_train_oversmoothing}")
-        print(f"Val: {final_val_oversmoothing}")
-        print(f"Test: {final_test_oversmoothing}")
-
-    results = {
-        'accuracy': torch.tensor(test_acc),
-        'f1': torch.tensor(test_f1),
-        'precision': torch.tensor(test_precision),
-        'recall': torch.tensor(test_recall),
-        'oversmoothing': final_test_oversmoothing,
-        'train_oversmoothing' : per_epochs_oversmoothing
-    }
+        print(f"Test Acc: {results['accuracy']:.4f} | Test F1: {results['f1']:.4f} | "
+              f"Precision: {results['precision']:.4f}, Recall: {results['recall']:.4f}")
+        print(f"Test Oversmoothing: {results['oversmoothing']}")
 
     return results

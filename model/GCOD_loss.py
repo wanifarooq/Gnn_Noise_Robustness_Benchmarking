@@ -8,7 +8,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 from collections import defaultdict
 
-from model.evaluation import OversmoothingMetrics, ClassificationMetrics
+from model.evaluation import (OversmoothingMetrics, ClassificationMetrics,
+                              compute_oversmoothing_for_mask, evaluate_model)
 
 def evaluate_ce_only(model, data_loader, device='cuda', num_classes=None, mask_name='val'):
     model.eval()
@@ -443,113 +444,17 @@ class GCODTrainer:
             self.model.eval()
             with torch.no_grad():
                 full_embeddings = self.model(self.data)
-                
-                train_node_indices = torch.where(self.data.train_mask)[0]
-                train_embeddings = full_embeddings[train_node_indices]
-                
-                train_node_set = set(train_node_indices.cpu().numpy())
-                train_edge_mask = torch.tensor([
-                    source.item() in train_node_set and target.item() in train_node_set
-                    for source, target in self.data.edge_index.t()
-                ], device=self.data.edge_index.device)
-                
-                train_metrics = {}
-                if train_edge_mask.any():
-                    filtered_train_edges = self.data.edge_index[:, train_edge_mask]
-                    node_remapping = {orig_idx.item(): local_idx for local_idx, orig_idx in enumerate(train_node_indices)}
-                    
-                    remapped_train_edges = torch.stack([
-                        torch.tensor([node_remapping[src.item()] for src in filtered_train_edges[0]], device=self.device),
-                        torch.tensor([node_remapping[tgt.item()] for tgt in filtered_train_edges[1]], device=self.device)
-                    ])
-                    
-                    train_graph_data = [{
-                        'X': train_embeddings,
-                        'edge_index': remapped_train_edges,
-                        'edge_weight': None
-                    }]
-                    
-                    train_metrics = self.oversmoothing_evaluator.compute_all_metrics(
-                        X=train_embeddings,
-                        edge_index=remapped_train_edges,
-                        graphs_in_class=train_graph_data
-                    ) or {}
-                
-                val_node_indices = torch.where(self.data.val_mask)[0]
-                val_embeddings = full_embeddings[val_node_indices]
-                
-                val_node_set = set(val_node_indices.cpu().numpy())
-                val_edge_mask = torch.tensor([
-                    source.item() in val_node_set and target.item() in val_node_set
-                    for source, target in self.data.edge_index.t()
-                ], device=self.data.edge_index.device)
-                
-                val_metrics = {}
-                if val_edge_mask.any():
-                    filtered_val_edges = self.data.edge_index[:, val_edge_mask]
-                    node_remapping = {orig_idx.item(): local_idx for local_idx, orig_idx in enumerate(val_node_indices)}
-                    
-                    remapped_val_edges = torch.stack([
-                        torch.tensor([node_remapping[src.item()] for src in filtered_val_edges[0]], device=self.device),
-                        torch.tensor([node_remapping[tgt.item()] for tgt in filtered_val_edges[1]], device=self.device)
-                    ])
-                    
-                    val_graph_data = [{
-                        'X': val_embeddings,
-                        'edge_index': remapped_val_edges,
-                        'edge_weight': None
-                    }]
-                    
-                    val_metrics = self.oversmoothing_evaluator.compute_all_metrics(
-                        X=val_embeddings,
-                        edge_index=remapped_val_edges,
-                        graphs_in_class=val_graph_data
-                    ) or {}
-                
-                test_node_indices = torch.where(self.data.test_mask)[0]
-                test_embeddings = full_embeddings[test_node_indices]
-                
-                test_node_set = set(test_node_indices.cpu().numpy())
-                test_edge_mask = torch.tensor([
-                    source.item() in test_node_set and target.item() in test_node_set
-                    for source, target in self.data.edge_index.t()
-                ], device=self.data.edge_index.device)
-                
-                test_metrics = {}
-                if test_edge_mask.any():
-                    filtered_test_edges = self.data.edge_index[:, test_edge_mask]
-                    node_remapping = {orig_idx.item(): local_idx for local_idx, orig_idx in enumerate(test_node_indices)}
-                    
-                    remapped_test_edges = torch.stack([
-                        torch.tensor([node_remapping[src.item()] for src in filtered_test_edges[0]], device=self.device),
-                        torch.tensor([node_remapping[tgt.item()] for tgt in filtered_test_edges[1]], device=self.device)
-                    ])
-                    
-                    test_graph_data = [{
-                        'X': test_embeddings,
-                        'edge_index': remapped_test_edges,
-                        'edge_weight': None
-                    }]
-                    
-                    test_metrics = self.oversmoothing_evaluator.compute_all_metrics(
-                        X=test_embeddings,
-                        edge_index=remapped_test_edges,
-                        graphs_in_class=test_graph_data
-                    ) or {}
-            
             return {
-                'train': train_metrics,
-                'val': val_metrics,
-                'test': test_metrics
+                'train': compute_oversmoothing_for_mask(
+                    self.oversmoothing_evaluator, full_embeddings, self.data.edge_index, self.data.train_mask),
+                'val': compute_oversmoothing_for_mask(
+                    self.oversmoothing_evaluator, full_embeddings, self.data.edge_index, self.data.val_mask),
+                'test': compute_oversmoothing_for_mask(
+                    self.oversmoothing_evaluator, full_embeddings, self.data.edge_index, self.data.test_mask),
             }
-            
         except Exception as e:
             print(f"Warning: Could not compute oversmoothing metrics: {e}")
-            return {
-                'train': {},
-                'val': {},
-                'test': {}
-            }
+            return {'train': {}, 'val': {}, 'test': {}}
         
     def plot_oversmoothing_metrics(self):
 
@@ -718,55 +623,19 @@ class GCODTrainer:
         return self._final_model_evaluation(), per_epochs_oversmoothing
     
     def _final_model_evaluation(self):
-        test_metrics = self.evaluate_model(self.test_loader, 'test')
-        oversmoothing_metrics = self.compute_oversmoothing_metrics()
-        
         self.model.eval()
-        all_test_predictions = []
-        all_test_labels = []
-        
         with torch.no_grad():
-            for batch in self.test_loader:
-                batch = batch.to(self.device)
-                model_outputs = self.model(batch)
-                
-                batch_test_mask = batch.test_mask[:batch.batch_size]
-                target_nodes = batch_test_mask.nonzero(as_tuple=True)[0]
-                
-                if len(target_nodes) > 0:
-                    predictions = model_outputs[target_nodes].argmax(dim=1)
-                    all_test_predictions.extend(predictions.cpu().numpy())
-                    all_test_labels.extend(batch.y[target_nodes].cpu().numpy())
-        
-        if len(all_test_predictions) > 0:
-            _test_cls = self.cls_evaluator.compute_all_metrics(all_test_predictions, all_test_labels)
-            test_precision = _test_cls['precision']
-            test_recall = _test_cls['recall']
-        else:
-            test_precision = 0.0
-            test_recall = 0.0
-        
+            get_predictions = lambda: self.model(self.data).argmax(dim=1)
+            get_embeddings = lambda: self.model(self.data)
+            results = evaluate_model(
+                get_predictions, get_embeddings, self.data.y,
+                self.data.train_mask, self.data.val_mask, self.data.test_mask,
+                self.data.edge_index, self.device
+            )
+
         if self.debug:
-            print(f"Test Loss: {test_metrics['loss']:.4f} | "
-                  f"Test Acc: {test_metrics['accuracy']:.4f} | "
-                  f"Test F1: {test_metrics['f1']:.4f}")
-            
-            test_os = oversmoothing_metrics.get('test', {})
-            if test_os:
-                print(f"Test: EDir: {test_os.get('EDir', 0):.4f}, EDir_traditional: {test_os.get('EDir_traditional', 0):.4f}, "
-                      f"EProj: {test_os.get('EProj', 0):.4f}, MAD: {test_os.get('MAD', 0):.4f}, "
-                      f"NumRank: {test_os.get('NumRank', 0):.4f}, Erank: {test_os.get('Erank', 0):.4f}")
-        
-        test_os = oversmoothing_metrics.get('test', {})
-        
-        return {
-            'accuracy': torch.tensor(test_metrics['accuracy']),
-            'f1': torch.tensor(test_metrics['f1']),
-            'precision': torch.tensor(test_precision),
-            'recall': torch.tensor(test_recall),
-            'test_loss': test_metrics['loss'],
-            'oversmoothing': test_os if test_os else {
-                'EDir': 0, 'EDir_traditional': 0, 'EProj': 0,
-                'MAD': 0, 'NumRank': 0, 'Erank': 0
-            },
-        }
+            print(f"Test Acc: {results['accuracy']:.4f} | Test F1: {results['f1']:.4f} | "
+                  f"Precision: {results['precision']:.4f}, Recall: {results['recall']:.4f}")
+            print(f"Test Oversmoothing: {results['oversmoothing']}")
+
+        return results

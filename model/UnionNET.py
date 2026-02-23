@@ -3,7 +3,8 @@ from copy import deepcopy
 import torch
 import torch.nn.functional as F
 from collections import defaultdict
-from model.evaluation import OversmoothingMetrics, ClassificationMetrics
+from model.evaluation import (OversmoothingMetrics, ClassificationMetrics,
+                              compute_oversmoothing_for_mask, evaluate_model)
 
 
 class UnionNET:
@@ -216,11 +217,11 @@ class UnionNET:
             
             # Compute oversmoothing metrics
             if current_epoch % 20 == 0:
-                train_oversmooth_metrics = self._evaluate_oversmoothing_metrics(
-                    model_predictions, mask=self.train_node_mask
+                train_oversmooth_metrics = compute_oversmoothing_for_mask(
+                    self.oversmoothing_evaluator, model_predictions, self.edge_connections, self.train_node_mask
                 )
-                val_oversmooth_metrics = self._evaluate_oversmoothing_metrics(
-                    model_predictions, mask=self.val_node_mask
+                val_oversmooth_metrics = compute_oversmoothing_for_mask(
+                    self.oversmoothing_evaluator, model_predictions, self.edge_connections, self.val_node_mask
                 )
                 for key, value in train_oversmooth_metrics.items():
                     per_epochs_oversmoothing[key].append(value)
@@ -259,84 +260,24 @@ class UnionNET:
 
         self.gnn_model.eval()
         with torch.no_grad():
-            final_predictions = self.gnn_model(self.graph_data)
+            get_predictions = lambda: self.gnn_model(self.graph_data).argmax(dim=1)
+            get_embeddings = lambda: self.gnn_model(self.graph_data)
+            results = evaluate_model(
+                get_predictions, get_embeddings, self.clean_node_labels,
+                self.train_node_mask, self.val_node_mask, self.test_node_mask,
+                self.edge_connections, self.device
+            )
 
-            test_true_labels = self.clean_node_labels[self.test_node_mask].cpu().numpy()
-            test_pred_labels = final_predictions[self.test_node_mask].cpu().numpy().argmax(1)
-            test_accuracy = self.cls_evaluator.compute_accuracy(test_pred_labels, test_true_labels)
-            test_cls_metrics = self.cls_evaluator.compute_all_metrics(test_pred_labels, test_true_labels)
-            test_f1_score = test_cls_metrics['f1']
-            test_precision = test_cls_metrics['precision']
-            test_recall = test_cls_metrics['recall']
-            
-            test_loss = F.cross_entropy(
-                final_predictions[self.test_node_mask], 
-                self.clean_node_labels[self.test_node_mask]
-            )
-            test_oversmooth_metrics = self._evaluate_oversmoothing_metrics(
-                final_predictions, mask=self.test_node_mask
-            )
+        results['train_oversmoothing'] = per_epochs_oversmoothing
 
         total_training_time = time.time() - training_start_time
-        
+
         if enable_debug:
             print(f"\nUnionNET Training completed!")
-            print(f"Test Accuracy: {test_accuracy:.4f}")
-            print(f"Test F1: {test_f1_score:.4f}")
-            print(f"Test Precision: {test_precision:.4f}")
-            print(f"Test Recall: {test_recall:.4f}")
+            print(f"Test Acc: {results['accuracy']:.4f} | Test F1: {results['f1']:.4f} | "
+                  f"Precision: {results['precision']:.4f}, Recall: {results['recall']:.4f}")
             print(f"Training completed in {total_training_time:.2f}s")
-            print("Final Oversmoothing Metrics:")
-            if test_oversmooth_metrics:
-                print(f"Test: EDir: {test_oversmooth_metrics['EDir']:.4f}, EDir_traditional: {test_oversmooth_metrics['EDir_traditional']:.4f}, "
-                      f"EProj: {test_oversmooth_metrics['EProj']:.4f}, MAD: {test_oversmooth_metrics['MAD']:.4f}, "
-                      f"NumRank: {test_oversmooth_metrics['NumRank']:.4f}, Erank: {test_oversmooth_metrics['Erank']:.4f}")
+            print(f"Test Oversmoothing: {results['oversmoothing']}")
 
-        return {
-            'accuracy': test_accuracy,
-            'f1': test_f1_score,
-            'precision': test_precision,
-            'recall': test_recall,
-            'oversmoothing': test_oversmooth_metrics,
-            'train_oversmoothing': per_epochs_oversmoothing
-        }
+        return results
 
-    def _evaluate_oversmoothing_metrics(self, node_embeddings, mask=None):
-        try:
-            if mask is not None:
-                masked_embeddings = node_embeddings[mask]
-
-                edge_mask = mask[self.edge_connections[0]] & mask[self.edge_connections[1]]
-                masked_edge_index = self.edge_connections[:, edge_mask]
-
-                index_mapping = torch.full((mask.size(0),), -1, device=masked_edge_index.device)
-                index_mapping[mask] = torch.arange(mask.sum(), device=masked_edge_index.device)
-                masked_edge_index = index_mapping[masked_edge_index]
-                subgraph_list = [{
-                    'X': masked_embeddings,
-                    'edge_index': masked_edge_index,
-                    'edge_weight': None
-                }]
-                return self.oversmoothing_evaluator.compute_all_metrics(
-                    X=masked_embeddings,
-                    edge_index=masked_edge_index,
-                    graphs_in_class=subgraph_list
-                )
-            else:
-                full_graph_list = [{
-                    'X': node_embeddings,
-                    'edge_index': self.edge_connections,
-                    'edge_weight': None
-                }]
-                return self.oversmoothing_evaluator.compute_all_metrics(
-                    X=node_embeddings,
-                    edge_index=self.edge_connections,
-                    graphs_in_class=full_graph_list
-                )
-        except Exception as e:
-            print(f"Warning: Could not compute oversmoothing metrics: {e}")
-            return {
-                'NumRank': 0.0, 'Erank': 0.0, 'EDir': 0.0,
-                'EDir_traditional': 0.0, 'EProj': 0.0, 'MAD': 0.0
-            }
-        

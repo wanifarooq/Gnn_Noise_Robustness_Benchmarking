@@ -15,7 +15,8 @@ try:
 except ImportError:
     nx = None
 
-from model.evaluation import OversmoothingMetrics, ClassificationMetrics
+from model.evaluation import (OversmoothingMetrics, ClassificationMetrics,
+                              compute_oversmoothing_for_mask, evaluate_model)
 
 class GraphCommunityDefenseTrainer:
 
@@ -280,52 +281,6 @@ class GraphCommunityDefenseTrainer:
         
         return community_loss
 
-    def _compute_oversmoothing_metrics_for_mask(self, embeddings, edge_index, node_mask, labels=None):
-
-        try:
-            masked_node_indices = torch.where(node_mask)[0]
-            masked_embeddings = embeddings[node_mask]
-            
-            mask_set = set(masked_node_indices.cpu().numpy())
-            edge_mask = torch.tensor([
-                src.item() in mask_set and tgt.item() in mask_set
-                for src, tgt in edge_index.t()
-            ], device=edge_index.device)
-            
-            if not edge_mask.any():
-                return {
-                    'NumRank': float(min(masked_embeddings.shape)),
-                    'Erank': float(min(masked_embeddings.shape)),
-                    'EDir': 0.0,
-                    'EDir_traditional': 0.0,
-                    'EProj': 0.0,
-                    'MAD': 0.0
-                }
-            
-            masked_edges = edge_index[:, edge_mask]
-            node_mapping = {orig_idx.item(): local_idx for local_idx, orig_idx in enumerate(masked_node_indices)}
-            
-            remapped_edges = torch.stack([
-                torch.tensor([node_mapping[src.item()] for src in masked_edges[0]], device=edge_index.device),
-                torch.tensor([node_mapping[tgt.item()] for tgt in masked_edges[1]], device=edge_index.device)
-            ])
-            
-            graphs_in_class = [{
-                'X': masked_embeddings,
-                'edge_index': remapped_edges,
-                'edge_weight': None
-            }]
-            
-            return self.oversmoothing_evaluator.compute_all_metrics(
-                X=masked_embeddings,
-                edge_index=remapped_edges,
-                graphs_in_class=graphs_in_class
-            )
-            
-        except Exception as e:
-            print(f"Warning: Could not compute oversmoothing metrics for mask: {e}")
-            return None
-
     def train_with_community_defense(self,
                                    gnn_model,
                                    training_epochs: int = 200,
@@ -430,32 +385,31 @@ class GraphCommunityDefenseTrainer:
                 if epoch % 20 == 0:
                     emb = node_embeddings.detach()
 
-                    train_metrics = self._compute_oversmoothing_metrics_for_mask(
-                        emb, edge_index, self.train_node_mask, node_labels
+                    train_metrics = compute_oversmoothing_for_mask(
+                        self.oversmoothing_evaluator, emb, edge_index, self.train_node_mask
                     )
-                    val_metrics = self._compute_oversmoothing_metrics_for_mask(
-                        emb, edge_index, self.val_node_mask, node_labels
+                    val_metrics = compute_oversmoothing_for_mask(
+                        self.oversmoothing_evaluator, emb, edge_index, self.val_node_mask
                     )
 
-                    if train_metrics is not None and val_metrics is not None:
-                        print(
-                            f"Epoch {epoch}: | Oversmoothing | "
-                            f"EDir: Train {train_metrics['EDir']:.4f}, Val {val_metrics['EDir']:.4f} | "
-                            f"EDir_trad: Train {train_metrics['EDir_traditional']:.4f}, Val {val_metrics['EDir_traditional']:.4f}"
-                        )
-                        print(
-                            f"Epoch {epoch}: | Oversmoothing | "
-                            f"EProj: Train {train_metrics['EProj']:.4f}, Val {val_metrics['EProj']:.4f} | "
-                            f"MAD: Train {train_metrics['MAD']:.4f}, Val {val_metrics['MAD']:.4f}"
-                        )
-                        print(
-                            f"Epoch {epoch}: | Oversmoothing | "
-                            f"NumRank: Train {train_metrics['NumRank']:.4f}, Val {val_metrics['NumRank']:.4f} | "
-                            f"Erank: Train {train_metrics['Erank']:.4f}, Val {val_metrics['Erank']:.4f}"
-                        )
+                    print(
+                        f"Epoch {epoch}: | Oversmoothing | "
+                        f"EDir: Train {train_metrics['EDir']:.4f}, Val {val_metrics['EDir']:.4f} | "
+                        f"EDir_trad: Train {train_metrics['EDir_traditional']:.4f}, Val {val_metrics['EDir_traditional']:.4f}"
+                    )
+                    print(
+                        f"Epoch {epoch}: | Oversmoothing | "
+                        f"EProj: Train {train_metrics['EProj']:.4f}, Val {val_metrics['EProj']:.4f} | "
+                        f"MAD: Train {train_metrics['MAD']:.4f}, Val {val_metrics['MAD']:.4f}"
+                    )
+                    print(
+                        f"Epoch {epoch}: | Oversmoothing | "
+                        f"NumRank: Train {train_metrics['NumRank']:.4f}, Val {val_metrics['NumRank']:.4f} | "
+                        f"Erank: Train {train_metrics['Erank']:.4f}, Val {val_metrics['Erank']:.4f}"
+                    )
 
-                        for key,value in train_metrics.items():
-                            per_epochs_oversmoothing[key].append(value)
+                    for key, value in train_metrics.items():
+                        per_epochs_oversmoothing[key].append(value)
 
                 # Early stopping
                 if validation_loss < best_validation_loss:
@@ -472,65 +426,28 @@ class GraphCommunityDefenseTrainer:
 
         if best_model_state is not None:
             model.load_state_dict(best_model_state)
-        
+
         model.eval()
         with torch.no_grad():
             batch_data = PyGData(x=node_features, edge_index=edge_index, y=node_labels)
             final_output = model(batch_data)
             final_logits = final_output[0] if (isinstance(final_output, tuple) and len(final_output) == 2) else final_output
-            
-            predictions = final_logits.argmax(dim=1).cpu().numpy()
-            true_labels = node_labels.cpu().numpy()
+            get_predictions = lambda: final_logits.argmax(dim=1)
+            get_embeddings = lambda: final_logits
 
-            test_mask_np = self.test_node_mask.cpu().numpy()
-            test_true_labels = true_labels[test_mask_np]
-            test_predictions = predictions[test_mask_np]
-
-            test_accuracy = (test_predictions == test_true_labels).mean()
-            test_cls_metrics = self.cls_evaluator.compute_all_metrics(test_predictions, test_true_labels)
-            test_f1_score = test_cls_metrics['f1']
-            test_precision = test_cls_metrics['precision']
-            test_recall = test_cls_metrics['recall']
-
-            test_oversmoothing_metrics = self._compute_oversmoothing_metrics_for_mask(
-                final_logits, edge_index, self.test_node_mask, node_labels
+            results = evaluate_model(
+                get_predictions, get_embeddings, node_labels,
+                self.train_node_mask, self.val_node_mask, self.test_node_mask,
+                edge_index, self.device
             )
-            
-            if test_oversmoothing_metrics is not None:
-                oversmoothing_results = {
-                    'EDir': test_oversmoothing_metrics['EDir'],
-                    'EDir_traditional': test_oversmoothing_metrics['EDir_traditional'],
-                    'EProj': test_oversmoothing_metrics['EProj'],
-                    'MAD': test_oversmoothing_metrics['MAD'],
-                    'NumRank': test_oversmoothing_metrics['NumRank'],
-                    'Erank': test_oversmoothing_metrics['Erank']
-                }
-            else:
-                oversmoothing_results = {
-                    'EDir': 0.0,
-                    'EDir_traditional': 0.0,
-                    'EProj': 0.0,
-                    'MAD': 0.0,
-                    'NumRank': 0.0,
-                    'Erank': 0.0
-                }
-            
-            final_results = {
-                'accuracy': test_accuracy,
-                'f1': test_f1_score,
-                'precision': test_precision,
-                'recall': test_recall,
-                'oversmoothing': oversmoothing_results,
-                'train_oversmoothing' : per_epochs_oversmoothing
-            }
-            
-            training_duration = time.time() - training_start_time
-            if enable_debug:
-                print(f"\nTraining completed in {training_duration:.2f}s")
-                print(f"Test Acc: {final_results['accuracy']:.4f} | Test F1: {final_results['f1']:.4f}")
-                print(f"Test Precision: {final_results['precision']:.4f} | Test Recall: {final_results['recall']:.4f}")
-                print("Oversmoothing metrics:")
-                for metric_name, metric_value in oversmoothing_results.items():
-                    print(f"  {metric_name}: {metric_value:.4f}")
-        
-        return final_results
+
+        results['train_oversmoothing'] = per_epochs_oversmoothing
+
+        training_duration = time.time() - training_start_time
+        if enable_debug:
+            print(f"\nTraining completed in {training_duration:.2f}s")
+            print(f"Test Acc: {results['accuracy']:.4f} | Test F1: {results['f1']:.4f} | "
+                  f"Precision: {results['precision']:.4f}, Recall: {results['recall']:.4f}")
+            print(f"Test Oversmoothing: {results['oversmoothing']}")
+
+        return results

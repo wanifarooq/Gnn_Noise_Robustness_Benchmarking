@@ -13,7 +13,8 @@ from copy import deepcopy
 from torch_geometric.utils import to_scipy_sparse_matrix
 from torch_geometric.data import Data
 from collections import defaultdict
-from model.evaluation import OversmoothingMetrics, ClassificationMetrics
+from model.evaluation import (OversmoothingMetrics, ClassificationMetrics,
+                              compute_oversmoothing_for_mask, evaluate_model as shared_evaluate_model)
 
 
 class GNNGuardTrainer:
@@ -71,58 +72,6 @@ class GNNGuardTrainer:
             backbone=self.backbone
         ).to(self.device)
 
-    def _compute_mask_oversmoothing_metrics(self, node_embeddings, edge_index, node_mask, labels=None):
-
-        try:
-            masked_node_indices = torch.where(node_mask)[0]
-            masked_embeddings = node_embeddings[node_mask]
-            
-            # Filter edges
-            masked_node_set = set(masked_node_indices.cpu().numpy())
-            edge_filter = torch.tensor([
-                source.item() in masked_node_set and target.item() in masked_node_set
-                for source, target in edge_index.t()
-            ], device=edge_index.device)
-            
-            if not edge_filter.any():
-
-                return {
-                    'NumRank': float(min(masked_embeddings.shape)),
-                    'Erank': float(min(masked_embeddings.shape)),
-                    'EDir': 0.0,
-                    'EDir_traditional': 0.0,
-                    'EProj': 0.0,
-                    'MAD': 0.0
-                }
-            
-            filtered_edges = edge_index[:, edge_filter]
-            local_node_mapping = {orig_idx.item(): local_idx 
-                                for local_idx, orig_idx in enumerate(masked_node_indices)}
-            
-            remapped_edge_index = torch.stack([
-                torch.tensor([local_node_mapping[src.item()] for src in filtered_edges[0]], 
-                           device=edge_index.device),
-                torch.tensor([local_node_mapping[tgt.item()] for tgt in filtered_edges[1]], 
-                           device=edge_index.device)
-            ])
-            
-            # Prepare data for oversmoothing evaluation
-            graph_data_for_class = [{
-                'X': masked_embeddings,
-                'edge_index': remapped_edge_index,
-                'edge_weight': None
-            }]
-            
-            return self.oversmoothing_evaluator.compute_all_metrics(
-                X=masked_embeddings,
-                edge_index=remapped_edge_index,
-                graphs_in_class=graph_data_for_class
-            )
-            
-        except Exception as e:
-            print(f"Warning: Could not compute oversmoothing metrics for mask: {e}")
-            return None
-        
     def prepare_data(self):
         # adjacency
         self.adjacency_matrix = to_scipy_sparse_matrix(
@@ -243,15 +192,13 @@ class GNNGuardTrainer:
                 
                 edge_connectivity = self.normalized_adjacency._indices()
                 if epoch%20 == 0:
-                    train_oversmoothing_metrics = self._compute_mask_oversmoothing_metrics(
-                        train_output, edge_connectivity, train_node_mask, labels)
-                    val_oversmoothing_metrics = self._compute_mask_oversmoothing_metrics(
-                        val_output, edge_connectivity, val_node_mask, labels)
+                    train_oversmoothing_metrics = compute_oversmoothing_for_mask(
+                        self.oversmoothing_evaluator, train_output, edge_connectivity, train_node_mask)
+                    val_oversmoothing_metrics = compute_oversmoothing_for_mask(
+                        self.oversmoothing_evaluator, val_output, edge_connectivity, val_node_mask)
                     for key, value in train_oversmoothing_metrics.items():
                         per_epochs_oversmoothing[key].append(value)
-                if train_oversmoothing_metrics is not None:
                     self.oversmoothing_metrics_history['train'].append(train_oversmoothing_metrics)
-                if val_oversmoothing_metrics is not None:
                     self.oversmoothing_metrics_history['val'].append(val_oversmoothing_metrics)
             
             if verbose:
@@ -275,8 +222,6 @@ class GNNGuardTrainer:
         
         self.model.load_state_dict(best_model_weights)
         
-        if test_indices is not None:
-            self._evaluate_final_test_performance(train_indices, val_indices, test_indices, verbose)
         return per_epochs_oversmoothing
 
     def _log_training_progress(self, epoch, train_loss, val_loss, train_acc, val_acc, 
@@ -306,108 +251,37 @@ class GNNGuardTrainer:
                   f"Train NumRank: {train_numrank:.4f}, Val NumRank: {val_numrank:.4f} | "
                   f"Train Erank: {train_erank:.4f}, Val Erank: {val_erank:.4f}")
     
-    def _evaluate_final_test_performance(self, train_indices, val_indices, test_indices, verbose):
-
-        test_node_mask = torch.zeros(self.node_features.size(0), dtype=torch.bool, device=self.device)
-        train_node_mask = torch.zeros(self.node_features.size(0), dtype=torch.bool, device=self.device)
-        val_node_mask = torch.zeros(self.node_features.size(0), dtype=torch.bool, device=self.device)
-        
-        train_node_mask[train_indices] = True
-        val_node_mask[val_indices] = True
-        test_node_mask[test_indices] = True
-        
-        self.model.eval()
-        with torch.no_grad():
-            final_output = self.model(self.node_features, self.normalized_adjacency, 
-                                    use_attention=self.use_attention)
-            
-            test_predictions = final_output[test_indices].max(1)[1].cpu().numpy()
-            test_true_labels = self.node_labels[test_indices].cpu().numpy()
-            test_accuracy = self.cls_evaluator.compute_accuracy(test_predictions, test_true_labels)
-            test_f1_score = self.cls_evaluator.compute_f1(test_predictions, test_true_labels)
-            test_loss = F.nll_loss(final_output[test_indices], self.node_labels[test_indices])
-            
-            edge_connectivity = self.normalized_adjacency._indices()
-            final_train_oversmoothing = self._compute_mask_oversmoothing_metrics(
-                final_output, edge_connectivity, train_node_mask, self.node_labels)
-            final_val_oversmoothing = self._compute_mask_oversmoothing_metrics(
-                final_output, edge_connectivity, val_node_mask, self.node_labels)
-            final_test_oversmoothing = self._compute_mask_oversmoothing_metrics(
-                final_output, edge_connectivity, test_node_mask, self.node_labels)
-            
-            if final_test_oversmoothing is not None:
-                self.oversmoothing_metrics_history['test'].append(final_test_oversmoothing)
-        
-        if verbose:
-            print(f"\nTraining completed")
-            print(f"Test Loss: {test_loss:.4f} | Test Acc: {test_accuracy:.4f} | Test F1: {test_f1_score:.4f}")
-            print("Final Oversmoothing Metrics:")
-            
-            self._log_final_oversmoothing_metrics(final_train_oversmoothing, 
-                                                final_val_oversmoothing, 
-                                                final_test_oversmoothing)
-    
-    def _log_final_oversmoothing_metrics(self, train_metrics, val_metrics, test_metrics):
-
-        if train_metrics is not None:
-            print(f"Train: EDir: {train_metrics['EDir']:.4f}, EDir_traditional: {train_metrics['EDir_traditional']:.4f}, "
-                  f"EProj: {train_metrics['EProj']:.4f}, MAD: {train_metrics['MAD']:.4f}, "
-                  f"NumRank: {train_metrics['NumRank']:.4f}, Erank: {train_metrics['Erank']:.4f}")
-        
-        if val_metrics is not None:
-            print(f"Val: EDir: {val_metrics['EDir']:.4f}, EDir_traditional: {val_metrics['EDir_traditional']:.4f}, "
-                  f"EProj: {val_metrics['EProj']:.4f}, MAD: {val_metrics['MAD']:.4f}, "
-                  f"NumRank: {val_metrics['NumRank']:.4f}, Erank: {val_metrics['Erank']:.4f}")
-        
-        if test_metrics is not None:
-            print(f"Test: EDir: {test_metrics['EDir']:.4f}, EDir_traditional: {test_metrics['EDir_traditional']:.4f}, "
-                  f"EProj: {test_metrics['EProj']:.4f}, MAD: {test_metrics['MAD']:.4f}, "
-                  f"NumRank: {test_metrics['NumRank']:.4f}, Erank: {test_metrics['Erank']:.4f}")
-    
     def evaluate_model(self):
-        test_indices = self.test_indices
+        num_nodes = self.node_features.size(0)
+        train_mask = torch.zeros(num_nodes, dtype=torch.bool, device=self.device)
+        val_mask = torch.zeros(num_nodes, dtype=torch.bool, device=self.device)
+        test_mask = torch.zeros(num_nodes, dtype=torch.bool, device=self.device)
+        train_mask[self.train_indices] = True
+        val_mask[self.val_indices] = True
+        test_mask[self.test_indices] = True
 
         self.model.eval()
         with torch.no_grad():
-            model_output = self.model(self.node_features, self.normalized_adjacency, 
-                                    use_attention=self.use_attention)
-            test_loss = F.nll_loss(model_output[test_indices], self.node_labels[test_indices])
-            
-            test_predictions = model_output[test_indices].max(1)[1].cpu().numpy()
-            test_true_labels = self.node_labels[test_indices].cpu().numpy()
-            
-            test_cls_metrics = self.cls_evaluator.compute_all_metrics(test_predictions, test_true_labels)
-            test_accuracy = test_cls_metrics['accuracy']
-            test_f1_score = test_cls_metrics['f1']
-            test_precision = test_cls_metrics['precision']
-            test_recall = test_cls_metrics['recall']
-            
-            # Oversmoothing metrics
-            test_node_mask = torch.zeros(self.node_features.size(0), dtype=torch.bool, device=self.device)
-            test_node_mask[test_indices] = True
-            edge_connectivity = self.normalized_adjacency._indices()
-            test_oversmoothing_metrics = self._compute_mask_oversmoothing_metrics(
-                model_output, edge_connectivity, test_node_mask, self.node_labels)
+            get_predictions = lambda: self.model(
+                self.node_features, self.normalized_adjacency, use_attention=self.use_attention
+            ).argmax(dim=1)
+            get_embeddings = lambda: self.model(
+                self.node_features, self.normalized_adjacency, use_attention=self.use_attention
+            )
+            edge_index = self.normalized_adjacency._indices()
+
+            results = shared_evaluate_model(
+                get_predictions, get_embeddings, self.node_labels,
+                train_mask, val_mask, test_mask,
+                edge_index, self.device
+            )
 
         print(f"GNNGuard Training completed!")
-        print(f"Test Accuracy: {test_accuracy:.4f}")
-        print(f"Test F1: {test_f1_score:.4f}")
-        print(f"Test Precision: {test_precision:.4f}")
-        print(f"Test Recall: {test_recall:.4f}")
-        
-        if test_oversmoothing_metrics is not None:
-            print(f"Test Oversmoothing: EDir: {test_oversmoothing_metrics['EDir']:.4f}, "
-                  f"EDir_traditional: {test_oversmoothing_metrics['EDir_traditional']:.4f}, "
-                  f"EProj: {test_oversmoothing_metrics['EProj']:.4f}, MAD: {test_oversmoothing_metrics['MAD']:.4f}, "
-                  f"NumRank: {test_oversmoothing_metrics['NumRank']:.4f}, Erank: {test_oversmoothing_metrics['Erank']:.4f}")
-        
-        return {
-            'accuracy': test_accuracy,
-            'f1': test_f1_score,
-            'precision': test_precision,
-            'recall': test_recall,
-            'oversmoothing': test_oversmoothing_metrics
-        }
+        print(f"Test Acc: {results['accuracy']:.4f} | Test F1: {results['f1']:.4f} | "
+              f"Precision: {results['precision']:.4f}, Recall: {results['recall']:.4f}")
+        print(f"Test Oversmoothing: {results['oversmoothing']}")
+
+        return results
     
     def get_oversmoothing_metrics_history(self):
 
