@@ -370,7 +370,8 @@ class ERASETrainer:
         self.model_creation_function = model_creation_function
         self.oversmoothing_metrics_calculator = OversmoothingMetrics(device=computation_device)
         self.cls_evaluator = ClassificationMetrics(average='macro')
-        
+        self.oversmoothing_every = training_config.get('oversmoothing_every', 20)
+
     def train_erase_model(self, graph_data, enable_debug_output=False):
         # Create enhanced model
         
@@ -443,6 +444,7 @@ class ERASETrainer:
     def _execute_training_loop(self, model, graph_data, optimizer, loss_function, 
                                   adjacency_matrix, semantic_labels_matrix, predicted_labels, debug_mode):
             per_epochs_oversmoothing = defaultdict(list)
+            per_epochs_val_oversmoothing = defaultdict(list)
             best_validation_loss = float('inf')
             patience_counter = 0
             max_epochs = self.training_config.get('total_epochs', 200)
@@ -461,7 +463,7 @@ class ERASETrainer:
                 )
                 train_f1, validation_f1 = self._compute_f1_scores_for_splits(model, graph_data, predicted_labels)
 
-                should_compute_oversmoothing = (current_epoch + 1) % 20 == 0
+                should_compute_oversmoothing = (current_epoch + 1) % self.oversmoothing_every == 0
                 if should_compute_oversmoothing:
                     model.eval()
                     with torch.no_grad():
@@ -472,6 +474,8 @@ class ERASETrainer:
                         self.oversmoothing_metrics_calculator, learned_features, graph_data.edge_index, graph_data.val_mask)
                     for key, value in train_oversmoothing.items():
                         per_epochs_oversmoothing[key].append(value)
+                    for key, value in validation_oversmoothing.items():
+                        per_epochs_val_oversmoothing[key].append(value)
                 else:
                     train_oversmoothing = {}
                     validation_oversmoothing = {}
@@ -523,6 +527,7 @@ class ERASETrainer:
                 graph_data.edge_index, self.computation_device
             )
             results['train_oversmoothing'] = per_epochs_oversmoothing
+            results['val_oversmoothing'] = per_epochs_val_oversmoothing
 
             if debug_mode:
                 print("\nERASE Training completed!")
@@ -707,6 +712,7 @@ class ERASEMethodTrainer(BaseTrainer):
             'use_residual': erase_params.get('use_residual', False),
             'use_residual_linear': erase_params.get('use_residual_linear', False),
             'seed': d['seed'],
+            'oversmoothing_every': d['oversmoothing_every'],
         }
 
         trainer = ERASETrainer(
@@ -718,4 +724,4 @@ class ERASEMethodTrainer(BaseTrainer):
         result = trainer.train_erase_model(
             d['data_for_training'], enable_debug_output=True,
         )
-        return self._make_result(result, result['train_oversmoothing'])
+        return self._make_result(result, result['train_oversmoothing'], result.get('val_oversmoothing'))

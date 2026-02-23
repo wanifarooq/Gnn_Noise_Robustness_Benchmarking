@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 import numpy as np
 from torch_geometric.utils import to_dense_adj
 from scipy.linalg import svd
@@ -93,12 +94,12 @@ class OversmoothingMetrics:
     def __init__(self, device='cpu'):
         self.device = device
 
-    def compute_all_metrics(self, X, edge_index, edge_weight=None, batch_size=None, graphs_in_class=None):
+    def compute_all_metrics(self, X, edge_index, edge_weight=None, batch_size=None):
         metrics = {}
         X_np = X.detach().cpu().numpy()
 
         try:
-            metrics['EDir'] = self._compute_edir_average(graphs_in_class)
+            metrics['EDir'] = self._compute_edir_average(X, edge_index, edge_weight)
         except Exception as e:
             print(f"Warning: Could not compute EDir: {e}")
             metrics['EDir'] = 0.0
@@ -135,39 +136,46 @@ class OversmoothingMetrics:
 
         return metrics
 
-    def _compute_edir_average(self, graphs_in_class):
-        if not graphs_in_class or len(graphs_in_class) == 0:
+    # def _compute_edir_average(self, graphs_in_class):
+    #     if not graphs_in_class or len(graphs_in_class) == 0:
+    #         return 0.0
+    #     total_energy = 0.0
+    #     num_graphs = len(graphs_in_class)
+    #     for graph_data in graphs_in_class:
+    #         X = graph_data['X']
+    #         edge_index = graph_data['edge_index']
+    #         edge_weight = graph_data.get('edge_weight', None)
+    #         if edge_index.size(1) == 0:
+    #             continue
+    #         graph_energy = 0.0
+    #         num_edges = edge_index.size(1)
+    #         for i in range(num_edges):
+    #             u, v = edge_index[0, i], edge_index[1, i]
+    #             grad = X[u] - X[v]
+    #             edge_energy = torch.norm(grad, p=2)**2 # ||X[u]-X[v]||²
+    #             if edge_weight is not None:
+    #                 edge_energy *= edge_weight[i]
+    #             graph_energy += edge_energy.item()
+    #         total_energy += graph_energy
+    #     return total_energy / (2 * num_graphs)
+    
+    def _compute_edir_average(self, X, edge_index, edge_weight=None):
+        """ Refactored to compute energy in a vectorized manner for efficiency.
+
+        The logic is preserved. Here's why:
+        1. Per-edge energy: torch.norm(grad, p=2)**2 = sum(grad²) = (diff**2).sum(dim=1) — mathematically identical.
+        2. Edge weight handling: Both multiply the per-edge energy by the weight — identical.
+        3. Division by 2 * num_graphs: The original divided by 2 * num_graphs. The new divides by 2.0. This is correct because graphs_in_class was always constructed as a
+        single-element list (line 367-371 in the original), so num_graphs was always 1. The averaging across multiple graphs was dead code — compute_oversmoothing_for_mask was the only
+        call site, and it always wrapped a single graph dict in a list.
+        """
+        if edge_index.size(1) == 0:
             return 0.0
-
-        total_energy = 0.0
-        num_graphs = len(graphs_in_class)
-
-        for graph_data in graphs_in_class:
-            X = graph_data['X']
-            edge_index = graph_data['edge_index']
-            edge_weight = graph_data.get('edge_weight', None)
-
-            if edge_index.size(1) == 0:
-                continue
-
-            graph_energy = 0.0
-            num_edges = edge_index.size(1)
-
-            for i in range(num_edges):
-                u, v = edge_index[0, i], edge_index[1, i]
-
-                grad = X[u] - X[v]
-
-                edge_energy = torch.norm(grad, p=2)**2
-
-                if edge_weight is not None:
-                    edge_energy *= edge_weight[i]
-
-                graph_energy += edge_energy.item()
-
-            total_energy += graph_energy
-
-        return total_energy / (2 * num_graphs)
+        diff = X[edge_index[0]] - X[edge_index[1]]
+        energies = (diff ** 2).sum(dim=1)  # ||X[u]-X[v]||² per edge
+        if edge_weight is not None:
+            energies = energies * edge_weight
+        return energies.sum().item() / 2.0
 
     def _compute_numerical_rank(self, X):
         frobenius_norm_sq = np.sum(X**2)
@@ -221,7 +229,35 @@ class OversmoothingMetrics:
         except Exception:
             return np.ones(num_nodes)
 
+    # def _compute_dirichlet_energy_traditional(self, X, edge_index, edge_weight=None):
+    #     num_nodes = X.size(0)
+    #     u = self._compute_message_passing_matrix_eigenvector(edge_index, num_nodes, edge_weight)
+    #     # Normalization
+    #     u = u / np.max(u)
+    #     u = np.maximum(u, 1e-4)
+    #     total_energy = 0.0
+    #     num_edges = edge_index.size(1)
+    #     for i in range(num_edges):
+    #         node_i, node_j = edge_index[0, i].item(), edge_index[1, i].item()
+    #         X_i_norm = X[node_i] / u[node_i]
+    #         X_j_norm = X[node_j] / u[node_j]
+    #         diff = X_i_norm - X_j_norm
+    #         energy = torch.norm(diff, p=2)**2 # ||diff||²
+    #         if edge_weight is not None:
+    #             energy *= edge_weight[i]
+    #         total_energy += energy.item()
+    #     return total_energy
+    
     def _compute_dirichlet_energy_traditional(self, X, edge_index, edge_weight=None):
+        """ Refactored to vectorised form for efficiency.  The logic is preserved. Step by step:
+
+        1. Eigenvector computation + normalization — identical in both (u / np.max(u), np.maximum(u, 1e-4)).
+        2. Per-node feature normalization — Original: X[node_i] / u[node_i] (torch tensor / numpy scalar, per edge in a loop). New: X / u_t where u_t is (N, 1) — broadcasts so each row
+        X[i] is divided by u[i]. Mathematically identical, but the new version computes it once for all nodes upfront rather than redundantly per-edge.
+        3. Per-edge energy — torch.norm(diff, p=2)**2 = sum(diff²) = (diff**2).sum(dim=1). Identical.
+        4. Edge weight handling — Both multiply per-edge energy by the corresponding weight. Identical.
+        5. Final return — Both return the raw sum (no division). Identical.
+        """
         num_nodes = X.size(0)
 
         u = self._compute_message_passing_matrix_eigenvector(edge_index, num_nodes, edge_weight)
@@ -230,24 +266,13 @@ class OversmoothingMetrics:
         u = u / np.max(u)
         u = np.maximum(u, 1e-4)
 
-        total_energy = 0.0
-        num_edges = edge_index.size(1)
-
-        for i in range(num_edges):
-            node_i, node_j = edge_index[0, i].item(), edge_index[1, i].item()
-
-            X_i_norm = X[node_i] / u[node_i]
-            X_j_norm = X[node_j] / u[node_j]
-
-            diff = X_i_norm - X_j_norm
-            energy = torch.norm(diff, p=2)**2
-
-            if edge_weight is not None:
-                energy *= edge_weight[i]
-
-            total_energy += energy.item()
-
-        return total_energy
+        u_t = torch.tensor(u, device=X.device, dtype=X.dtype).unsqueeze(1)  # (N, 1)
+        X_norm = X / u_t # broadcast: each row X[i] / u[i]
+        diff = X_norm[edge_index[0]] - X_norm[edge_index[1]]
+        energies = (diff ** 2).sum(dim=1) # ||diff||² per edge
+        if edge_weight is not None:
+            energies = energies * edge_weight
+        return energies.sum().item()
 
     def _compute_projection_energy(self, X, edge_index, edge_weight=None):
         num_nodes = X.size(0)
@@ -267,35 +292,57 @@ class OversmoothingMetrics:
 
         return energy.item()
 
+    # def _compute_mad(self, X, edge_index):
+    #     num_edges = edge_index.size(1)
+    #     if num_edges == 0:
+    #         return 0.0
+    #     total_distance = 0.0
+    #     for i in range(num_edges):
+    #         node_i, node_j = edge_index[0, i], edge_index[1, i]
+    #         X_i, X_j = X[node_i], X[node_j]
+    #         norm_i = torch.norm(X_i, p=2)
+    #         norm_j = torch.norm(X_j, p=2)
+    #         if norm_i > 1e-8 and norm_j > 1e-8:
+    #             cosine_sim = torch.dot(X_i, X_j) / (norm_i * norm_j)
+    #             cosine_sim = torch.clamp(cosine_sim, -1.0, 1.0)
+    #             distance = 1.0 - cosine_sim
+    #         else:
+    #             distance = 1.0
+    #         if isinstance(distance, float):
+    #             total_distance += distance
+    #         else:
+    #             total_distance += distance.item()
+    #     return total_distance / num_edges
+    
     def _compute_mad(self, X, edge_index):
-        num_edges = edge_index.size(1)
+        """ Mean Angular Distance (MAD) between connected node embeddings. For each edge, compute 1 - cosine similarity, then average across all edges.
 
-        if num_edges == 0:
+        Refactored from a loop-based implementation to a fully vectorized one for efficiency.
+
+        The logic is preserved. Here's the trace through each case:
+        1. Empty edges — Both return 0.0. Identical.
+        2. Invalid edges (either norm <= 1e-8) — Original: distance = 1.0. New: distances is initialized to 1.0 and only valid positions are overwritten, so invalid edges keep 1.0.
+        Identical.
+        3. Valid edges (both norms > 1e-8) — Original: torch.dot(X_i, X_j) / (norm_i * norm_j). New: F.cosine_similarity(X_src, X_tgt, dim=1) which computes sum(X_src * X_tgt, dim=1) /
+        max(||X_src|| * ||X_tgt||, eps). For valid edges the norm product is > 1e-16, well above the default eps=1e-8, so the max is a no-op. Same formula. Both clamp to [-1, 1], both
+        compute 1.0 - cos_sim. Identical.
+        4. Aggregation — Original: total_distance / num_edges. New: distances.mean() = sum / count. Identical.
+
+        One subtlety worth noting: F.cosine_similarity is computed for all edges including invalid ones (it won't error because of its internal eps), but those values are never used —
+        only cos_sim[valid] is written into distances. So the invalid-edge garbage is harmless.
+        """
+        if edge_index.size(1) == 0:
             return 0.0
-
-        total_distance = 0.0
-
-        for i in range(num_edges):
-            node_i, node_j = edge_index[0, i], edge_index[1, i]
-
-            X_i, X_j = X[node_i], X[node_j]
-
-            norm_i = torch.norm(X_i, p=2)
-            norm_j = torch.norm(X_j, p=2)
-
-            if norm_i > 1e-8 and norm_j > 1e-8:
-                cosine_sim = torch.dot(X_i, X_j) / (norm_i * norm_j)
-
-                cosine_sim = torch.clamp(cosine_sim, -1.0, 1.0)
-                distance = 1.0 - cosine_sim
-            else:
-                distance = 1.0
-            if isinstance(distance, float):
-                total_distance += distance
-            else:
-                total_distance += distance.item()
-
-        return total_distance / num_edges
+        X_src = X[edge_index[0]]
+        X_tgt = X[edge_index[1]]
+        norm_src = torch.norm(X_src, p=2, dim=1)
+        norm_tgt = torch.norm(X_tgt, p=2, dim=1)
+        valid = (norm_src > 1e-8) & (norm_tgt > 1e-8)
+        cos_sim = torch.clamp(
+            F.cosine_similarity(X_src, X_tgt, dim=1), -1.0, 1.0)
+        distances = torch.ones(edge_index.size(1), device=X.device)
+        distances[valid] = 1.0 - cos_sim[valid]
+        return distances.mean().item()
 
     def evaluate_model_oversmoothing(self, model, data, device='cpu'):
         model.eval()
@@ -340,11 +387,9 @@ def compute_oversmoothing_for_mask(oversmoothing_evaluator, embeddings, edge_ind
         mask_indices = torch.where(mask)[0]
         mask_embeddings = embeddings[mask]
 
-        mask_set = set(mask_indices.cpu().numpy())
-        edge_mask = torch.tensor([
-            src.item() in mask_set and tgt.item() in mask_set
-            for src, tgt in edge_index.t()
-        ], device=edge_index.device)
+        src_in = torch.isin(edge_index[0], mask_indices)
+        tgt_in = torch.isin(edge_index[1], mask_indices)
+        edge_mask = src_in & tgt_in
 
         if not edge_mask.any():
             return {
@@ -357,23 +402,18 @@ def compute_oversmoothing_for_mask(oversmoothing_evaluator, embeddings, edge_ind
             }
 
         masked_edges = edge_index[:, edge_mask]
-        node_mapping = {orig_idx.item(): local_idx for local_idx, orig_idx in enumerate(mask_indices)}
-
         remapped_edges = torch.stack([
-            torch.tensor([node_mapping[src.item()] for src in masked_edges[0]], device=edge_index.device),
-            torch.tensor([node_mapping[tgt.item()] for tgt in masked_edges[1]], device=edge_index.device)
+            torch.searchsorted(mask_indices, masked_edges[0]),
+            torch.searchsorted(mask_indices, masked_edges[1]),
         ])
-
-        graphs_in_class = [{
-            'X': mask_embeddings,
-            'edge_index': remapped_edges,
-            'edge_weight': None
-        }]
-
+        # graphs_in_class = [{
+        #     'X': mask_embeddings,
+        #     'edge_index': remapped_edges,
+        #     'edge_weight': None
+        # }]
         return oversmoothing_evaluator.compute_all_metrics(
             X=mask_embeddings,
             edge_index=remapped_edges,
-            graphs_in_class=graphs_in_class
         )
 
     except Exception as e:

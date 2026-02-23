@@ -266,6 +266,7 @@ class RTGNNTrainingConfig:
         self.K = rtgnn_params.get('K', 50)
         self.tau = rtgnn_params.get('tau', 0.05)
         self.n_neg = rtgnn_params.get('n_neg', 100)
+        self.oversmoothing_every = training_params.get('oversmoothing_every', 20)
 
 class RTGNN(nn.Module):
 
@@ -445,6 +446,7 @@ class RTGNN(nn.Module):
 
 
         per_epochs_oversmoothing = defaultdict(list)
+        per_epochs_val_oversmoothing = defaultdict(list)
 
         training_start_time = time.time()
 
@@ -524,7 +526,7 @@ class RTGNN(nn.Module):
             total_training_loss.backward()
             optimizer.step()
 
-            compute_oversmoothing = (epoch + 1) % 20 == 0 or epoch == 0
+            compute_oversmoothing = (epoch + 1) % self.training_config.oversmoothing_every == 0 or epoch == 0
             if compute_oversmoothing:
                 performance_metrics, train_oversmoothing, val_oversmoothing = self.evaluate_model_performance(
                     node_features, final_edge_indices, final_edge_weights, node_labels, train_indices, val_indices
@@ -532,6 +534,8 @@ class RTGNN(nn.Module):
 
                 for key, value in train_oversmoothing.items():
                     per_epochs_oversmoothing[key].append(value)
+                for key, value in val_oversmoothing.items():
+                    per_epochs_val_oversmoothing[key].append(value)
 
                 train_de_edir = train_oversmoothing['EDir'] if train_oversmoothing else 0.0
                 train_de_traditional = train_oversmoothing['EDir_traditional'] if train_oversmoothing else 0.0
@@ -609,7 +613,7 @@ class RTGNN(nn.Module):
                       f"NumRank: {final_test_oversmoothing['NumRank']:.4f}, Erank: {final_test_oversmoothing['Erank']:.4f}")
             
         print(f"Training completed! Best validation loss: {best_validation_loss:.4f}") #print(f"Training completed! Best validation accuracy: {best_validation_accuracy:.4f}")
-        return per_epochs_oversmoothing
+        return per_epochs_oversmoothing, per_epochs_val_oversmoothing
 
 
     def evaluate_final_performance(self, clean_labels=None):
@@ -758,6 +762,7 @@ class RTGNNMethodTrainer(BaseTrainer):
     def run(self):
         d = self.init_data
 
+        self.config.setdefault('training', {})['oversmoothing_every'] = d['oversmoothing_every']
         rtgnn_config = RTGNNTrainingConfig(self.config)
         rtgnn_trainer = RTGNN(
             training_config=rtgnn_config,
@@ -766,7 +771,7 @@ class RTGNNMethodTrainer(BaseTrainer):
             data_for_training=d['data_for_training'],
         ).to(d['device'])
 
-        train_oversmoothing = rtgnn_trainer.train_model()
+        train_oversmoothing, val_oversmoothing = rtgnn_trainer.train_model()
         clean_labels = d['data'].y_original.cpu().numpy()
         result = rtgnn_trainer.evaluate_final_performance(clean_labels=clean_labels)
-        return self._make_result(result, train_oversmoothing)
+        return self._make_result(result, train_oversmoothing, val_oversmoothing)

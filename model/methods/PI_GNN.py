@@ -49,7 +49,8 @@ class PiGnnTrainer:
     def __init__(self, device, epochs=400, mutual_info_start_epoch=200, 
                  use_self_mi=False, main_learning_rate=0.01, mi_learning_rate=0.01, 
                  weight_decay=5e-4, normalization_factor=None, use_vanilla_training=False, 
-                 early_stopping_patience=50, improvement_threshold=1e-4):
+                 early_stopping_patience=50, improvement_threshold=1e-4,
+                 oversmoothing_every=20):
 
         self.device = device
         self.total_epochs = epochs
@@ -62,7 +63,8 @@ class PiGnnTrainer:
         self.vanilla_training_mode = use_vanilla_training
         self.early_stop_patience = early_stopping_patience
         self.min_improvement_delta = improvement_threshold
-        
+        self.oversmoothing_every = oversmoothing_every
+
         self.oversmoothing_evaluator = OversmoothingMetrics(device=device)
         self.cls_evaluator = ClassificationMetrics(average='macro')
         self.training_history = {
@@ -142,6 +144,7 @@ class PiGnnTrainer:
 
     def train_model(self, model, graph_data, config=None, model_factory_function=None):
         per_epochs_oversmoothing = defaultdict(list)
+        per_epochs_val_oversmoothing = defaultdict(list)
         training_start_time = time.time()
         
         graph_data = graph_data.to(self.device)
@@ -283,10 +286,12 @@ class PiGnnTrainer:
                 self.training_history['val'].append(val_oversmoothing)
 
             # logging
-            if current_epoch % 20 == 0:
-                results = self._log_training_progress(current_epoch, current_metrics, train_oversmoothing, val_oversmoothing)
-                for key, value in results.items():
+            if current_epoch % self.oversmoothing_every == 0:
+                logged_train_os, logged_val_os = self._log_training_progress(current_epoch, current_metrics, train_oversmoothing, val_oversmoothing)
+                for key, value in logged_train_os.items():
                     per_epochs_oversmoothing[key].append(value)
+                for key, value in logged_val_os.items():
+                    per_epochs_val_oversmoothing[key].append(value)
             # Early stopping
             if current_metrics['val_loss'] < best_validation_loss:
                 best_validation_loss = current_metrics['val_loss']
@@ -318,6 +323,7 @@ class PiGnnTrainer:
             )
 
         results['train_oversmoothing'] = per_epochs_oversmoothing
+        results['val_oversmoothing'] = per_epochs_val_oversmoothing
 
         total_training_time = time.time() - training_start_time
         print(f"\nTraining completed in {total_training_time:.2f}s")
@@ -352,7 +358,7 @@ class PiGnnTrainer:
               f"Train MAD: {train_mad:.4f}, Val MAD: {val_mad:.4f} | "
               f"Train NumRank: {train_num_rank:.4f}, Val NumRank: {val_num_rank:.4f} | "
               f"Train Erank: {train_effective_rank:.4f}, Val Erank: {val_effective_rank:.4f}")
-        return train_oversmoothing
+        return train_oversmoothing, val_oversmoothing
 
     def get_training_history(self):
         return self.training_history
@@ -375,6 +381,7 @@ class PiGnnMethodTrainer(BaseTrainer):
             use_self_mi=bool(pi_params.get('miself', False)),
             normalization_factor=pi_params.get('norm', None),
             use_vanilla_training=bool(pi_params.get('vanilla', False)),
+            oversmoothing_every=d['oversmoothing_every'],
         )
 
         link_decoder = GraphLinkDecoder()
@@ -387,4 +394,4 @@ class PiGnnMethodTrainer(BaseTrainer):
             pi_gnn_model, d['data_for_training'],
             self.config, d['get_model'],
         )
-        return self._make_result(result, result['train_oversmoothing'])
+        return self._make_result(result, result['train_oversmoothing'], result.get('val_oversmoothing'))

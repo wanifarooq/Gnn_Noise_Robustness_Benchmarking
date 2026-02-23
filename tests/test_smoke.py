@@ -218,6 +218,14 @@ def test_model_smoke(method):
         f"train_oversmoothing should be dict for method '{method}'"
     )
 
+    # ── val_oversmoothing is a dict ──────────────────────────────────────
+    assert 'val_oversmoothing' in result, (
+        f"Missing key 'val_oversmoothing' in result for method '{method}'"
+    )
+    assert isinstance(result['val_oversmoothing'], dict), (
+        f"val_oversmoothing should be dict for method '{method}'"
+    )
+
     # ── flops_info has total_flops ───────────────────────────────────────
     assert 'total_flops' in result['flops_info'], (
         f"flops_info missing 'total_flops' for method '{method}'"

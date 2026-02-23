@@ -22,7 +22,8 @@ class UnionNET:
         self.learning_rate = training_config.get('lr', 0.01)
         self.weight_decay_coef = float(training_config.get('weight_decay', 5e-4))
         self.early_stop_patience = training_config.get('patience', 100)
-        
+        self.oversmoothing_every = training_config.get('oversmoothing_every', 20)
+
         # UnionNET specific parameters
         self.support_size_k = training_config.get('k', 5)
         self.reweight_alpha = training_config.get('alpha', 0.5)
@@ -194,6 +195,7 @@ class UnionNET:
 
     def train_model(self, enable_debug=True):
         per_epochs_oversmoothing = defaultdict(list)
+        per_epochs_val_oversmoothing = defaultdict(list)
 
         training_start_time = time.time()
         
@@ -218,7 +220,7 @@ class UnionNET:
             val_f1_score = self.cls_evaluator.compute_f1(val_pred_labels, val_true_labels)
             
             # Compute oversmoothing metrics
-            if current_epoch % 20 == 0:
+            if current_epoch % self.oversmoothing_every == 0:
                 train_oversmooth_metrics = compute_oversmoothing_for_mask(
                     self.oversmoothing_evaluator, model_predictions, self.edge_connections, self.train_node_mask
                 )
@@ -227,7 +229,9 @@ class UnionNET:
                 )
                 for key, value in train_oversmooth_metrics.items():
                     per_epochs_oversmoothing[key].append(value)
-                
+                for key, value in val_oversmooth_metrics.items():
+                    per_epochs_val_oversmoothing[key].append(value)
+
                 if enable_debug:
                     print(f"Epoch {current_epoch+1:03d} | Train Acc: {train_accuracy:.4f}, Val Acc: {val_accuracy:.4f} | "
                           f"Train F1: {train_f1_score:.4f}, Val F1: {val_f1_score:.4f}")
@@ -274,6 +278,7 @@ class UnionNET:
             )
 
         results['train_oversmoothing'] = per_epochs_oversmoothing
+        results['val_oversmoothing'] = per_epochs_val_oversmoothing
 
         total_training_time = time.time() - training_start_time
 
@@ -302,6 +307,7 @@ class UnionNETMethodTrainer(BaseTrainer):
             'alpha': unet_params.get('alpha', 0.5),
             'beta': unet_params.get('beta', 1.0),
             'feat_norm': unet_params.get('feat_norm', True),
+            'oversmoothing_every': d['oversmoothing_every'],
         }
 
         trainer = UnionNET(
@@ -309,4 +315,4 @@ class UnionNETMethodTrainer(BaseTrainer):
             d['num_classes'], unionnet_config,
         )
         result = trainer.train_model(enable_debug=True)
-        return self._make_result(result, result['train_oversmoothing'])
+        return self._make_result(result, result['train_oversmoothing'], result.get('val_oversmoothing'))

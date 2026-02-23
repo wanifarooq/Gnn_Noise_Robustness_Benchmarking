@@ -11,7 +11,7 @@ from sklearn.metrics import (
 from torch_geometric.utils import to_scipy_sparse_matrix
 from cleanlab.count import estimate_latent, compute_confident_joint
 
-from model.evaluation import OversmoothingMetrics, ClassificationMetrics
+from model.evaluation import OversmoothingMetrics, ClassificationMetrics, compute_oversmoothing_for_mask
 from model.base import BaseTrainer
 from model.registry import register
 from model.methods.Standard import train_with_standard_loss
@@ -33,6 +33,7 @@ class GraphCleanerNoiseDetector:
         self.weight_decay_factor = float(configuration_params.get('training', {}).get('weight_decay', 5e-4))
         self.training_epochs = configuration_params.get('training', {}).get('epochs', 200)
         self.early_stopping_patience = configuration_params.get('training', {}).get('patience', 10)
+        self.oversmoothing_every = configuration_params.get('training', {}).get('oversmoothing_every', 20)
 
         self.random_seed = random_seed
 
@@ -40,54 +41,6 @@ class GraphCleanerNoiseDetector:
         self.cls_evaluator = ClassificationMetrics(average='macro')
         
 
-    def _calculate_oversmoothing_metrics_for_subset(self, node_embeddings, graph_edges, node_subset_mask, node_labels=None):
-        
-        try:
-            subset_node_indices = torch.where(node_subset_mask)[0]
-            subset_embeddings = node_embeddings[subset_node_indices]
-            
-            subset_indices_set = set(subset_node_indices.cpu().numpy())
-            
-            # Filter edges
-            edge_within_subset_mask = torch.tensor([
-                source_node.item() in subset_indices_set and target_node.item() in subset_indices_set
-                for source_node, target_node in graph_edges.t()
-            ], device=graph_edges.device)
-            
-            if not edge_within_subset_mask.any():
-                return {
-                    'NumRank': float(min(subset_embeddings.shape)),
-                    'Erank': float(min(subset_embeddings.shape)),
-                    'EDir': 0.0,
-                    'EDir_traditional': 0.0,
-                    'EProj': 0.0,
-                    'MAD': 0.0
-                }
-            
-            subset_edges = graph_edges[:, edge_within_subset_mask]
-            index_mapping = {original_idx.item(): new_idx for new_idx, original_idx in enumerate(subset_node_indices)}
-            
-            remapped_edge_indices = torch.stack([
-                torch.tensor([index_mapping[src.item()] for src in subset_edges[0]], device=graph_edges.device),
-                torch.tensor([index_mapping[tgt.item()] for tgt in subset_edges[1]], device=graph_edges.device)
-            ])
-            
-            subset_graph_data = [{
-                'X': subset_embeddings,
-                'edge_index': remapped_edge_indices,
-                'edge_weight': None
-            }]
-            
-            return self.oversmoothing_calculator.compute_all_metrics(
-                X=subset_embeddings,
-                edge_index=remapped_edge_indices,
-                graphs_in_class=subset_graph_data
-            )
-            
-        except Exception as error:
-            print(f"Warning: Could not compute oversmoothing metrics for subset: {error}")
-            return None
-        
     def _convert_logits_to_probabilities(self, prediction_logits):
 
         if isinstance(prediction_logits, np.ndarray):
@@ -157,11 +110,11 @@ class GraphCleanerNoiseDetector:
                 model_output = neural_network_model(graph_data)
                 current_metrics = self._calculate_training_metrics(graph_data, neural_network_model, model_output)
                 
-                if (current_epoch + 1) % 20 == 0:
-                    train_oversmoothing_metrics = self._calculate_oversmoothing_metrics_for_subset(
-                        model_output, graph_data.edge_index, graph_data.train_mask, graph_data.y)
-                    val_oversmoothing_metrics = self._calculate_oversmoothing_metrics_for_subset(
-                        model_output, graph_data.edge_index, graph_data.val_mask, graph_data.y)
+                if (current_epoch + 1) % self.oversmoothing_every == 0:
+                    train_oversmoothing_metrics = compute_oversmoothing_for_mask(
+                        self.oversmoothing_calculator, model_output, graph_data.edge_index, graph_data.train_mask)
+                    val_oversmoothing_metrics = compute_oversmoothing_for_mask(
+                        self.oversmoothing_calculator, model_output, graph_data.edge_index, graph_data.val_mask)
                     
                     train_dirichlet_energy = train_oversmoothing_metrics.get('EDir', 0.0) if train_oversmoothing_metrics else 0.0
                     train_dirichlet_traditional = train_oversmoothing_metrics.get('EDir_traditional', 0.0) if train_oversmoothing_metrics else 0.0
@@ -226,12 +179,12 @@ class GraphCleanerNoiseDetector:
             final_metrics_dict['test_acc'] = test_cls['accuracy']
             final_metrics_dict['test_f1'] = test_cls['f1']
             
-            final_train_oversmoothing = self._calculate_oversmoothing_metrics_for_subset(
-                final_model_output, graph_data.edge_index, graph_data.train_mask, graph_data.y)
-            final_val_oversmoothing = self._calculate_oversmoothing_metrics_for_subset(
-                final_model_output, graph_data.edge_index, graph_data.val_mask, graph_data.y)
-            final_test_oversmoothing = self._calculate_oversmoothing_metrics_for_subset(
-                final_model_output, graph_data.edge_index, graph_data.test_mask, graph_data.y)
+            final_train_oversmoothing = compute_oversmoothing_for_mask(
+                self.oversmoothing_calculator, final_model_output, graph_data.edge_index, graph_data.train_mask)
+            final_val_oversmoothing = compute_oversmoothing_for_mask(
+                self.oversmoothing_calculator, final_model_output, graph_data.edge_index, graph_data.val_mask)
+            final_test_oversmoothing = compute_oversmoothing_for_mask(
+                self.oversmoothing_calculator, final_model_output, graph_data.edge_index, graph_data.test_mask)
 
         total_training_time = time.time() - training_start_time
 
@@ -538,8 +491,8 @@ class GraphCleanerNoiseDetector:
             trained_model.eval()
             with torch.no_grad():
                 model_predictions = trained_model(graph_data)
-                oversmoothing_results = self._calculate_oversmoothing_metrics_for_subset(
-                    model_predictions, graph_data.edge_index, graph_data.test_mask, graph_data.y
+                oversmoothing_results = compute_oversmoothing_for_mask(
+                    self.oversmoothing_calculator, model_predictions, graph_data.edge_index, graph_data.test_mask
                 )
         
         print("GraphCleaner Training completed!")
@@ -568,6 +521,7 @@ class GraphCleanerMethodTrainer(BaseTrainer):
     def run(self):
         d = self.init_data
 
+        self.config.setdefault('training', {})['oversmoothing_every'] = d['oversmoothing_every']
         detector = GraphCleanerNoiseDetector(
             configuration_params=self.config,
             computation_device=d['device'],
@@ -592,5 +546,6 @@ class GraphCleanerMethodTrainer(BaseTrainer):
             noisy_indices_after, device=d['device'],
             total_epochs=d['epochs'], lr=d['lr'],
             weight_decay=d['weight_decay'], patience=d['patience'],
+            oversmoothing_every=d['oversmoothing_every'],
         )
-        return self._make_result(result, result['train_oversmoothing'])
+        return self._make_result(result, result['train_oversmoothing'], result.get('val_oversmoothing'))

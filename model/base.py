@@ -31,6 +31,7 @@ class BaseTrainer(ABC):
         }
 
     def _make_result(self, result_dict: dict, train_oversmoothing: dict,
+                     val_oversmoothing: dict | None = None,
                      *, reduce: bool = True) -> dict:
         """Assemble the standardised result dict returned by every trainer.
 
@@ -40,6 +41,8 @@ class BaseTrainer(ABC):
             Must contain keys: accuracy, f1, precision, recall, oversmoothing.
         train_oversmoothing : dict
             Per-epoch oversmoothing metrics collected during training.
+        val_oversmoothing : dict or None
+            Per-epoch validation oversmoothing metrics collected during training.
         reduce : bool
             If *True* (default), average the per-epoch lists via
             ``_reduce_oversmoothing``.  Set to *False* for models (e.g. GCOD)
@@ -55,5 +58,9 @@ class BaseTrainer(ABC):
                 self._reduce_oversmoothing(train_oversmoothing)
                 if reduce else train_oversmoothing
             ),
+            'val_oversmoothing': (
+                self._reduce_oversmoothing(val_oversmoothing)
+                if reduce else val_oversmoothing
+            ) if val_oversmoothing else {},
             'flops_info': self.init_data['flops_info'],
         }

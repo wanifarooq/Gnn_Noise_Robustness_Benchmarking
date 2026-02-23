@@ -39,7 +39,8 @@ class NRGNN:
         self.edge_threshold = nrgnn_params.get('t_small', 0.1)
         self.negative_samples_ratio = nrgnn_params.get('n_n', 50)
         self.debug_mode = nrgnn_params.get('debug', True)
-        
+        self.oversmoothing_every = config.get('oversmoothing_every', 20)
+
         # Model components
         self.node_predictor = None
         self.main_model = None
@@ -420,7 +421,7 @@ class NRGNN:
             predictor_validation_accuracy = self.compute_accuracy(predictor_probabilities[validation_indices], self.node_labels[validation_indices])
                 
             
-            if self.debug_mode and epoch%20 == 0:
+            if self.debug_mode and epoch % self.oversmoothing_every == 0:
 
                 train_f1 = self.cls_evaluator.compute_f1(main_model_output[train_indices].argmax(dim=1), self.node_labels[train_indices])
                 validation_f1 = self.cls_evaluator.compute_f1(main_model_output[validation_indices].argmax(dim=1), self.node_labels[validation_indices])
@@ -476,7 +477,7 @@ class NRGNN:
                     print(f"Early stopping at epoch {epoch+1}, best val loss: {self.best_validation_loss:.4f}")
                 raise StopIteration
         if logging:
-            return train_metrics
+            return train_metrics, val_metrics
 
     def load_best_model_weights(self):
 
@@ -494,23 +495,27 @@ class NRGNN:
 
         self.initialize_model_components()
         per_epochs_oversmoothing = defaultdict(list)
-        
+        per_epochs_val_oversmoothing = defaultdict(list)
+
         start_time = time.time()
         try:
             for epoch in range(self.max_epochs):
                 results = self.train_single_epoch(epoch, train_indices, validation_indices)
                 if results is not None:
-                    for key, value in results.items():
+                    train_metrics, val_metrics = results
+                    for key, value in train_metrics.items():
                         per_epochs_oversmoothing[key].append(value)
+                    for key, value in val_metrics.items():
+                        per_epochs_val_oversmoothing[key].append(value)
         except StopIteration:
             if self.debug_mode:
                 print(f"Early stopping at epoch {epoch+1}")
 
         total_training_time = time.time() - start_time
         print(f"\nTraining completed in {total_training_time:.2f}s")
-        
+
         self.load_best_model_weights()
-        return per_epochs_oversmoothing
+        return per_epochs_oversmoothing, per_epochs_val_oversmoothing
 
     def test(self, test_indices):
         self.main_model.eval()
@@ -566,6 +571,7 @@ class NRGNNMethodTrainer(BaseTrainer):
             'epochs': d['epochs'],
             'patience': d['patience'],
             'nrgnn_params': self.config.get('nrgnn_params', {}),
+            'oversmoothing_every': d['oversmoothing_every'],
         }
 
         nrgnn_model = NRGNN(nrgnn_config, d['device'], base_model=d['backbone_model'])
@@ -578,11 +584,11 @@ class NRGNNMethodTrainer(BaseTrainer):
         val_idx = d['val_mask'].nonzero(as_tuple=True)[0].cpu().numpy()
         test_idx = d['test_mask'].nonzero(as_tuple=True)[0].cpu().numpy()
 
-        train_oversmoothing = nrgnn_model.fit(
+        train_oversmoothing, val_oversmoothing = nrgnn_model.fit(
             d['data_for_training'].x.to(d['device']),
             adj,
             d['data_for_training'].y.to(d['device']),
             train_idx, val_idx,
         )
         result = nrgnn_model.test(test_idx)
-        return self._make_result(result, train_oversmoothing)
+        return self._make_result(result, train_oversmoothing, val_oversmoothing)

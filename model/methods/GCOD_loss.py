@@ -196,7 +196,8 @@ class GCODTrainer:
     
     def __init__(self, model, data, noisy_indices=None, device='cuda', 
                  learning_rate=0.01, weight_decay=5e-4, uncertainty_lr=0.01,
-                 total_epochs=500, patience=100, batch_size=32, debug=True):
+                 total_epochs=500, patience=100, batch_size=32, debug=True,
+                 oversmoothing_every=20):
         
         self.model = model.to(device)
         self.data = data.to(device)
@@ -210,6 +211,7 @@ class GCODTrainer:
         self.total_epochs = total_epochs
         self.patience = patience
         self.batch_size = batch_size
+        self.oversmoothing_every = oversmoothing_every
 
         self.num_classes = int(data.y.max().item()) + 1
 
@@ -521,7 +523,8 @@ class GCODTrainer:
         plt.show()
 
     def train_full_model(self):
-        per_epochs_oversmoothing = defaultdict(list)
+        per_epochs_train_oversmoothing = defaultdict(list)
+        per_epochs_val_oversmoothing = defaultdict(list)
         if self.debug:
             print(f"Starting GCOD training for {self.total_epochs} epochs")
             print(f"Training samples: {self.data.train_mask.sum().item()}")
@@ -570,7 +573,7 @@ class GCODTrainer:
                     print(f"Early stopping triggered at epoch {epoch}")
                 break
 
-            if self.debug and epoch % 20 == 0:
+            if self.debug and epoch % self.oversmoothing_every == 0:
                 with torch.no_grad():
                     u_mean = self.gcod_loss_fn.uncertainty_params.mean().item()
                     u_std = self.gcod_loss_fn.uncertainty_params.std().item()
@@ -585,10 +588,13 @@ class GCODTrainer:
                 print(f"Uncertainty Stats - Mean: {u_mean:.4f}, Std: {u_std:.4f}, "
                     f"Min: {u_min:.4f}, Max: {u_max:.4f}")
 
-                for key, value in oversmoothing_metrics.items():
-                    per_epochs_oversmoothing[key].append(value)
-
                 train_os = oversmoothing_metrics.get('train', {})
+                val_os = oversmoothing_metrics.get('val', {})
+                for key, value in train_os.items():
+                    per_epochs_train_oversmoothing[key].append(value)
+                for key, value in val_os.items():
+                    per_epochs_val_oversmoothing[key].append(value)
+
                 train_edir = train_os.get('EDir', 0.0)
                 train_edir_traditional = train_os.get('EDir_traditional', 0.0)
                 train_eproj = train_os.get('EProj', 0.0)
@@ -596,7 +602,6 @@ class GCODTrainer:
                 train_num_rank = train_os.get('NumRank', 0.0)
                 train_effective_rank = train_os.get('Erank', 0.0)
                 
-                val_os = oversmoothing_metrics.get('val', {})
                 val_edir = val_os.get('EDir', 0.0)
                 val_edir_traditional = val_os.get('EDir_traditional', 0.0)
                 val_eproj = val_os.get('EProj', 0.0)
@@ -619,7 +624,7 @@ class GCODTrainer:
         if self.best_model_state is not None:
             self.model.load_state_dict(self.best_model_state)
 
-        return self._final_model_evaluation(), per_epochs_oversmoothing
+        return self._final_model_evaluation(), per_epochs_train_oversmoothing, per_epochs_val_oversmoothing
     
     def _final_model_evaluation(self):
         self.model.eval()
@@ -662,6 +667,7 @@ class GCODMethodTrainer(BaseTrainer):
             patience=d['patience'],
             batch_size=int(gcod_params.get('batch_size', 32)),
             debug=True,
+            oversmoothing_every=d['oversmoothing_every'],
         )
-        result, train_oversmoothing = trainer.train_full_model()
-        return self._make_result(result, train_oversmoothing, reduce=False)
+        result, train_oversmoothing, val_oversmoothing = trainer.train_full_model()
+        return self._make_result(result, train_oversmoothing, val_oversmoothing, reduce=False)

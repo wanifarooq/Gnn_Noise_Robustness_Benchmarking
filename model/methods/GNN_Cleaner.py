@@ -49,6 +49,7 @@ class GNNCleanerTrainer:
         
         # Early stopping
         self.early_stopping_patience = int(configuration.get('early_stopping_patience', 10))
+        self.oversmoothing_every = configuration.get('oversmoothing_every', 20)
 
         if base_gnn_model is not None:
             self.gnn_model = base_gnn_model.to(computation_device)
@@ -408,13 +409,14 @@ class GNNCleanerTrainer:
 
     def execute_full_training(self, enable_debug_output=True):
         per_epochs_oversmoothing = defaultdict(list)
+        per_epochs_val_oversmoothing = defaultdict(list)
         training_start_time = time.time()
         
         best_validation_loss = float("inf")
         best_model_checkpoint = None
         early_stopping_counter = 0
         
-        oversmoothing_calculation_interval = 20
+        oversmoothing_calculation_interval = self.oversmoothing_every
         
         for training_epoch in range(self.max_training_epochs):
             epoch_training_loss, epoch_weighting_loss = self._perform_training_step(training_epoch)
@@ -443,6 +445,8 @@ class GNNCleanerTrainer:
                         per_epochs_oversmoothing[key].append(value)
                 if validation_oversmoothing_metrics is not None:
                     self.oversmoothing_training_history['val'].append(validation_oversmoothing_metrics)
+                    for key, value in validation_oversmoothing_metrics.items():
+                        per_epochs_val_oversmoothing[key].append(value)
 
             # Early stopping
             if current_metrics['val_loss'] < best_validation_loss:
@@ -521,6 +525,7 @@ class GNNCleanerTrainer:
             )
 
         results['train_oversmoothing'] = per_epochs_oversmoothing
+        results['val_oversmoothing'] = per_epochs_val_oversmoothing
 
         total_training_time = time.time() - training_start_time
 
@@ -551,6 +556,7 @@ class GNNCleanerMethodTrainer(BaseTrainer):
             'early_stopping_patience': d['patience'],
             'label_propagation_iterations': gc_params.get('label_propagation_iterations', 50),
             'similarity_epsilon': gc_params.get('similarity_epsilon', 1e-8),
+            'oversmoothing_every': d['oversmoothing_every'],
         }
 
         trainer = GNNCleanerTrainer(
@@ -558,4 +564,4 @@ class GNNCleanerMethodTrainer(BaseTrainer):
             d['device'], d['num_classes'], d['backbone_model'],
         )
         result = trainer.execute_full_training(enable_debug_output=True)
-        return self._make_result(result, result['train_oversmoothing'])
+        return self._make_result(result, result['train_oversmoothing'], result.get('val_oversmoothing'))

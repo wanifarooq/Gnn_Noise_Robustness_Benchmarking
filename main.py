@@ -50,7 +50,9 @@ def run_benchmarking(base_folder='results'):
             'NumRank': [], 'Erank': [], 'EDir': [],
             'EDir_traditional': [], 'EProj': [], 'MAD': [],
             'NumRank-Train': [], 'Erank-Train': [], 'EDir-Train': [],
-            'EDir_traditional-Train': [], 'EProj-Train': [], 'MAD-Train': []
+            'EDir_traditional-Train': [], 'EProj-Train': [], 'MAD-Train': [],
+            'NumRank-Val': [], 'Erank-Val': [], 'EDir-Val': [],
+            'EDir_traditional-Val': [], 'EProj-Val': [], 'MAD-Val': [],
         }
 
         for run in range(1, 6):
@@ -83,6 +85,10 @@ def run_benchmarking(base_folder='results'):
                 if '-Train' in key:
                     base_key = key.replace('-Train', '')
                     source = test_metrics.get('train_oversmoothing', {})
+                    raw_val = source.get(base_key, float('nan'))
+                elif '-Val' in key:
+                    base_key = key.replace('-Val', '')
+                    source = test_metrics.get('val_oversmoothing', {})
                     raw_val = source.get(base_key, float('nan'))
                 else:
                     raw_val = test_metrics['oversmoothing'][key]

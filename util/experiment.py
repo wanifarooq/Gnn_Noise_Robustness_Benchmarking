@@ -93,6 +93,7 @@ def initialize_experiment(config, run_id=1):
     weight_decay = float(trainer_params.get('weight_decay', 5e-4))
     epochs = int(trainer_params.get('epochs', 20))
     patience = int(trainer_params.get('patience', 100))
+    oversmoothing_every = int(trainer_params.get('oversmoothing_every', 20))
 
     return {
         'device': device,
@@ -113,6 +114,7 @@ def initialize_experiment(config, run_id=1):
         'patience': patience,
         'method': method,
         'seed': seed,
+        'oversmoothing_every': oversmoothing_every,
         'flops_info': flops_info,
         'get_model': get_model,
     }

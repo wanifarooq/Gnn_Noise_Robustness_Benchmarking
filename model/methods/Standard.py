@@ -15,10 +15,12 @@ def train_with_standard_loss(
     lr=0.01,
     weight_decay=5e-4,
     patience=20,
-    debug=True
+    debug=True,
+    oversmoothing_every=20,
 ):
 
     per_epochs_oversmoothing = defaultdict(list)
+    per_epochs_val_oversmoothing = defaultdict(list)
     model.to(device)
     optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
 
@@ -64,7 +66,7 @@ def train_with_standard_loss(
             model.load_state_dict(best_model_state)
             break
 
-        if debug and epoch % 20 == 0:
+        if debug and epoch % oversmoothing_every == 0:
             train_oversmoothing = compute_oversmoothing_for_mask(
                 oversmoothing_evaluator, out, data.edge_index, data.train_mask
             )
@@ -74,6 +76,8 @@ def train_with_standard_loss(
 
             for key, value in train_oversmoothing.items():
                 per_epochs_oversmoothing[key].append(value)
+            for key, value in val_oversmoothing.items():
+                per_epochs_val_oversmoothing[key].append(value)
 
             print(f"Epoch {epoch:03d} | Train Acc: {train_acc:.4f}, Val Acc: {val_acc:.4f} | "
                   f"Train F1: {train_f1:.4f}, Val F1: {val_f1:.4f}")
@@ -101,6 +105,7 @@ def train_with_standard_loss(
         )
 
     results['train_oversmoothing'] = per_epochs_oversmoothing
+    results['val_oversmoothing'] = per_epochs_val_oversmoothing
 
     if debug:
         print(f"Test Acc: {results['accuracy']:.4f} | Test F1: {results['f1']:.4f} | "
@@ -119,5 +124,6 @@ class StandardMethodTrainer(BaseTrainer):
             d['global_noisy_indices'], d['device'],
             total_epochs=d['epochs'], lr=d['lr'],
             weight_decay=d['weight_decay'], patience=d['patience'],
+            oversmoothing_every=d['oversmoothing_every'],
         )
-        return self._make_result(result, result['train_oversmoothing'])
+        return self._make_result(result, result['train_oversmoothing'], result.get('val_oversmoothing'))

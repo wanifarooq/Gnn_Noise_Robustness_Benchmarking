@@ -241,10 +241,12 @@ class GraphCommunityDefenseTrainer:
                                    early_stopping_patience: int = 20,
                                    learning_rate: float = 0.005,
                                    weight_decay_rate: float = 1e-3,
-                                   enable_debug: bool = True):
+                                   enable_debug: bool = True,
+                                   oversmoothing_every: int = 20):
 
         training_start_time = time.time()
         per_epochs_oversmoothing = defaultdict(list)
+        per_epochs_val_oversmoothing = defaultdict(list)
         
         model = gnn_model.to(self.device)
         optimizer = torch.optim.Adam(
@@ -336,7 +338,7 @@ class GraphCommunityDefenseTrainer:
                     f"Train F1: {train_f1:.4f}, Val F1: {val_f1:.4f}"
                 )
 
-                if epoch % 20 == 0:
+                if epoch % oversmoothing_every == 0:
                     emb = node_embeddings.detach()
 
                     train_metrics = compute_oversmoothing_for_mask(
@@ -364,6 +366,8 @@ class GraphCommunityDefenseTrainer:
 
                     for key, value in train_metrics.items():
                         per_epochs_oversmoothing[key].append(value)
+                    for key, value in val_metrics.items():
+                        per_epochs_val_oversmoothing[key].append(value)
 
                 # Early stopping
                 if validation_loss < best_validation_loss:
@@ -399,6 +403,7 @@ class GraphCommunityDefenseTrainer:
             )
 
         results['train_oversmoothing'] = per_epochs_oversmoothing
+        results['val_oversmoothing'] = per_epochs_val_oversmoothing
 
         training_duration = time.time() - training_start_time
         if enable_debug:
@@ -435,5 +440,6 @@ class CommunityDefenseMethodTrainer(BaseTrainer):
             learning_rate=d['lr'],
             weight_decay_rate=d['weight_decay'],
             enable_debug=True,
+            oversmoothing_every=d['oversmoothing_every'],
         )
-        return self._make_result(result, result['train_oversmoothing'])
+        return self._make_result(result, result['train_oversmoothing'], result.get('val_oversmoothing'))

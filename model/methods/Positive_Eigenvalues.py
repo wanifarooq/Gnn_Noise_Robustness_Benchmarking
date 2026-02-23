@@ -12,13 +12,14 @@ from model.registry import register
 class PositiveEigenvaluesTrainer:
     # Positive eigenvalues constraint method
     
-    def __init__(self, model, data, device='cuda', learning_rate=0.01, weight_decay=5e-4):
+    def __init__(self, model, data, device='cuda', learning_rate=0.01, weight_decay=5e-4, oversmoothing_every=20):
 
         self.model = model
         self.data = data
         self.device = device
         self.learning_rate = learning_rate
         self.weight_decay = weight_decay
+        self.oversmoothing_every = oversmoothing_every
         self.oversmoothing_evaluator = OversmoothingMetrics(device=device)
         self.cls_evaluator = ClassificationMetrics(average='macro')
         
@@ -74,6 +75,7 @@ class PositiveEigenvaluesTrainer:
 
         
         per_epochs_oversmoothing = defaultdict(list)
+        per_epochs_val_oversmoothing = defaultdict(list)
         train_loader, val_loader, test_loader = self.create_data_loaders(batch_size)
         
         best_validation_loss = float('inf')
@@ -99,7 +101,7 @@ class PositiveEigenvaluesTrainer:
                 self.model.load_state_dict(best_model_weights)
                 break
             
-            if epoch % 20 == 0:
+            if epoch % self.oversmoothing_every == 0:
 
                 self.model.eval()
                 with torch.no_grad():
@@ -129,6 +131,8 @@ class PositiveEigenvaluesTrainer:
 
                 for key, value in train_oversmoothing.items():
                     per_epochs_oversmoothing[key].append(value)
+                for key, value in val_oversmoothing.items():
+                    per_epochs_val_oversmoothing[key].append(value)
                 train_edir = train_oversmoothing.get('EDir', 0.0) if train_oversmoothing else 0.0
                 train_edir_traditional = train_oversmoothing.get('EDir_traditional', 0.0) if train_oversmoothing else 0.0
                 train_eproj = train_oversmoothing.get('EProj', 0.0) if train_oversmoothing else 0.0
@@ -170,6 +174,7 @@ class PositiveEigenvaluesTrainer:
             )
 
         results['train_oversmoothing'] = per_epochs_oversmoothing
+        results['val_oversmoothing'] = per_epochs_val_oversmoothing
 
         print("\nPositive Eigenvalues Training completed")
         print(f"Test Acc: {results['accuracy']:.4f} | Test F1: {results['f1']:.4f} | "
@@ -344,6 +349,7 @@ class PositiveEigenvaluesMethodTrainer(BaseTrainer):
             device=d['device'],
             learning_rate=d['lr'],
             weight_decay=d['weight_decay'],
+            oversmoothing_every=d['oversmoothing_every'],
         )
         result = trainer.train_with_positive_eigenvalue_constraint(
             max_epochs=d['epochs'],
@@ -351,4 +357,4 @@ class PositiveEigenvaluesMethodTrainer(BaseTrainer):
             patience=d['patience'],
             noisy_indices=d['global_noisy_indices'],
         )
-        return self._make_result(result, result['train_oversmoothing'])
+        return self._make_result(result, result['train_oversmoothing'], result.get('val_oversmoothing'))

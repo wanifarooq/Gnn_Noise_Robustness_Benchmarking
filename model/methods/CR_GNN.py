@@ -106,7 +106,8 @@ class CRGNNModel:
         self.patience = config.get('patience', 10)
         self.hidden_channels = config.get('hidden_channels', 64)
         self.pr = config.get('pr', 0.3)
-        
+        self.oversmoothing_every = config.get('oversmoothing_every', 20)
+
         self.best_val_loss = float('inf') # self.best_val_acc = 0.0
         self.early_stop_counter = 0
         self.best_weights = None
@@ -116,6 +117,7 @@ class CRGNNModel:
 
     def train_model(self, backbone_model, graph_data, model_config, model_factory_function):
         per_epochs_oversmoothing = defaultdict(list)
+        per_epochs_val_oversmoothing = defaultdict(list)
         graph_data = graph_data.to(self.device)
         num_classes = graph_data.y.max().item() + 1
         
@@ -174,7 +176,7 @@ class CRGNNModel:
                                              graph_data.x, graph_data.edge_index,
                                              noisy_labels, val_mask)
             
-            if epoch % 20 == 0:
+            if epoch % self.oversmoothing_every == 0:
                 with torch.no_grad():
                     embeddings = backbone(Data(x=graph_data.x, edge_index=graph_data.edge_index))
                     embeddings = adapter(embeddings)
@@ -187,6 +189,8 @@ class CRGNNModel:
                     )
                     for key, value in train_oversmooth_metrics.items():
                         per_epochs_oversmoothing[key].append(value)
+                    for key, value in val_oversmooth_metrics.items():
+                        per_epochs_val_oversmoothing[key].append(value)
                     print(f"Epoch {epoch+1:03d} | Train Acc: {train_acc:.4f}, Val Acc: {val_acc:.4f}, Total Loss: {loss:.4f}")
                     print(f"Train EDir: {train_oversmooth_metrics['EDir']:.4f}, Val EDir: {val_oversmooth_metrics['EDir']:.4f} | "
                           f"Train EDir_trad: {train_oversmooth_metrics['EDir_traditional']:.4f}, Val EDir_trad: {val_oversmooth_metrics['EDir_traditional']:.4f} | "
@@ -238,6 +242,7 @@ class CRGNNModel:
             )
 
         results['train_oversmoothing'] = per_epochs_oversmoothing
+        results['val_oversmoothing'] = per_epochs_val_oversmoothing
 
         print(f"Final Test - Acc: {results['accuracy']:.4f}, F1: {results['f1']:.4f} | "
               f"Precision: {results['precision']:.4f}, Recall: {results['recall']:.4f}")
@@ -325,6 +330,7 @@ class CRGNNMethodTrainer(BaseTrainer):
             'weight_decay': d['weight_decay'],
             'epochs': d['epochs'],
             'patience': d['patience'],
+            'oversmoothing_every': d['oversmoothing_every'],
         }
         combined_params.update(cr_params)
 
@@ -333,4 +339,4 @@ class CRGNNMethodTrainer(BaseTrainer):
             d['backbone_model'], d['data_for_training'],
             d['backbone_model'], d['get_model'],
         )
-        return self._make_result(result, result['train_oversmoothing'])
+        return self._make_result(result, result['train_oversmoothing'], result.get('val_oversmoothing'))
