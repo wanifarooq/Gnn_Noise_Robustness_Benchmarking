@@ -4,10 +4,11 @@ import torch.nn.functional as F
 from torch_geometric.utils import dropout_edge, mask_feature
 from torch_geometric.data import Data
 from copy import deepcopy
-import time
 from collections import defaultdict
 from model.evaluation import (OversmoothingMetrics, ClassificationMetrics,
                               compute_oversmoothing_for_mask, evaluate_model)
+from model.base import BaseTrainer
+from model.registry import register
 
 
 class ContrastiveProjectionHead(torch.nn.Module):
@@ -152,9 +153,7 @@ class CRGNNModel:
         
         clean_labels = getattr(graph_data, 'y_original', graph_data.y)
         noisy_labels = graph_data.y
-        
-        start_time = time.time()
-        
+
         for epoch in range(self.epochs):
             backbone.train()
             adapter.train()
@@ -208,7 +207,6 @@ class CRGNNModel:
                     'proj_head': deepcopy(proj_head.state_dict()),
                     'class_head': deepcopy(class_head.state_dict())
                 }
-                training_time = time.time() - start_time
             else:
                 self.early_stop_counter += 1
                 if self.early_stop_counter >= self.patience:
@@ -280,7 +278,7 @@ class CRGNNModel:
         if self.beta > 0:
             try:
                 loss_ccon = compute_cross_space_consistency_fixed(z1, z2, p1, p2, self.T, self.p)
-            except:
+            except Exception:
                 loss_ccon = torch.tensor(0.0, device=x.device)
         
         # Total loss
@@ -313,11 +311,6 @@ class CRGNNModel:
             acc = self.cls_evaluator.compute_accuracy(pred_labels, labels[mask])
             
         return loss, acc
-
-
-# ── Registry wrapper ─────────────────────────────────────────────────────
-from model.base import BaseTrainer
-from model.registry import register
 
 
 @register('cr_gnn')

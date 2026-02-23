@@ -6,13 +6,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import scipy.sparse as sp
-from torch_geometric.utils import from_scipy_sparse_matrix, to_undirected, negative_sampling
+from torch_geometric.utils import from_scipy_sparse_matrix, to_undirected, negative_sampling, to_scipy_sparse_matrix
 from torch_geometric.nn import GCNConv
 from collections import defaultdict
 
 from model.evaluation import (OversmoothingMetrics, ClassificationMetrics,
                               compute_oversmoothing_for_mask, evaluate_model,
                               DEFAULT_OVERSMOOTHING)
+from model.base import BaseTrainer
+from model.registry import register
 
 class NRGNN:
 
@@ -552,13 +554,6 @@ class NRGNN:
                 'train_oversmoothing_final': dict(DEFAULT_OVERSMOOTHING),
                 'val_oversmoothing_final': dict(DEFAULT_OVERSMOOTHING),
             }
-
-
-# ── Registry wrapper ─────────────────────────────────────────────────────
-from torch_geometric.utils import to_scipy_sparse_matrix
-
-from model.base import BaseTrainer
-from model.registry import register
 
 
 @register('nrgnn')

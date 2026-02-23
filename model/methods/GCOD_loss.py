@@ -1,15 +1,15 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.optim as optim
 from copy import deepcopy
 from torch_geometric.loader import NeighborLoader
 import matplotlib.pyplot as plt
-import numpy as np
 from collections import defaultdict
 
 from model.evaluation import (OversmoothingMetrics, ClassificationMetrics,
                               compute_oversmoothing_for_mask, evaluate_model)
+from model.base import BaseTrainer
+from model.registry import register
 
 def evaluate_ce_only(model, data_loader, device='cuda', num_classes=None, mask_name='val'):
     model.eval()
@@ -624,8 +624,11 @@ class GCODTrainer:
     def _final_model_evaluation(self):
         self.model.eval()
         with torch.no_grad():
-            get_predictions = lambda: self.model(self.data).argmax(dim=1)
-            get_embeddings = lambda: self.model(self.data)
+            def get_predictions():
+                return self.model(self.data).argmax(dim=1)
+
+            def get_embeddings():
+                return self.model(self.data)
             results = evaluate_model(
                 get_predictions, get_embeddings, self.data.y,
                 self.data.train_mask, self.data.val_mask, self.data.test_mask,
@@ -639,10 +642,6 @@ class GCODTrainer:
 
         return results
 
-
-# ── Registry wrapper ─────────────────────────────────────────────────────
-from model.base import BaseTrainer
-from model.registry import register
 
 
 @register('gcod')

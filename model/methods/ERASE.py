@@ -12,6 +12,8 @@ from collections import defaultdict
 
 from model.evaluation import (OversmoothingMetrics, ClassificationMetrics,
                               compute_oversmoothing_for_mask, evaluate_model)
+from model.base import BaseTrainer
+from model.registry import register
 
 
 def normalize_adj_row(adj_matrix):
@@ -66,8 +68,8 @@ class MaximalCodingRateReductionLoss(nn.Module):
         num_features, num_samples = feature_matrix.shape
         num_classes = torch.max(predicted_labels) + 1
         identity_matrix = torch.eye(num_features, device=feature_matrix.device)
-        compression_loss = 0.
-        
+        compression_loss: torch.Tensor = torch.tensor(0.0, device=feature_matrix.device)
+
         for class_idx in range(num_classes):
             class_mask = torch.where(predicted_labels == class_idx)[0]
             if len(class_mask) == 0:
@@ -90,8 +92,8 @@ class MaximalCodingRateReductionLoss(nn.Module):
         num_features, num_samples = feature_matrix.shape
         num_classes, _, _ = membership_matrices.shape
         identity_matrix = torch.eye(num_features, device=feature_matrix.device)
-        compression_loss = 0.
-        
+        compression_loss: torch.Tensor = torch.tensor(0.0, device=feature_matrix.device)
+
         for class_idx in range(num_classes):
             membership_trace = torch.trace(membership_matrices[class_idx]) + 1e-8
             scalar = num_features / (membership_trace * self.eps)
@@ -106,7 +108,7 @@ class MaximalCodingRateReductionLoss(nn.Module):
         num_features, num_samples = feature_matrix.shape
         num_classes, _, _ = membership_matrices.shape
         identity_matrix = torch.eye(num_features, device=feature_matrix.device)
-        compression_loss = 0.
+        compression_loss: torch.Tensor = torch.tensor(0.0, device=feature_matrix.device)
         for class_idx in range(num_classes):
             membership_trace = torch.trace(membership_matrices[class_idx]) + 1e-8
             scalar = num_features / (membership_trace * self.eps)
@@ -137,8 +139,8 @@ class MaximalCodingRateReductionLoss(nn.Module):
         discrimination_loss_empirical = self.compute_discrimination_loss_empirical(feature_matrix)
 
         # Standard variant with membership matrices
-        membership_matrices = self._convert_labels_to_membership_matrices(predicted_labels.cpu(), num_classes)
-        membership_matrices = torch.tensor(membership_matrices, dtype=torch.float32, device=node_features.device)
+        membership_matrices_np = self._convert_labels_to_membership_matrices(predicted_labels.cpu(), num_classes)
+        membership_matrices = torch.tensor(membership_matrices_np, dtype=torch.float32, device=node_features.device)
 
         compression_loss_empirical = self.compute_compression_loss_empirical(feature_matrix, membership_matrices)
         compression_loss_theoretical = self.compute_compression_loss_theoretical(feature_matrix, membership_matrices)
@@ -165,15 +167,15 @@ class MaximalCodingRateReductionLoss(nn.Module):
 
         train_labels = semantic_labels[train_node_mask].argmax(dim=1)
         
-        class_centroids = []
+        centroids_list = []
         for class_idx in range(num_classes):
             class_mask = (train_labels == class_idx)
             if class_mask.sum() > 0:
-                class_centroids.append(train_features[class_mask].mean(dim=0))
+                centroids_list.append(train_features[class_mask].mean(dim=0))
             else:
-                class_centroids.append(torch.zeros(train_features.shape[1], device=train_features.device))
-        
-        class_centroids = torch.stack(class_centroids)
+                centroids_list.append(torch.zeros(train_features.shape[1], device=train_features.device))
+
+        class_centroids = torch.stack(centroids_list)
         
         normalized_features = F.normalize(all_features, p=2, dim=1)
         normalized_centroids = F.normalize(class_centroids, p=2, dim=1)
@@ -441,9 +443,7 @@ class ERASETrainer:
     def _execute_training_loop(self, model, graph_data, optimizer, loss_function, 
                                   adjacency_matrix, semantic_labels_matrix, predicted_labels, debug_mode):
             per_epochs_oversmoothing = defaultdict(list)
-            best_validation_accuracy = 0
             best_validation_loss = float('inf')
-            best_training_accuracy = 0
             patience_counter = 0
             max_epochs = self.training_config.get('total_epochs', 200)
             patience_limit = self.training_config.get('patience', 50)
@@ -484,8 +484,6 @@ class ERASETrainer:
                 # Early stopping
                 if validation_loss < best_validation_loss:
                     best_validation_loss = validation_loss
-                    best_training_accuracy = train_accuracy
-                    best_validation_accuracy = validation_accuracy
                     patience_counter = 0
                     best_model_state = copy.deepcopy(model.state_dict())
                 else:
@@ -527,7 +525,7 @@ class ERASETrainer:
             results['train_oversmoothing'] = per_epochs_oversmoothing
 
             if debug_mode:
-                print(f"\nERASE Training completed!")
+                print("\nERASE Training completed!")
                 print(f"Test Acc: {results['accuracy']:.4f} | Test F1: {results['f1']:.4f} | "
                       f"Precision: {results['precision']:.4f}, Recall: {results['recall']:.4f}")
                 print(f"Test Oversmoothing: {results['oversmoothing']}")
@@ -675,11 +673,6 @@ def create_enhanced_gnn_model(model_creation_function, gnn_model_name, enhanceme
         base_gnn_model=base_gnn_model,
         **default_enhancement_config
     )
-
-
-# ── Registry wrapper ─────────────────────────────────────────────────────
-from model.base import BaseTrainer
-from model.registry import register
 
 
 @register('erase')

@@ -15,6 +15,8 @@ from torch_geometric.data import Data
 from collections import defaultdict
 from model.evaluation import (OversmoothingMetrics, ClassificationMetrics,
                               compute_oversmoothing_for_mask, evaluate_model as shared_evaluate_model)
+from model.base import BaseTrainer
+from model.registry import register
 
 
 class GNNGuardTrainer:
@@ -262,12 +264,15 @@ class GNNGuardTrainer:
 
         self.model.eval()
         with torch.no_grad():
-            get_predictions = lambda: self.model(
-                self.node_features, self.normalized_adjacency, use_attention=self.use_attention
-            ).argmax(dim=1)
-            get_embeddings = lambda: self.model(
-                self.node_features, self.normalized_adjacency, use_attention=self.use_attention
-            )
+            def get_predictions():
+                return self.model(
+                    self.node_features, self.normalized_adjacency, use_attention=self.use_attention
+                ).argmax(dim=1)
+
+            def get_embeddings():
+                return self.model(
+                    self.node_features, self.normalized_adjacency, use_attention=self.use_attention
+                )
             edge_index = self.normalized_adjacency._indices()
 
             results = shared_evaluate_model(
@@ -276,7 +281,7 @@ class GNNGuardTrainer:
                 edge_index, self.device
             )
 
-        print(f"GNNGuard Training completed!")
+        print("GNNGuard Training completed!")
         print(f"Test Acc: {results['accuracy']:.4f} | Test F1: {results['f1']:.4f} | "
               f"Precision: {results['precision']:.4f}, Recall: {results['recall']:.4f}")
         print(f"Test Oversmoothing: {results['oversmoothing']}")
@@ -420,11 +425,6 @@ class GNNGuardModel(nn.Module):
         ).to(self.device)
         
         return attention_weighted_adjacency
-
-
-# ── Registry wrapper ─────────────────────────────────────────────────────
-from model.base import BaseTrainer
-from model.registry import register
 
 
 @register('gnnguard')

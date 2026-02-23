@@ -5,6 +5,8 @@ import torch.nn.functional as F
 from collections import defaultdict
 from model.evaluation import (OversmoothingMetrics, ClassificationMetrics,
                               compute_oversmoothing_for_mask, evaluate_model)
+from model.base import BaseTrainer
+from model.registry import register
 
 
 class UnionNET:
@@ -260,8 +262,11 @@ class UnionNET:
 
         self.gnn_model.eval()
         with torch.no_grad():
-            get_predictions = lambda: self.gnn_model(self.graph_data).argmax(dim=1)
-            get_embeddings = lambda: self.gnn_model(self.graph_data)
+            def get_predictions():
+                return self.gnn_model(self.graph_data).argmax(dim=1)
+
+            def get_embeddings():
+                return self.gnn_model(self.graph_data)
             results = evaluate_model(
                 get_predictions, get_embeddings, self.clean_node_labels,
                 self.train_node_mask, self.val_node_mask, self.test_node_mask,
@@ -273,18 +278,13 @@ class UnionNET:
         total_training_time = time.time() - training_start_time
 
         if enable_debug:
-            print(f"\nUnionNET Training completed!")
+            print("\nUnionNET Training completed!")
             print(f"Test Acc: {results['accuracy']:.4f} | Test F1: {results['f1']:.4f} | "
                   f"Precision: {results['precision']:.4f}, Recall: {results['recall']:.4f}")
             print(f"Training completed in {total_training_time:.2f}s")
             print(f"Test Oversmoothing: {results['oversmoothing']}")
 
         return results
-
-
-# ── Registry wrapper ─────────────────────────────────────────────────────
-from model.base import BaseTrainer
-from model.registry import register
 
 
 @register('unionnet')

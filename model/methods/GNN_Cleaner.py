@@ -8,6 +8,8 @@ from collections import defaultdict
 
 from model.evaluation import (OversmoothingMetrics, ClassificationMetrics,
                               compute_oversmoothing_for_mask, evaluate_model)
+from model.base import BaseTrainer
+from model.registry import register
 
 class LabelWeightingNetwork(nn.Module):
 
@@ -166,7 +168,7 @@ class GNNCleanerTrainer:
 
         try:
             node_embeddings = self.gnn_model(self.data)
-        except:
+        except Exception:
             node_embeddings = self.gnn_model(node_features, edge_connectivity)
 
         # Similarity matrix
@@ -214,7 +216,7 @@ class GNNCleanerTrainer:
         if D_left.sum() > 0:
             try:
                 updated_embeddings = self.gnn_model(self.data)
-            except:
+            except Exception:
                 updated_embeddings = self.gnn_model(node_features, edge_connectivity)
             
             left_indices = D_left.nonzero(as_tuple=True)[0]
@@ -259,7 +261,7 @@ class GNNCleanerTrainer:
                 if len(clean_indices) > 0:
                     try:
                         final_embeddings = self.gnn_model(self.data)
-                    except:
+                    except Exception:
                         final_embeddings = self.gnn_model(node_features, edge_connectivity)
                     
                     clean_embeddings = final_embeddings[clean_indices]
@@ -318,11 +320,7 @@ class GNNCleanerTrainer:
         total_nodes = node_feature_embeddings.size(0)
         
         edge_source, edge_target = edge_connectivity.cpu().numpy()
-        graph_adjacency = sparse.coo_matrix(
-            (np.ones(len(edge_source)), (edge_source, edge_target)), 
-            shape=(total_nodes, total_nodes)
-        )
-        
+
         similarity_weights = []
         similarity_row_indices = []
         similarity_col_indices = []
@@ -361,7 +359,7 @@ class GNNCleanerTrainer:
         
         try:
             model_outputs = self.gnn_model(self.data)
-        except:
+        except Exception:
             model_outputs = self.gnn_model(node_features, edge_connectivity)
         
         predicted_labels = model_outputs.argmax(dim=1)
@@ -429,7 +427,7 @@ class GNNCleanerTrainer:
             if training_epoch % oversmoothing_calculation_interval == 0 or training_epoch == self.max_training_epochs - 1:
                 try:
                     current_embeddings = self.gnn_model(self.data)
-                except:
+                except Exception:
                     current_embeddings = self.gnn_model(self.data.x.to(self.device), self.data.edge_index.to(self.device))
 
                 train_oversmoothing_metrics = compute_oversmoothing_for_mask(
@@ -452,14 +450,6 @@ class GNNCleanerTrainer:
                 best_model_checkpoint = {
                     "gnn_model": self.gnn_model.state_dict(),
                     "weighting_network": self.label_weighting_net.state_dict()
-                }
-                best_training_performance = {
-                    'train_acc': current_metrics['train_acc'],
-                    'train_f1': current_metrics['train_f1']
-                }
-                best_validation_performance = {
-                    'val_acc': current_metrics['val_acc'], 
-                    'val_f1': current_metrics['val_f1']
                 }
                 early_stopping_counter = 0
             else:
@@ -515,13 +505,13 @@ class GNNCleanerTrainer:
             def _get_predictions():
                 try:
                     return self.gnn_model(self.data).argmax(dim=1)
-                except:
+                except Exception:
                     return self.gnn_model(self.data.x.to(self.device), self.data.edge_index.to(self.device)).argmax(dim=1)
 
             def _get_embeddings():
                 try:
                     return self.gnn_model(self.data)
-                except:
+                except Exception:
                     return self.gnn_model(self.data.x.to(self.device), self.data.edge_index.to(self.device))
 
             results = evaluate_model(
@@ -535,7 +525,7 @@ class GNNCleanerTrainer:
         total_training_time = time.time() - training_start_time
 
         if enable_debug_output:
-            print(f"\nGNN Cleaner Training Completed")
+            print("\nGNN Cleaner Training Completed")
             print(f"Test Acc: {results['accuracy']:.4f} | Test F1: {results['f1']:.4f} | "
                   f"Precision: {results['precision']:.4f}, Recall: {results['recall']:.4f}")
             print(f"Total training time: {total_training_time:.2f} seconds")
@@ -545,11 +535,6 @@ class GNNCleanerTrainer:
     
     def get_oversmoothing_training_history(self):
         return self.oversmoothing_training_history
-
-
-# ── Registry wrapper ─────────────────────────────────────────────────────
-from model.base import BaseTrainer
-from model.registry import register
 
 
 @register('gnn_cleaner')

@@ -1,13 +1,13 @@
 import copy
-import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.optim as optim
 from collections import defaultdict
 
 from model.evaluation import (OversmoothingMetrics, ClassificationMetrics,
                               compute_oversmoothing_for_mask, evaluate_model)
+from model.base import BaseTrainer
+from model.registry import register
 
 def train_with_standard_loss(
     model, data, noisy_indices, device,
@@ -43,7 +43,6 @@ def train_with_standard_loss(
         model.eval()
         with torch.no_grad():
             val_idx = data.val_mask.nonzero(as_tuple=True)[0]
-            test_idx = data.test_mask.nonzero(as_tuple=True)[0]
 
             val_loss = criterion(out[val_idx], data.y[val_idx])
 
@@ -89,8 +88,12 @@ def train_with_standard_loss(
         model.load_state_dict(best_model_state)
     model.eval()
     with torch.no_grad():
-        get_predictions = lambda: model(data).argmax(dim=1)
-        get_embeddings = lambda: model(data)
+        def get_predictions():
+            return model(data).argmax(dim=1)
+
+        def get_embeddings():
+            return model(data)
+
         results = evaluate_model(
             get_predictions, get_embeddings, data.y,
             data.train_mask, data.val_mask, data.test_mask,
@@ -105,11 +108,6 @@ def train_with_standard_loss(
         print(f"Test Oversmoothing: {results['oversmoothing']}")
 
     return results
-
-
-# ── Registry wrapper ─────────────────────────────────────────────────────
-from model.base import BaseTrainer
-from model.registry import register
 
 
 @register('standard')

@@ -15,13 +15,15 @@ from model.gnns import GCN, GIN, GAT, GATv2, GPS
 from model.evaluation import (OversmoothingMetrics, ClassificationMetrics,
                               compute_oversmoothing_for_mask, evaluate_model,
                               DEFAULT_OVERSMOOTHING)
+from model.base import BaseTrainer
+from model.registry import register
 
 
 class DualBranchGNNModel(nn.Module):
     
     def __init__(self, gnn_type: str, input_features: int, hidden_dim: int, num_classes: int,
                  dropout_rate: float = 0.5, use_edge_weights: bool = False, attention_heads: int = 4,
-                 num_layers: int = None, device=None, add_self_loops: bool = False,
+                 num_layers: int | None = None, device=None, add_self_loops: bool = False,
                  attn_type: str = 'multihead', use_pe: bool = False, pe_dim: int = 8):
         super().__init__()
         self.device = device
@@ -309,7 +311,7 @@ class RTGNN(nn.Module):
         node_features = data_for_training.x.cpu().numpy()
         node_labels = data_for_training.y.cpu().numpy()
         
-        print(f"[DEBUG] Checking label corruption in RTGNN training:")
+        print("[DEBUG] Checking label corruption in RTGNN training:")
         if hasattr(data_for_training, 'y_original'):
             corrupted_count = (data_for_training.y[data_for_training.train_mask] != data_for_training.y_original[data_for_training.train_mask]).sum().item()
             print(f"[DEBUG] Training labels corrupted: {corrupted_count}/{data_for_training.train_mask.sum().item()} nodes")
@@ -393,7 +395,7 @@ class RTGNN(nn.Module):
                 first_embeddings = self.dual_branch_predictor.first_branch.get_embeddings(graph_data) if hasattr(self.dual_branch_predictor.first_branch, 'get_embeddings') else self.dual_branch_predictor.first_branch(graph_data)
                 second_embeddings = self.dual_branch_predictor.second_branch.get_embeddings(graph_data) if hasattr(self.dual_branch_predictor.second_branch, 'get_embeddings') else self.dual_branch_predictor.second_branch(graph_data)
                 averaged_embeddings = (first_embeddings + second_embeddings) / 2
-            except:
+            except Exception:
                 averaged_embeddings = averaged_output
             
             performance_metrics = {}
@@ -749,11 +751,6 @@ class RTGNN(nn.Module):
         )
 
         return cross_entropy_loss + self.training_config.co_lambda * kl_divergence_loss
-
-
-# ── Registry wrapper ─────────────────────────────────────────────────────
-from model.base import BaseTrainer
-from model.registry import register
 
 
 @register('rtgnn')

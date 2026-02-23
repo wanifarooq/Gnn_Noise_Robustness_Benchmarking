@@ -6,6 +6,8 @@ from collections import defaultdict
 
 from model.evaluation import (OversmoothingMetrics, ClassificationMetrics,
                               compute_oversmoothing_for_mask, evaluate_model)
+from model.base import BaseTrainer
+from model.registry import register
 
 class PositiveEigenvaluesTrainer:
     # Positive eigenvalues constraint method
@@ -78,12 +80,6 @@ class PositiveEigenvaluesTrainer:
         best_model_weights = None
         epochs_without_improvement = 0
         
-        oversmoothing_history = {
-            'train': [],
-            'val': [],
-            'test': []
-        }
-
         for epoch in range(1, max_epochs + 1):
 
             train_metrics = self.train_single_epoch(train_loader)
@@ -162,8 +158,11 @@ class PositiveEigenvaluesTrainer:
         
         self.model.eval()
         with torch.no_grad():
-            get_predictions = lambda: self.model(self.data).argmax(dim=1)
-            get_embeddings = lambda: self.model(self.data)
+            def get_predictions():
+                return self.model(self.data).argmax(dim=1)
+
+            def get_embeddings():
+                return self.model(self.data)
             results = evaluate_model(
                 get_predictions, get_embeddings, self.data.y,
                 self.data.train_mask, self.data.val_mask, self.data.test_mask,
@@ -172,7 +171,7 @@ class PositiveEigenvaluesTrainer:
 
         results['train_oversmoothing'] = per_epochs_oversmoothing
 
-        print(f"\nPositive Eigenvalues Training completed")
+        print("\nPositive Eigenvalues Training completed")
         print(f"Test Acc: {results['accuracy']:.4f} | Test F1: {results['f1']:.4f} | "
               f"Precision: {results['precision']:.4f}, Recall: {results['recall']:.4f}")
         print(f"Test Oversmoothing: {results['oversmoothing']}")
@@ -331,10 +330,6 @@ class PositiveEigenvaluesTrainer:
         
         return evaluation_results
 
-
-# ── Registry wrapper ─────────────────────────────────────────────────────
-from model.base import BaseTrainer
-from model.registry import register
 
 
 @register('positive_eigenvalues')

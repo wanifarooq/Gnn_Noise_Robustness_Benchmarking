@@ -1,13 +1,10 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.optim as optim
 import numpy as np
 import scipy.sparse as sp
-import copy
 import time
-import scipy
-from torch_geometric.utils import from_scipy_sparse_matrix, subgraph
+from torch_geometric.utils import from_scipy_sparse_matrix
 from torch_geometric.data import Data as PyGData
 from collections import defaultdict
 try:
@@ -17,19 +14,21 @@ except ImportError:
 
 from model.evaluation import (OversmoothingMetrics, ClassificationMetrics,
                               compute_oversmoothing_for_mask, evaluate_model)
+from model.base import BaseTrainer
+from model.registry import register
 
 class GraphCommunityDefenseTrainer:
 
     def __init__(self, 
                  graph_data: PyGData,
                  community_detection_method: str = "louvain",
-                 num_communities: int = None,
+                 num_communities: int | None = None,
                  community_loss_weight: float = 2.0,
                  positive_pair_weight: float = 1.0,
                  negative_pair_weight: float = 2.0,
                  similarity_margin: float = 1.5,
                  negative_samples_per_node: int = 3,
-                 device: torch.device = None,
+                 device: torch.device | None = None,
                  verbose: bool = True):
 
         self.graph_data = graph_data
@@ -387,8 +386,11 @@ class GraphCommunityDefenseTrainer:
             batch_data = PyGData(x=node_features, edge_index=edge_index, y=node_labels)
             final_output = model(batch_data)
             final_logits = final_output[0] if (isinstance(final_output, tuple) and len(final_output) == 2) else final_output
-            get_predictions = lambda: final_logits.argmax(dim=1)
-            get_embeddings = lambda: final_logits
+            def get_predictions():
+                return final_logits.argmax(dim=1)
+
+            def get_embeddings():
+                return final_logits
 
             results = evaluate_model(
                 get_predictions, get_embeddings, node_labels,
@@ -406,11 +408,6 @@ class GraphCommunityDefenseTrainer:
             print(f"Test Oversmoothing: {results['oversmoothing']}")
 
         return results
-
-
-# ── Registry wrapper ─────────────────────────────────────────────────────
-from model.base import BaseTrainer
-from model.registry import register
 
 
 @register('community_defense')

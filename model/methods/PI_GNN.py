@@ -9,6 +9,8 @@ from collections import defaultdict
 
 from model.evaluation import (OversmoothingMetrics, ClassificationMetrics,
                               compute_oversmoothing_for_mask, evaluate_model)
+from model.base import BaseTrainer
+from model.registry import register
 
 
 class GraphLinkDecoder(nn.Module):
@@ -304,8 +306,11 @@ class PiGnnTrainer:
 
         model.eval()
         with torch.no_grad():
-            get_predictions = lambda: model(graph_data)[0].argmax(dim=1)
-            get_embeddings = lambda: model.backbone_gnn(graph_data)
+            def get_predictions():
+                return model(graph_data)[0].argmax(dim=1)
+
+            def get_embeddings():
+                return model.backbone_gnn(graph_data)
             results = evaluate_model(
                 get_predictions, get_embeddings, graph_data.y,
                 graph_data.train_mask, graph_data.val_mask, graph_data.test_mask,
@@ -351,11 +356,6 @@ class PiGnnTrainer:
 
     def get_training_history(self):
         return self.training_history
-
-
-# ── Registry wrapper ─────────────────────────────────────────────────────
-from model.base import BaseTrainer
-from model.registry import register
 
 
 @register('pi_gnn')

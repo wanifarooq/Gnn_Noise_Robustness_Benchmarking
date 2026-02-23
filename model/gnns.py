@@ -46,7 +46,7 @@ class MLP(nn.Module):
 class GCN(nn.Module):
     def __init__(self, in_channels: int, hidden_channels: int, out_channels: int,
                  n_layers: int = 2, dropout: float = 0.5, with_relu: bool = True, 
-                 with_bias: bool = True, self_loop: bool = True, norm_info: dict = None, 
+                 with_bias: bool = True, self_loop: bool = True, norm_info: dict | None = None,
                  act: str = 'F.relu', input_layer: bool = False, output_layer: bool = False):
         super().__init__()
 
@@ -66,6 +66,7 @@ class GCN(nn.Module):
         if output_layer:
             self.output_linear = nn.Linear(hidden_channels, out_channels)
             if self.is_norm:
+                assert self.norm_type is not None
                 self.output_norm = self.norm_type(hidden_channels)
 
         self.convs = nn.ModuleList()
@@ -76,12 +77,14 @@ class GCN(nn.Module):
             out_dim = out_channels if i == n_layers - 1 and not output_layer else hidden_channels
             self.convs.append(GCNConv(in_dim, out_dim, bias=with_bias, add_self_loops=self_loop))
             if self.is_norm:
+                assert self.norms is not None
+                assert self.norm_type is not None
                 self.norms.append(self.norm_type(out_dim))
 
     def forward(self, data):
         x, edge_index = data.x, data.edge_index
         edge_weight = getattr(data, 'edge_weight', None)
-        
+
         if self.input_layer:
             x = self.input_linear(x)
             x = self.act(x)
@@ -147,7 +150,7 @@ class GAT(nn.Module):
     def __init__(self, in_channels: int, hidden_channels: int, out_channels: int,
                  n_layers: int = 3, heads: int = 4, dropout: float = 0.6, 
                  with_bias: bool = True, self_loop: bool = True, 
-                 norm_info: dict = None, act: str = 'F.elu'):
+                 norm_info: dict | None = None, act: str = 'F.elu'):
         super().__init__()
 
         self.n_layers = n_layers
@@ -172,6 +175,8 @@ class GAT(nn.Module):
                         dropout=dropout, bias=with_bias, add_self_loops=self_loop)
             )
             if self.is_norm and i != n_layers - 1:
+                assert self.norms is not None
+                assert self.norm_type is not None
                 norm_dim = out_dim * layer_heads if concat else out_dim
                 self.norms.append(self.norm_type(norm_dim))
 
@@ -198,7 +203,7 @@ class GATv2(nn.Module):
     def __init__(self, in_channels: int, hidden_channels: int, out_channels: int,
                  n_layers: int = 3, heads: int = 4, dropout: float = 0.6, 
                  with_bias: bool = True, self_loop: bool = True, 
-                 norm_info: dict = None, act: str = 'F.elu'):
+                 norm_info: dict | None = None, act: str = 'F.elu'):
         super().__init__()
 
         self.n_layers = n_layers
@@ -229,6 +234,8 @@ class GATv2(nn.Module):
                           share_weights=False)
             )
             if self.is_norm and i != n_layers - 1:
+                assert self.norms is not None
+                assert self.norm_type is not None
                 self.norms.append(self.norm_type(hidden_channels))
 
     def forward(self, data):
@@ -257,7 +264,7 @@ class GPS(nn.Module):
     def __init__(self, in_channels: int, hidden_channels: int, out_channels: int,
                  n_layers: int = 3, dropout: float = 0.5, heads: int = 4,
                  attn_type: str = 'multihead', use_pe: bool = False, pe_dim: int = 8,
-                 with_bias: bool = True, norm_info: dict = None, act: str = 'F.relu'):
+                 with_bias: bool = True, norm_info: dict | None = None, act: str = 'F.relu'):
         super().__init__()
 
         self.n_layers = n_layers
@@ -303,6 +310,8 @@ class GPS(nn.Module):
             self.convs.append(conv)
 
             if self.is_norm:
+                assert self.norms is not None
+                assert self.norm_type is not None
                 self.norms.append(self.norm_type(out_dim))
 
     def forward(self, data):

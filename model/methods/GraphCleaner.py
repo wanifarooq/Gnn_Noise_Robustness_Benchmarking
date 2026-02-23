@@ -1,12 +1,9 @@
-import os
 import copy
 import time
 import numpy as np
 import torch
 import torch.nn.functional as F
-import scipy.sparse as sp
 from scipy.sparse import spdiags
-import matplotlib.pyplot as plt
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
     matthews_corrcoef, roc_auc_score
@@ -15,6 +12,9 @@ from torch_geometric.utils import to_scipy_sparse_matrix
 from cleanlab.count import estimate_latent, compute_confident_joint
 
 from model.evaluation import OversmoothingMetrics, ClassificationMetrics
+from model.base import BaseTrainer
+from model.registry import register
+from model.methods.Standard import train_with_standard_loss
 
 
 class GraphCleanerNoiseDetector:
@@ -281,7 +281,7 @@ class GraphCleanerNoiseDetector:
 
         corrupted_graph_data = copy.deepcopy(original_graph_data)
     
-        training_node_indices = np.argwhere(corrupted_graph_data.held_mask.cpu().numpy() == True).flatten()
+        training_node_indices = np.argwhere(corrupted_graph_data.held_mask.cpu().numpy()).flatten()
         training_node_labels = corrupted_graph_data.y[corrupted_graph_data.held_mask].cpu().numpy()
 
         # Filter out invalid classes
@@ -357,7 +357,6 @@ class GraphCleanerNoiseDetector:
         
         prediction_propagation_1hop = normalized_laplacian @ latest_prediction_probs
         prediction_propagation_2hop = laplacian_squared @ latest_prediction_probs
-        prediction_propagation_3hop = laplacian_cubed @ latest_prediction_probs
 
         # Compute feature interactions
         feature_list = [
@@ -512,7 +511,6 @@ class GraphCleanerNoiseDetector:
             detection_features[train_mask_cpu].shape[0], -1)
         
         train_noise_predictions = binary_noise_classifier.predict(train_detection_features)
-        train_confidence_scores = binary_noise_classifier.predict_proba(train_detection_features)[:, 1]
         
         train_indices = torch.where(graph_data.train_mask)[0]
         detected_noisy_indices = train_indices[torch.tensor(train_noise_predictions.astype(bool))]
@@ -544,7 +542,7 @@ class GraphCleanerNoiseDetector:
                     model_predictions, graph_data.edge_index, graph_data.test_mask, graph_data.y
                 )
         
-        print(f"GraphCleaner Training completed!")
+        print("GraphCleaner Training completed!")
         print(f"Test Accuracy: {detection_accuracy:.4f}")
         print(f"Test F1: {detection_f1:.4f}")
         print(f"Test Precision: {detection_precision:.4f}")
@@ -563,12 +561,6 @@ class GraphCleanerNoiseDetector:
             'auc': detection_auc,
             'oversmoothing': oversmoothing_results
         }
-
-
-# ── Registry wrapper ─────────────────────────────────────────────────────
-from model.base import BaseTrainer
-from model.registry import register
-from model.methods.Standard import train_with_standard_loss
 
 
 @register('graphcleaner')
