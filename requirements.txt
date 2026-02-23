@@ -6,5 +6,6 @@ cleanlab==2.7.1
 json-tricks==3.17.3
 matplotlib==3.7.2
 codecarbon
+pytest
 
 #pip install --force-reinstall torch-geometric torch-sparse torch-scatter torch-cluster torch-cluster pyg-lib -f https://data.pyg.org/whl/torch-2.4.0+cu124.html

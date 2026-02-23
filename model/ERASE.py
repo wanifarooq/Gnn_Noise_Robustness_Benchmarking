@@ -614,6 +614,14 @@ class ERASETrainer:
         
         return train_f1, validation_f1
 
+    @torch.no_grad()
+    def _compute_cross_entropy_loss_for_split(self, model, graph_data, split_mask):
+        learned_features = model(graph_data)
+        split_true_labels = graph_data.y[split_mask]
+        cross_entropy_loss = torch.nn.CrossEntropyLoss()
+        split_loss = cross_entropy_loss(learned_features[split_mask], split_true_labels)
+        return split_loss
+
     def _print_epoch_debug_information(self, epoch_number, train_acc, val_acc, train_f1, val_f1,
                                      train_oversmoothing, val_oversmoothing, should_print_oversmoothing=True):
 
