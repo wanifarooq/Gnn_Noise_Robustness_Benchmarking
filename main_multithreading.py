@@ -4,7 +4,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import copy
 import time
 
-from utilities import run_experiment, parse_arguments, print_table
+from util.experiment import run_experiment
+from util.cli import parse_arguments, print_table
 
 def run_single_experiment_fixed_seed(method_name, config, fixed_run_id=1):
 

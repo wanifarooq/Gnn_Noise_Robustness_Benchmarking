@@ -7,3 +7,5 @@ pip install setuptools
 pip install torch-sparse --no-build-isolation -f https://data.pyg.org/whl/torch-2.2.1+cpu.html
 pip install torch-scatter --no-build-isolation -f https://data.pyg.org/whl/torch-2.2.1+cpu.html
 pip install pytest 
+pip install ruff mypy
+pip install types-requests

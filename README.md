@@ -217,7 +217,7 @@ pip install -r requirements.txt
 ```python
 # Necessary imports
 import yaml
-from utilities import initialize_experiment
+from util.experiment import initialize_experiment
 from model.GCOD_loss import GCODTrainer
 
 # Load the configuration file

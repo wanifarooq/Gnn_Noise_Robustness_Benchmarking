@@ -5,7 +5,7 @@ import json
 import os
 from codecarbon import EmissionsTracker
 
-from utilities import run_experiment
+from util.experiment import run_experiment
 from sweep_utils import *
 
 def run_benchmarking(base_folder='results'):

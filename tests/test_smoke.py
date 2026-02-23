@@ -10,10 +10,10 @@ import sys
 import os
 import pytest
 
-# Ensure project root is on sys.path so `from utilities import ...` works
+# Ensure project root is on sys.path so `from util import ...` works
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from utilities import run_experiment
+from util.experiment import run_experiment
 
 # ── base config (mirrors config.yaml with reduced expensive params) ──────────
 
