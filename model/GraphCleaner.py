@@ -228,8 +228,7 @@ class GraphCleanerNoiseDetector:
                         print(f"Early stopping triggered at epoch {current_epoch+1}")
                         break
 
-            if (current_epoch + 1) % 20 == 0 or current_epoch == current_epoch:
-                prediction_history_list.append(model_output.cpu().detach().numpy())
+            prediction_history_list.append(model_output.cpu().detach().numpy())
 
         if len(prediction_history_list) == 0:
             neural_network_model.eval()
