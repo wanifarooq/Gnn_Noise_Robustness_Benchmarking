@@ -162,7 +162,6 @@ class GraphCleanerNoiseDetector:
         
         best_validation_loss = float('inf')
         optimal_model_state = None
-        best_f1_score = 0
         patience_counter = 0
 
         for current_epoch in range(total_training_epochs):
@@ -220,7 +219,6 @@ class GraphCleanerNoiseDetector:
                     best_validation_loss = current_metrics['val_loss']
                     optimal_model_state = copy.deepcopy(neural_network_model.state_dict())
                     optimal_predictions = model_output.cpu().detach().numpy()
-                    best_f1_score = current_metrics['val_f1']
                     patience_counter = 0
                 else:
                     patience_counter += 1

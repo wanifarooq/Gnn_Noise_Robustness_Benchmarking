@@ -71,13 +71,11 @@ def make_random_splits(num_nodes: int,
 
 def ensure_splits(data,
                   seed: int,
-                  split_id: int = 0,
                   train_ratio: float = 0.8,
                   val_ratio: float = 0.1):
     """
     Ensure data has 1D train/val/test masks.
     If they do not exist, create them.
-    If they exist and are 2D, pick split_id.
     """
     num_nodes = data.num_nodes
     device = data.x.device if hasattr(data, "x") and data.x is not None else torch.device("cpu")
@@ -400,7 +398,6 @@ def load_dataset(name, root="./data"):
     elif name_lower in ["pascalvoc-sp", "coco-sp"]:
         from torch_geometric.datasets import LRGBDataset
         name_lower = name.lower()
-        from torch_geometric.datasets import LRGBDataset
         dataset_train = LRGBDataset(root=root, name=name, split='train')
         dataset_val   = LRGBDataset(root=root, name=name, split='val')
         dataset_test  = LRGBDataset(root=root, name=name, split='test')
@@ -525,8 +522,6 @@ def get_model(model_name, in_channels, hidden_channels, out_channels, **kwargs):
     return model_cls(in_channels, hidden_channels, out_channels, **filtered_kwargs)
 
 import inspect
-import torch
-from torch.profiler import profile, ProfilerActivity
 
 def _forward_call(model, data):
     """
@@ -724,7 +719,6 @@ def initialize_experiment(config, run_id=1):
 def run_experiment(config, run_id=1):
     init_data = initialize_experiment(config, run_id)
 
-    device = init_data['device']
     device = init_data['device']
     data = init_data['data']
     num_classes = init_data['num_classes']

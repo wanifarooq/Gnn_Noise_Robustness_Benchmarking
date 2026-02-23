@@ -11,11 +11,6 @@ from model.evaluation import (OversmoothingMetrics, ClassificationMetrics,
                               compute_oversmoothing_for_mask, evaluate_model)
 
 
-def compute_accuracy(output, labels):
-    predictions = output.argmax(dim=1)
-    return (predictions == labels).float().mean().item()
-
-
 class GraphLinkDecoder(nn.Module):
     #Decoder for reconstructing graph adjacency matrix using inner product
     

@@ -75,7 +75,6 @@ class GNNCleanerTrainer:
         
         self._initialize_clean_set()
         
-        self.training_results = {'train': -1, 'val': -1, 'test': -1}
         self._display_dataset_statistics()
 
         # Initialize oversmoothing evaluation
@@ -352,22 +351,6 @@ class GNNCleanerTrainer:
         
         return normalized_similarity
 
-
-    def _identify_clean_samples(self, propagated_label_probabilities, given_node_labels, training_nodes_mask):
-
-        predicted_hard_labels = propagated_label_probabilities.argmax(dim=1)
-        
-        training_node_indices = training_nodes_mask.nonzero(as_tuple=True)[0]
-        identified_clean_mask = torch.zeros_like(training_nodes_mask)
-        identified_noisy_mask = torch.zeros_like(training_nodes_mask)
-        
-        for node_idx in training_node_indices:
-            if predicted_hard_labels[node_idx] == given_node_labels[node_idx]:
-                identified_clean_mask[node_idx] = True
-            else:
-                identified_noisy_mask[node_idx] = True
-        
-        return identified_clean_mask, identified_noisy_mask
 
     @torch.no_grad()
     def _evaluate_model_performance(self, include_test_metrics=False):

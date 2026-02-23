@@ -71,7 +71,6 @@ class GraphCentroidOutlierDiscounting(nn.Module):
         self.class_centroids = nn.Parameter(torch.randn(num_classes, self.embedding_dim) * 0.1)
         
         self.register_buffer('class_counts', torch.zeros(num_classes))
-        self.register_buffer('centroid_momentum', torch.tensor(0.9))
 
     def update_class_centroids(self, node_embeddings, node_labels, global_indices):
         # Update class centroids based on current embeddings

@@ -677,26 +677,3 @@ def create_enhanced_gnn_model(model_creation_function, gnn_model_name, enhanceme
     )
 
 
-def analyze_oversmoothing_evolution_during_training(erase_trainer, trained_model, graph_data,
-                                                   epochs_to_analyze=None):
-
-    if epochs_to_analyze is None:
-        epochs_to_analyze = list(range(10, 201, 10))
-
-    oversmoothing_evolution = {}
-    trained_model.eval()
-    with torch.no_grad():
-        learned_features = trained_model(graph_data)
-    for epoch in epochs_to_analyze:
-        oversmoothing_evolution[epoch] = {
-            split_name: compute_oversmoothing_for_mask(
-                erase_trainer.oversmoothing_metrics_calculator, learned_features,
-                graph_data.edge_index, split_mask)
-            for split_name, split_mask in [('train', graph_data.train_mask),
-                                           ('val', graph_data.val_mask),
-                                           ('test', graph_data.test_mask)]
-        }
-
-    return oversmoothing_evolution
-
-
