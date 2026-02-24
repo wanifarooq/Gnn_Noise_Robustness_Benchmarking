@@ -37,10 +37,10 @@ class BaseTrainer(ABC):
             reduce=train_out.get('reduce', True),
         )
 
+    @abstractmethod
     def train(self) -> dict:
         """Train the model. Return dict with at least
         ``train_oversmoothing`` and ``val_oversmoothing`` keys."""
-        raise NotImplementedError
 
     def evaluate(self) -> dict:
         """Evaluate after training. Default: backbone_model(data) on test split."""

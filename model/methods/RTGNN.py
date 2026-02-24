@@ -757,19 +757,25 @@ class RTGNN(nn.Module):
 
 @register('rtgnn')
 class RTGNNMethodTrainer(BaseTrainer):
-    def run(self):
+    def train(self):
         d = self.init_data
 
         self.config.setdefault('training', {})['oversmoothing_every'] = d['oversmoothing_every']
         rtgnn_config = RTGNNTrainingConfig(self.config)
-        rtgnn_trainer = RTGNN(
+        self._rtgnn = RTGNN(
             training_config=rtgnn_config,
             device=d['device'],
             gnn_backbone=self.config['model']['name'].lower(),
             data_for_training=d['data_for_training'],
         ).to(d['device'])
 
-        train_oversmoothing, val_oversmoothing = rtgnn_trainer.train_model()
+        train_oversmoothing, val_oversmoothing = self._rtgnn.train_model()
+        return {
+            'train_oversmoothing': dict(train_oversmoothing),
+            'val_oversmoothing': dict(val_oversmoothing),
+        }
+
+    def evaluate(self):
+        d = self.init_data
         clean_labels = d['data'].y_original.cpu().numpy()
-        result = rtgnn_trainer.evaluate_final_performance(clean_labels=clean_labels)
-        return self._make_result(result, train_oversmoothing, val_oversmoothing)
+        return self._rtgnn.evaluate_final_performance(clean_labels=clean_labels)

@@ -222,33 +222,16 @@ class CRGNNModel:
             proj_head.load_state_dict(self.best_weights['proj_head'])
             class_head.load_state_dict(self.best_weights['class_head'])
 
-        backbone.eval()
-        adapter.eval()
-        class_head.eval()
-        with torch.no_grad():
-            def _get_predictions():
-                h = backbone(Data(x=graph_data.x, edge_index=graph_data.edge_index))
-                h = adapter(h)
-                return class_head(h).exp().argmax(dim=1)
+        self._backbone = backbone
+        self._adapter = adapter
+        self._class_head = class_head
+        self._graph_data = graph_data
+        self._clean_labels = clean_labels
 
-            def _get_embeddings():
-                h = backbone(Data(x=graph_data.x, edge_index=graph_data.edge_index))
-                return adapter(h)
-
-            results = evaluate_model(
-                _get_predictions, _get_embeddings, clean_labels,
-                train_mask, val_mask, test_mask,
-                graph_data.edge_index, self.device
-            )
-
-        results['train_oversmoothing'] = per_epochs_oversmoothing
-        results['val_oversmoothing'] = per_epochs_val_oversmoothing
-
-        print(f"Final Test - Acc: {results['accuracy']:.4f}, F1: {results['f1']:.4f} | "
-              f"Precision: {results['precision']:.4f}, Recall: {results['recall']:.4f}")
-        print(f"Test Oversmoothing: {results['oversmoothing']}")
-
-        return results
+        return {
+            'train_oversmoothing': dict(per_epochs_oversmoothing),
+            'val_oversmoothing': dict(per_epochs_val_oversmoothing),
+        }
 
     def _train_step(self, backbone, adapter, proj_head, class_head, 
                    x, edge_index, labels, mask):
@@ -320,7 +303,7 @@ class CRGNNModel:
 
 @register('cr_gnn')
 class CRGNNMethodTrainer(BaseTrainer):
-    def run(self):
+    def train(self):
         d = self.init_data
         cr_params = self.config.get('cr_gnn_params', {})
 
@@ -334,9 +317,35 @@ class CRGNNMethodTrainer(BaseTrainer):
         }
         combined_params.update(cr_params)
 
-        cr_model = CRGNNModel(device=d['device'], **combined_params)
-        result = cr_model.train_model(
+        self._cr = CRGNNModel(device=d['device'], **combined_params)
+        return self._cr.train_model(
             d['backbone_model'], d['data_for_training'],
             d['backbone_model'], d['get_model'],
         )
-        return self._make_result(result, result['train_oversmoothing'], result.get('val_oversmoothing'))
+
+    def evaluate(self):
+        cr = self._cr
+        backbone = cr._backbone
+        adapter = cr._adapter
+        class_head = cr._class_head
+        graph_data = cr._graph_data
+        clean_labels = cr._clean_labels
+
+        backbone.eval()
+        adapter.eval()
+        class_head.eval()
+        with torch.no_grad():
+            def get_predictions():
+                h = backbone(Data(x=graph_data.x, edge_index=graph_data.edge_index))
+                h = adapter(h)
+                return class_head(h).exp().argmax(dim=1)
+
+            def get_embeddings():
+                h = backbone(Data(x=graph_data.x, edge_index=graph_data.edge_index))
+                return adapter(h)
+
+            return evaluate_model(
+                get_predictions, get_embeddings, clean_labels,
+                graph_data.train_mask, graph_data.val_mask, graph_data.test_mask,
+                graph_data.edge_index, cr.device,
+            )

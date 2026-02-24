@@ -434,11 +434,11 @@ class GNNGuardModel(nn.Module):
 
 @register('gnnguard')
 class GNNGuardMethodTrainer(BaseTrainer):
-    def run(self):
+    def train(self):
         d = self.init_data
         gnnguard_params = self.config.get('gnnguard_params', {})
 
-        trainer = GNNGuardTrainer(
+        self._trainer = GNNGuardTrainer(
             input_features=d['data'].num_features,
             hidden_channels=self.config['model'].get('hidden_channels', 64),
             num_classes=d['num_classes'],
@@ -454,14 +454,19 @@ class GNNGuardMethodTrainer(BaseTrainer):
             backbone=d['backbone_model'],
             oversmoothing_every=d['oversmoothing_every'],
         )
-        trainer.prepare_data()
+        self._trainer.prepare_data()
 
-        train_oversmoothing, val_oversmoothing = trainer.train_model(
+        train_oversmoothing, val_oversmoothing = self._trainer.train_model(
             node_features=d['data_for_training'].x,
             node_labels=d['data_for_training'].y,
             max_epochs=d['epochs'],
             verbose=True,
             patience=d['patience'],
         )
-        result = trainer.evaluate_model()
-        return self._make_result(result, train_oversmoothing, val_oversmoothing)
+        return {
+            'train_oversmoothing': dict(train_oversmoothing),
+            'val_oversmoothing': dict(val_oversmoothing),
+        }
+
+    def evaluate(self):
+        return self._trainer.evaluate_model()

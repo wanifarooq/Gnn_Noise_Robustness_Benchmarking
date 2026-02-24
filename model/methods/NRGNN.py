@@ -558,7 +558,7 @@ class NRGNN:
 
 @register('nrgnn')
 class NRGNNMethodTrainer(BaseTrainer):
-    def run(self):
+    def train(self):
         d = self.init_data
         nrgnn_config = {
             'lr': d['lr'],
@@ -569,7 +569,7 @@ class NRGNNMethodTrainer(BaseTrainer):
             'oversmoothing_every': d['oversmoothing_every'],
         }
 
-        nrgnn_model = NRGNN(nrgnn_config, d['device'], base_model=d['backbone_model'])
+        self._nrgnn = NRGNN(nrgnn_config, d['device'], base_model=d['backbone_model'])
 
         adj = to_scipy_sparse_matrix(
             d['data_for_training'].edge_index,
@@ -577,13 +577,18 @@ class NRGNNMethodTrainer(BaseTrainer):
         )
         train_idx = d['train_mask'].nonzero(as_tuple=True)[0].cpu().numpy()
         val_idx = d['val_mask'].nonzero(as_tuple=True)[0].cpu().numpy()
-        test_idx = d['test_mask'].nonzero(as_tuple=True)[0].cpu().numpy()
+        self._test_idx = d['test_mask'].nonzero(as_tuple=True)[0].cpu().numpy()
 
-        train_oversmoothing, val_oversmoothing = nrgnn_model.fit(
+        train_oversmoothing, val_oversmoothing = self._nrgnn.fit(
             d['data_for_training'].x.to(d['device']),
             adj,
             d['data_for_training'].y.to(d['device']),
             train_idx, val_idx,
         )
-        result = nrgnn_model.test(test_idx)
-        return self._make_result(result, train_oversmoothing, val_oversmoothing)
+        return {
+            'train_oversmoothing': dict(train_oversmoothing),
+            'val_oversmoothing': dict(val_oversmoothing),
+        }
+
+    def evaluate(self):
+        return self._nrgnn.test(self._test_idx)

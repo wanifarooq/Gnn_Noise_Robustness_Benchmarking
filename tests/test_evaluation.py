@@ -232,7 +232,7 @@ class TestMakeResult:
         from model.base import BaseTrainer
 
         class DummyTrainer(BaseTrainer):
-            def run(self):
+            def train(self):
                 pass
 
         dummy = DummyTrainer.__new__(DummyTrainer)
@@ -255,7 +255,7 @@ class TestMakeResult:
         from model.base import BaseTrainer
 
         class DummyTrainer(BaseTrainer):
-            def run(self):
+            def train(self):
                 pass
 
         dummy = DummyTrainer.__new__(DummyTrainer)
@@ -276,7 +276,7 @@ class TestMakeResult:
         from model.base import BaseTrainer
 
         class DummyTrainer(BaseTrainer):
-            def run(self):
+            def train(self):
                 pass
 
         dummy = DummyTrainer.__new__(DummyTrainer)
