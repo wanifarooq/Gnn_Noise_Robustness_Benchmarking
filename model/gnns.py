@@ -170,9 +170,13 @@ class GAT(nn.Module):
             out_dim = out_channels if i == n_layers - 1 else hidden_channels
             layer_heads = 1 if i == n_layers - 1 else heads
             concat = i != n_layers - 1
+            # edge_dim=1: all edge weights in our experiments are scalar (1-dim),
+            # produced dynamically by methods like GNNGuard, NRGNN, RTGNN.
+            # Without edge_dim, GATConv silently ignores edge_attr.
             self.convs.append(
                 GATConv(in_dim, out_dim, heads=layer_heads, concat=concat,
-                        dropout=dropout, bias=with_bias, add_self_loops=self_loop)
+                        dropout=dropout, bias=with_bias, add_self_loops=self_loop,
+                        edge_dim=1)
             )
             if self.is_norm and i != n_layers - 1:
                 assert self.norms is not None
@@ -182,8 +186,14 @@ class GAT(nn.Module):
 
     def forward(self, data):
         x, edge_index = data.x, data.edge_index
+        edge_weight = getattr(data, 'edge_weight', None)
+        # Unsqueeze scalar edge weights (E,) -> (E,1) to match edge_dim=1
+        if edge_weight is not None:
+            edge_attr = edge_weight.unsqueeze(-1) if edge_weight.dim() == 1 else edge_weight
+        else:
+            edge_attr = None
         for i, conv in enumerate(self.convs):
-            x = conv(x, edge_index)
+            x = conv(x, edge_index, edge_attr=edge_attr)
             if i < self.n_layers - 1:
                 if self.is_norm:
                     x = self.norms[i](x)
@@ -234,10 +244,13 @@ class GATv2(nn.Module):
                 out_dim = hidden_channels // heads
                 layer_heads = heads
                 concat = True
+            # edge_dim=1: all edge weights in our experiments are scalar (1-dim),
+            # produced dynamically by methods like GNNGuard, NRGNN, RTGNN.
+            # Without edge_dim, GATv2Conv silently ignores edge_attr.
             self.convs.append(
                 GATv2Conv(in_dim, out_dim, heads=layer_heads, concat=concat,
                           dropout=dropout, bias=with_bias, add_self_loops=self_loop,
-                          share_weights=False)
+                          share_weights=False, edge_dim=1)
             )
             if self.is_norm and i != n_layers - 1:
                 assert self.norms is not None
@@ -247,11 +260,13 @@ class GATv2(nn.Module):
     def forward(self, data):
         x, edge_index = data.x, data.edge_index
         edge_weight = getattr(data, 'edge_weight', None)
+        # Unsqueeze scalar edge weights (E,) -> (E,1) to match edge_dim=1
+        if edge_weight is not None:
+            edge_attr = edge_weight.unsqueeze(-1) if edge_weight.dim() == 1 else edge_weight
+        else:
+            edge_attr = None
         for i, conv in enumerate(self.convs):
-            if edge_weight is not None:
-                x = conv(x, edge_index, edge_attr=edge_weight)
-            else:
-                x = conv(x, edge_index)
+            x = conv(x, edge_index, edge_attr=edge_attr)
             if i < self.n_layers - 1:
                 if self.is_norm:
                     x = self.norms[i](x)

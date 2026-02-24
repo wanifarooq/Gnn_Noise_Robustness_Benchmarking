@@ -59,11 +59,11 @@ class DualBranchGNNModel(nn.Module):
         self.second_branch = create_gnn_branch()
 
     def forward(self, node_features, edge_indices, edge_weights=None):
-        edge_attributes = edge_weights.unsqueeze(-1) if self.use_edge_weights and edge_weights is not None else None
-
         graph_data = Data(x=node_features, edge_index=edge_indices)
-        if edge_attributes is not None:
-            graph_data.edge_attr = edge_attributes
+        if self.use_edge_weights and edge_weights is not None:
+            # edge_weight (E,) for GCN/GAT/GATv2; edge_attr (E,1) for GPS/GINEConv
+            graph_data.edge_weight = edge_weights
+            graph_data.edge_attr = edge_weights.unsqueeze(-1) if edge_weights.dim() == 1 else edge_weights
         if self.device is not None:
             graph_data = graph_data.to(self.device)
 
@@ -389,6 +389,7 @@ class RTGNN(nn.Module):
             
             graph_data = Data(x=node_features, edge_index=final_edge_indices)
             if final_edge_weights is not None:
+                graph_data.edge_weight = final_edge_weights
                 graph_data.edge_attr = final_edge_weights.unsqueeze(-1) if final_edge_weights.dim() == 1 else final_edge_weights
             graph_data = graph_data.to(self.device)
 
