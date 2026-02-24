@@ -101,6 +101,8 @@ class GCN(nn.Module):
         if self.output_layer:
             if self.is_norm:
                 x = self.output_norm(x)
+            x = self.act(x)
+            x = F.dropout(x, p=self.dropout, training=self.training)
             x = self.output_linear(x)
 
         return x
