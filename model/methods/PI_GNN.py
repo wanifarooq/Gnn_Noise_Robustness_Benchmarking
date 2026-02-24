@@ -8,7 +8,7 @@ import time
 from collections import defaultdict
 
 from model.evaluation import (OversmoothingMetrics, ClassificationMetrics,
-                              compute_oversmoothing_for_mask, evaluate_model)
+                              compute_oversmoothing_for_mask)
 from model.base import BaseTrainer
 from model.registry import register
 
@@ -309,29 +309,13 @@ class PiGnnTrainer:
         if best_model_weights is not None:
             model.load_state_dict(best_model_weights)
 
-        model.eval()
-        with torch.no_grad():
-            def get_predictions():
-                return model(graph_data)[0].argmax(dim=1)
-
-            def get_embeddings():
-                return model.backbone_gnn(graph_data)
-            results = evaluate_model(
-                get_predictions, get_embeddings, graph_data.y,
-                graph_data.train_mask, graph_data.val_mask, graph_data.test_mask,
-                graph_data.edge_index, self.device
-            )
-
-        results['train_oversmoothing'] = per_epochs_oversmoothing
-        results['val_oversmoothing'] = per_epochs_val_oversmoothing
-
         total_training_time = time.time() - training_start_time
         print(f"\nTraining completed in {total_training_time:.2f}s")
-        print(f"Test Acc: {results['accuracy']:.4f} | Test F1: {results['f1']:.4f} | "
-              f"Precision: {results['precision']:.4f}, Recall: {results['recall']:.4f}")
-        print(f"Test Oversmoothing: {results['oversmoothing']}")
 
-        return results
+        return {
+            'train_oversmoothing': dict(per_epochs_oversmoothing),
+            'val_oversmoothing': dict(per_epochs_val_oversmoothing),
+        }
 
     def _log_training_progress(self, epoch, metrics, train_oversmoothing, val_oversmoothing):
 
@@ -366,7 +350,7 @@ class PiGnnTrainer:
 
 @register('pi_gnn')
 class PiGnnMethodTrainer(BaseTrainer):
-    def run(self):
+    def train(self):
         d = self.init_data
         pi_params = self.config.get('pi_gnn_params', {})
 
@@ -390,8 +374,7 @@ class PiGnnMethodTrainer(BaseTrainer):
             supplementary_decoder=link_decoder,
         )
 
-        result = trainer.train_model(
+        return trainer.train_model(
             pi_gnn_model, d['data_for_training'],
             self.config, d['get_model'],
         )
-        return self._make_result(result, result['train_oversmoothing'], result.get('val_oversmoothing'))

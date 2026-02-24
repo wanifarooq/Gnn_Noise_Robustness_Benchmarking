@@ -4,7 +4,7 @@ import torch
 import torch.nn.functional as F
 from collections import defaultdict
 from model.evaluation import (OversmoothingMetrics, ClassificationMetrics,
-                              compute_oversmoothing_for_mask, evaluate_model)
+                              compute_oversmoothing_for_mask)
 from model.base import BaseTrainer
 from model.registry import register
 
@@ -264,37 +264,20 @@ class UnionNET:
         if self.best_model_weights is not None:
             self.gnn_model.load_state_dict(self.best_model_weights)
 
-        self.gnn_model.eval()
-        with torch.no_grad():
-            def get_predictions():
-                return self.gnn_model(self.graph_data).argmax(dim=1)
-
-            def get_embeddings():
-                return self.gnn_model(self.graph_data)
-            results = evaluate_model(
-                get_predictions, get_embeddings, self.clean_node_labels,
-                self.train_node_mask, self.val_node_mask, self.test_node_mask,
-                self.edge_connections, self.device
-            )
-
-        results['train_oversmoothing'] = per_epochs_oversmoothing
-        results['val_oversmoothing'] = per_epochs_val_oversmoothing
-
         total_training_time = time.time() - training_start_time
 
         if enable_debug:
-            print("\nUnionNET Training completed!")
-            print(f"Test Acc: {results['accuracy']:.4f} | Test F1: {results['f1']:.4f} | "
-                  f"Precision: {results['precision']:.4f}, Recall: {results['recall']:.4f}")
-            print(f"Training completed in {total_training_time:.2f}s")
-            print(f"Test Oversmoothing: {results['oversmoothing']}")
+            print(f"\nUnionNET Training completed in {total_training_time:.2f}s")
 
-        return results
+        return {
+            'train_oversmoothing': dict(per_epochs_oversmoothing),
+            'val_oversmoothing': dict(per_epochs_val_oversmoothing),
+        }
 
 
 @register('unionnet')
 class UnionNETMethodTrainer(BaseTrainer):
-    def run(self):
+    def train(self):
         d = self.init_data
         unet_params = self.config.get('unionnet_params', {})
 
@@ -314,5 +297,4 @@ class UnionNETMethodTrainer(BaseTrainer):
             d['backbone_model'], d['data_for_training'],
             d['num_classes'], unionnet_config,
         )
-        result = trainer.train_model(enable_debug=True)
-        return self._make_result(result, result['train_oversmoothing'], result.get('val_oversmoothing'))
+        return trainer.train_model(enable_debug=True)

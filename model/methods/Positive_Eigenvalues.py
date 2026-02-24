@@ -5,7 +5,7 @@ from torch_geometric.loader import NeighborLoader
 from collections import defaultdict
 
 from model.evaluation import (OversmoothingMetrics, ClassificationMetrics,
-                              compute_oversmoothing_for_mask, evaluate_model)
+                              compute_oversmoothing_for_mask)
 from model.base import BaseTrainer
 from model.registry import register
 
@@ -160,28 +160,12 @@ class PositiveEigenvaluesTrainer:
                     f"Train Acc: {train_metrics['accuracy']:.4f}, Val Acc: {val_metrics['accuracy']:.4f} | "
                     f"Train F1: {train_metrics['f1']:.4f}, Val F1: {val_metrics['f1']:.4f}")
         
-        self.model.eval()
-        with torch.no_grad():
-            def get_predictions():
-                return self.model(self.data).argmax(dim=1)
-
-            def get_embeddings():
-                return self.model(self.data)
-            results = evaluate_model(
-                get_predictions, get_embeddings, self.data.y,
-                self.data.train_mask, self.data.val_mask, self.data.test_mask,
-                self.data.edge_index, self.device
-            )
-
-        results['train_oversmoothing'] = per_epochs_oversmoothing
-        results['val_oversmoothing'] = per_epochs_val_oversmoothing
-
         print("\nPositive Eigenvalues Training completed")
-        print(f"Test Acc: {results['accuracy']:.4f} | Test F1: {results['f1']:.4f} | "
-              f"Precision: {results['precision']:.4f}, Recall: {results['recall']:.4f}")
-        print(f"Test Oversmoothing: {results['oversmoothing']}")
 
-        return results
+        return {
+            'train_oversmoothing': dict(per_epochs_oversmoothing),
+            'val_oversmoothing': dict(per_epochs_val_oversmoothing),
+        }
     
     def create_data_loaders(self, batch_size=32):
 
@@ -339,7 +323,7 @@ class PositiveEigenvaluesTrainer:
 
 @register('positive_eigenvalues')
 class PositiveEigenvaluesMethodTrainer(BaseTrainer):
-    def run(self):
+    def train(self):
         d = self.init_data
         pe_params = self.config.get('positive_eigenvalues_params', {})
 
@@ -351,10 +335,9 @@ class PositiveEigenvaluesMethodTrainer(BaseTrainer):
             weight_decay=d['weight_decay'],
             oversmoothing_every=d['oversmoothing_every'],
         )
-        result = trainer.train_with_positive_eigenvalue_constraint(
+        return trainer.train_with_positive_eigenvalue_constraint(
             max_epochs=d['epochs'],
             batch_size=int(pe_params.get('batch_size', 32)),
             patience=d['patience'],
             noisy_indices=d['global_noisy_indices'],
         )
-        return self._make_result(result, result['train_oversmoothing'], result.get('val_oversmoothing'))

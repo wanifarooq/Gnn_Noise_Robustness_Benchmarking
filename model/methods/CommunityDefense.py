@@ -13,7 +13,7 @@ except ImportError:
     nx = None
 
 from model.evaluation import (OversmoothingMetrics, ClassificationMetrics,
-                              compute_oversmoothing_for_mask, evaluate_model)
+                              compute_oversmoothing_for_mask)
 from model.base import BaseTrainer
 from model.registry import register
 
@@ -385,39 +385,19 @@ class GraphCommunityDefenseTrainer:
         if best_model_state is not None:
             model.load_state_dict(best_model_state)
 
-        model.eval()
-        with torch.no_grad():
-            batch_data = PyGData(x=node_features, edge_index=edge_index, y=node_labels)
-            final_output = model(batch_data)
-            final_logits = final_output[0] if (isinstance(final_output, tuple) and len(final_output) == 2) else final_output
-            def get_predictions():
-                return final_logits.argmax(dim=1)
-
-            def get_embeddings():
-                return final_logits
-
-            results = evaluate_model(
-                get_predictions, get_embeddings, node_labels,
-                self.train_node_mask, self.val_node_mask, self.test_node_mask,
-                edge_index, self.device
-            )
-
-        results['train_oversmoothing'] = per_epochs_oversmoothing
-        results['val_oversmoothing'] = per_epochs_val_oversmoothing
-
         training_duration = time.time() - training_start_time
         if enable_debug:
             print(f"\nTraining completed in {training_duration:.2f}s")
-            print(f"Test Acc: {results['accuracy']:.4f} | Test F1: {results['f1']:.4f} | "
-                  f"Precision: {results['precision']:.4f}, Recall: {results['recall']:.4f}")
-            print(f"Test Oversmoothing: {results['oversmoothing']}")
 
-        return results
+        return {
+            'train_oversmoothing': dict(per_epochs_oversmoothing),
+            'val_oversmoothing': dict(per_epochs_val_oversmoothing),
+        }
 
 
 @register('community_defense')
 class CommunityDefenseMethodTrainer(BaseTrainer):
-    def run(self):
+    def train(self):
         d = self.init_data
         comm_params = self.config.get('community_defense_params', {})
 
@@ -433,7 +413,7 @@ class CommunityDefenseMethodTrainer(BaseTrainer):
             device=d['device'],
             verbose=True,
         )
-        result = defense_trainer.train_with_community_defense(
+        return defense_trainer.train_with_community_defense(
             gnn_model=d['backbone_model'],
             training_epochs=d['epochs'],
             early_stopping_patience=d['patience'],
@@ -442,4 +422,3 @@ class CommunityDefenseMethodTrainer(BaseTrainer):
             enable_debug=True,
             oversmoothing_every=d['oversmoothing_every'],
         )
-        return self._make_result(result, result['train_oversmoothing'], result.get('val_oversmoothing'))

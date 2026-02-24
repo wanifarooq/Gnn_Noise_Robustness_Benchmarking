@@ -499,43 +499,16 @@ class ERASETrainer:
                     break
 
             model.load_state_dict(best_model_state)
-            model.eval()
-            with torch.no_grad():
-                learned_features = model(graph_data)
-
-            # Fit LogisticRegression probe for predictions
-            normalized_features = normalize(learned_features.detach().cpu().numpy(), norm='l2')
-            train_features = normalized_features[graph_data.train_mask.cpu()]
-            train_noisy_labels = predicted_labels[graph_data.train_mask].cpu().numpy()
-
-            fitted_classifier = LogisticRegression(
-                solver='lbfgs', multi_class='auto', max_iter=1000,
-                random_state=self.training_config.get('seed', 42)
-            ).fit(train_features, train_noisy_labels)
-
-            def _get_predictions():
-                norm_feats = normalize(learned_features.detach().cpu().numpy(), norm='l2')
-                preds = fitted_classifier.predict(norm_feats)
-                return torch.tensor(preds, device=self.computation_device, dtype=torch.long)
-
-            def _get_embeddings():
-                return learned_features
-
-            results = evaluate_model(
-                _get_predictions, _get_embeddings, graph_data.y,
-                graph_data.train_mask, graph_data.val_mask, graph_data.test_mask,
-                graph_data.edge_index, self.computation_device
-            )
-            results['train_oversmoothing'] = per_epochs_oversmoothing
-            results['val_oversmoothing'] = per_epochs_val_oversmoothing
+            self._trained_model = model
+            self._final_predicted_labels = predicted_labels
 
             if debug_mode:
                 print("\nERASE Training completed!")
-                print(f"Test Acc: {results['accuracy']:.4f} | Test F1: {results['f1']:.4f} | "
-                      f"Precision: {results['precision']:.4f}, Recall: {results['recall']:.4f}")
-                print(f"Test Oversmoothing: {results['oversmoothing']}")
 
-            return results
+            return {
+                'train_oversmoothing': dict(per_epochs_oversmoothing),
+                'val_oversmoothing': dict(per_epochs_val_oversmoothing),
+            }
 
     def _execute_single_training_epoch(self, model, graph_data, optimizer, loss_function, 
                                      adjacency_matrix, semantic_labels_matrix, predicted_labels):
@@ -682,7 +655,7 @@ def create_enhanced_gnn_model(model_creation_function, gnn_model_name, enhanceme
 
 @register('erase')
 class ERASEMethodTrainer(BaseTrainer):
-    def run(self):
+    def train(self):
         d = self.init_data
         data = d['data']
         erase_params = self.config['erase_params']
@@ -715,13 +688,46 @@ class ERASEMethodTrainer(BaseTrainer):
             'oversmoothing_every': d['oversmoothing_every'],
         }
 
-        trainer = ERASETrainer(
+        self._erase_trainer = ERASETrainer(
             training_config=erase_config,
             computation_device=d['device'],
             num_node_classes=d['num_classes'],
             model_creation_function=d['get_model'],
         )
-        result = trainer.train_erase_model(
+        return self._erase_trainer.train_erase_model(
             d['data_for_training'], enable_debug_output=True,
         )
-        return self._make_result(result, result['train_oversmoothing'], result.get('val_oversmoothing'))
+
+    def evaluate(self):
+        d = self.init_data
+        trainer = self._erase_trainer
+        model = trainer._trained_model
+        data = d['data_for_training']
+        device = d['device']
+
+        model.eval()
+        with torch.no_grad():
+            learned_features = model(data)
+
+        normalized_features = normalize(learned_features.detach().cpu().numpy(), norm='l2')
+        train_features = normalized_features[data.train_mask.cpu()]
+        train_labels = trainer._final_predicted_labels[data.train_mask].cpu().numpy()
+
+        fitted_classifier = LogisticRegression(
+            solver='lbfgs', multi_class='auto', max_iter=1000,
+            random_state=trainer.training_config.get('seed', 42),
+        ).fit(train_features, train_labels)
+
+        def get_predictions():
+            norm_feats = normalize(learned_features.detach().cpu().numpy(), norm='l2')
+            preds = fitted_classifier.predict(norm_feats)
+            return torch.tensor(preds, device=device, dtype=torch.long)
+
+        def get_embeddings():
+            return learned_features
+
+        return evaluate_model(
+            get_predictions, get_embeddings, data.y,
+            data.train_mask, data.val_mask, data.test_mask,
+            data.edge_index, device,
+        )

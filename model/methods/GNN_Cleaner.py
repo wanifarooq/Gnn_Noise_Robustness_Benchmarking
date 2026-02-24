@@ -7,7 +7,7 @@ from scipy import sparse
 from collections import defaultdict
 
 from model.evaluation import (OversmoothingMetrics, ClassificationMetrics,
-                              compute_oversmoothing_for_mask, evaluate_model)
+                              compute_oversmoothing_for_mask)
 from model.base import BaseTrainer
 from model.registry import register
 
@@ -504,39 +504,15 @@ class GNNCleanerTrainer:
             self.gnn_model.load_state_dict(best_model_checkpoint["gnn_model"])
             self.label_weighting_net.load_state_dict(best_model_checkpoint["weighting_network"])
 
-        self.gnn_model.eval()
-        with torch.no_grad():
-            def _get_predictions():
-                try:
-                    return self.gnn_model(self.data).argmax(dim=1)
-                except Exception:
-                    return self.gnn_model(self.data.x.to(self.device), self.data.edge_index.to(self.device)).argmax(dim=1)
-
-            def _get_embeddings():
-                try:
-                    return self.gnn_model(self.data)
-                except Exception:
-                    return self.gnn_model(self.data.x.to(self.device), self.data.edge_index.to(self.device))
-
-            results = evaluate_model(
-                _get_predictions, _get_embeddings, self.data.y_original,
-                self.data.train_mask, self.data.val_mask, self.data.test_mask,
-                self.data.edge_index.to(self.device), self.device
-            )
-
-        results['train_oversmoothing'] = per_epochs_oversmoothing
-        results['val_oversmoothing'] = per_epochs_val_oversmoothing
-
         total_training_time = time.time() - training_start_time
 
         if enable_debug_output:
-            print("\nGNN Cleaner Training Completed")
-            print(f"Test Acc: {results['accuracy']:.4f} | Test F1: {results['f1']:.4f} | "
-                  f"Precision: {results['precision']:.4f}, Recall: {results['recall']:.4f}")
-            print(f"Total training time: {total_training_time:.2f} seconds")
-            print(f"Test Oversmoothing: {results['oversmoothing']}")
+            print(f"\nGNN Cleaner Training Completed in {total_training_time:.2f}s")
 
-        return results
+        return {
+            'train_oversmoothing': dict(per_epochs_oversmoothing),
+            'val_oversmoothing': dict(per_epochs_val_oversmoothing),
+        }
     
     def get_oversmoothing_training_history(self):
         return self.oversmoothing_training_history
@@ -544,7 +520,7 @@ class GNNCleanerTrainer:
 
 @register('gnn_cleaner')
 class GNNCleanerMethodTrainer(BaseTrainer):
-    def run(self):
+    def train(self):
         d = self.init_data
         gc_params = self.config.get('gnn_cleaner_params', {})
 
@@ -563,5 +539,4 @@ class GNNCleanerMethodTrainer(BaseTrainer):
             gnn_cleaner_config, d['data_for_training'],
             d['device'], d['num_classes'], d['backbone_model'],
         )
-        result = trainer.execute_full_training(enable_debug_output=True)
-        return self._make_result(result, result['train_oversmoothing'], result.get('val_oversmoothing'))
+        return trainer.execute_full_training(enable_debug_output=True)

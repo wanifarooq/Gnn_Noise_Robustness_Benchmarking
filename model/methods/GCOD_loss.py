@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 from collections import defaultdict
 
 from model.evaluation import (OversmoothingMetrics, ClassificationMetrics,
-                              compute_oversmoothing_for_mask, evaluate_model)
+                              compute_oversmoothing_for_mask)
 from model.base import BaseTrainer
 from model.registry import register
 
@@ -624,34 +624,17 @@ class GCODTrainer:
         if self.best_model_state is not None:
             self.model.load_state_dict(self.best_model_state)
 
-        return self._final_model_evaluation(), per_epochs_train_oversmoothing, per_epochs_val_oversmoothing
-    
-    def _final_model_evaluation(self):
-        self.model.eval()
-        with torch.no_grad():
-            def get_predictions():
-                return self.model(self.data).argmax(dim=1)
-
-            def get_embeddings():
-                return self.model(self.data)
-            results = evaluate_model(
-                get_predictions, get_embeddings, self.data.y,
-                self.data.train_mask, self.data.val_mask, self.data.test_mask,
-                self.data.edge_index, self.device
-            )
-
-        if self.debug:
-            print(f"Test Acc: {results['accuracy']:.4f} | Test F1: {results['f1']:.4f} | "
-                  f"Precision: {results['precision']:.4f}, Recall: {results['recall']:.4f}")
-            print(f"Test Oversmoothing: {results['oversmoothing']}")
-
-        return results
+        return {
+            'train_oversmoothing': dict(per_epochs_train_oversmoothing),
+            'val_oversmoothing': dict(per_epochs_val_oversmoothing),
+            'reduce': False,
+        }
 
 
 
 @register('gcod')
 class GCODMethodTrainer(BaseTrainer):
-    def run(self):
+    def train(self):
         d = self.init_data
         gcod_params = self.config.get('gcod_params', {})
 
@@ -669,5 +652,4 @@ class GCODMethodTrainer(BaseTrainer):
             debug=True,
             oversmoothing_every=d['oversmoothing_every'],
         )
-        result, train_oversmoothing, val_oversmoothing = trainer.train_full_model()
-        return self._make_result(result, train_oversmoothing, val_oversmoothing, reduce=False)
+        return trainer.train_full_model()
