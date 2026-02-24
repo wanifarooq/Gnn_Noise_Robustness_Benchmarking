@@ -61,9 +61,7 @@ class DualBranchGNNModel(nn.Module):
     def forward(self, node_features, edge_indices, edge_weights=None):
         graph_data = Data(x=node_features, edge_index=edge_indices)
         if self.use_edge_weights and edge_weights is not None:
-            # edge_weight (E,) for GCN/GAT/GATv2; edge_attr (E,1) for GPS/GINEConv
             graph_data.edge_weight = edge_weights
-            graph_data.edge_attr = edge_weights.unsqueeze(-1) if edge_weights.dim() == 1 else edge_weights
         if self.device is not None:
             graph_data = graph_data.to(self.device)
 
@@ -390,7 +388,6 @@ class RTGNN(nn.Module):
             graph_data = Data(x=node_features, edge_index=final_edge_indices)
             if final_edge_weights is not None:
                 graph_data.edge_weight = final_edge_weights
-                graph_data.edge_attr = final_edge_weights.unsqueeze(-1) if final_edge_weights.dim() == 1 else final_edge_weights
             graph_data = graph_data.to(self.device)
 
             try:
@@ -654,7 +651,7 @@ class RTGNN(nn.Module):
             def _get_embeddings():
                 graph_data = Data(x=node_features, edge_index=best_edges)
                 if best_weights is not None:
-                    graph_data.edge_attr = best_weights.unsqueeze(-1) if best_weights.dim() == 1 else best_weights
+                    graph_data.edge_weight = best_weights
                 graph_data = graph_data.to(self.device)
                 try:
                     first_emb = self.dual_branch_predictor.first_branch.get_embeddings(graph_data) if hasattr(self.dual_branch_predictor.first_branch, 'get_embeddings') else self.dual_branch_predictor.first_branch(graph_data)

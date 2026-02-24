@@ -351,14 +351,14 @@ class OversmoothingMetrics:
             data = data.to(device)
 
             if hasattr(model, 'get_embeddings'):
-                embeddings = model.get_embeddings(data.x, data.edge_index, data.edge_attr)
+                embeddings = model.get_embeddings(data.x, data.edge_index, data.edge_weight)
             else:
-                embeddings = model(data.x, data.edge_index, data.edge_attr)
+                embeddings = model(data.x, data.edge_index, data.edge_weight)
 
             metrics = self.compute_all_metrics(
                 X=embeddings,
                 edge_index=data.edge_index,
-                edge_weight=getattr(data, 'edge_attr', None)
+                edge_weight=getattr(data, 'edge_weight', None)
             )
 
         return metrics
