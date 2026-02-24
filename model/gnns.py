@@ -215,6 +215,12 @@ class GATv2(nn.Module):
         self.is_norm = norm_info['is_norm']
         self.norm_type = getattr(nn, norm_info['norm_type']) if self.is_norm else None
 
+        if hidden_channels % heads != 0:
+            raise ValueError(
+                f"hidden_channels ({hidden_channels}) must be divisible by "
+                f"heads ({heads}) for GATv2"
+            )
+
         self.convs = nn.ModuleList()
         self.norms = nn.ModuleList() if self.is_norm else None
 
