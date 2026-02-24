@@ -655,6 +655,8 @@ def create_enhanced_gnn_model(model_creation_function, gnn_model_name, enhanceme
 
 @register('erase')
 class ERASEMethodTrainer(BaseTrainer):
+    supports_eval_only = False
+
     def train(self):
         d = self.init_data
         data = d['data']

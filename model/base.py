@@ -1,6 +1,7 @@
 """BaseTrainer ABC — unified interface for all 13 GNN robustness trainers."""
 
 from abc import ABC, abstractmethod
+from copy import deepcopy
 
 import torch
 import numpy as np
@@ -15,6 +16,12 @@ class BaseTrainer(ABC):
     dicts.  The default ``run()`` orchestrates train → evaluate → result.
     """
 
+    #: Override to ``False`` in subclasses whose ``evaluate()`` depends on
+    #: internal state created during ``train()`` (e.g. extra models, learned
+    #: edges).  When *False*, the eval-only checkpoint path is blocked with a
+    #: clear error rather than an opaque ``AttributeError``.
+    supports_eval_only: bool = True
+
     def __init__(self, init_data: dict, config: dict):
         self.init_data = init_data
         self.config = config
@@ -22,12 +29,7 @@ class BaseTrainer(ABC):
     # ── template ─────────────────────────────────────────────────────────
 
     def run(self) -> dict:
-        """Train + evaluate. Return standardised result dict.
-
-        Subclasses that still override ``run()`` bypass this template —
-        nothing breaks.  Once migrated, they only override ``train()``
-        (and optionally ``evaluate()``).
-        """
+        """Train + evaluate. Return standardised result dict."""
         train_out = self.train()
         eval_result = self.evaluate()
         return self._make_result(
@@ -66,8 +68,8 @@ class BaseTrainer(ABC):
     # ── checkpoint ───────────────────────────────────────────────────────
 
     def get_checkpoint_state(self) -> dict:
-        """Return serialisable state dict for saving to disk."""
-        return {'backbone': self.init_data['backbone_model'].state_dict()}
+        """Return serialisable snapshot of model weights for saving to disk."""
+        return {'backbone': deepcopy(self.init_data['backbone_model'].state_dict())}
 
     def load_checkpoint_state(self, state: dict) -> None:
         """Restore model weights from a checkpoint state dict."""

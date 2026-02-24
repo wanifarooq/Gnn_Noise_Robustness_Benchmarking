@@ -1,5 +1,7 @@
 """Experiment orchestration — setup pipeline and registry-based dispatch."""
 
+import os
+
 import torch
 from torch_geometric.data import Data
 
@@ -139,6 +141,14 @@ def run_experiment(config, run_id=1, *, checkpoint_path=None, eval_only=False):
     if eval_only:
         if checkpoint_path is None:
             raise ValueError("eval_only=True requires a checkpoint_path")
+        if not trainer.supports_eval_only:
+            raise NotImplementedError(
+                f"Method '{init_data['method']}' does not support eval_only "
+                f"(its evaluate() depends on state created during train()). "
+                f"Override get_checkpoint_state/load_checkpoint_state to enable it."
+            )
+        # weights_only=False: checkpoint contains plain dicts (oversmoothing
+        # metrics) in addition to tensor state_dicts.
         state = torch.load(checkpoint_path, map_location=init_data['device'],
                            weights_only=False)
         trainer.load_checkpoint_state(state)
@@ -153,6 +163,9 @@ def run_experiment(config, run_id=1, *, checkpoint_path=None, eval_only=False):
     result = trainer.run()
 
     if checkpoint_path is not None:
+        ckpt_dir = os.path.dirname(checkpoint_path)
+        if ckpt_dir:
+            os.makedirs(ckpt_dir, exist_ok=True)
         state = trainer.get_checkpoint_state()
         state['train_oversmoothing'] = result.get('train_oversmoothing', {})
         state['val_oversmoothing'] = result.get('val_oversmoothing', {})

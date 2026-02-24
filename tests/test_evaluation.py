@@ -341,6 +341,45 @@ class TestCheckpoint:
         dummy.load_checkpoint_state(loaded)
         assert torch.equal(model.weight.data, original_weight)
 
+    def test_supports_eval_only_default_true(self):
+        from model.base import BaseTrainer
+
+        class DummyTrainer(BaseTrainer):
+            def train(self):
+                pass
+
+        assert DummyTrainer.supports_eval_only is True
+
+    def test_supports_eval_only_override(self):
+        from model.base import BaseTrainer
+
+        class UnsupportedTrainer(BaseTrainer):
+            supports_eval_only = False
+            def train(self):
+                pass
+
+        assert UnsupportedTrainer.supports_eval_only is False
+
+    def test_get_checkpoint_state_is_snapshot(self, tmp_path):
+        """get_checkpoint_state returns an independent copy of the weights."""
+        from model.base import BaseTrainer
+        import torch.nn as nn
+
+        class DummyTrainer(BaseTrainer):
+            def train(self):
+                pass
+
+        dummy = DummyTrainer.__new__(DummyTrainer)
+        model = nn.Linear(3, 2)
+        dummy.init_data = {'backbone_model': model}
+
+        state = dummy.get_checkpoint_state()
+        original_weight = state['backbone']['weight'].clone()
+
+        # Mutating the model should NOT change the snapshot
+        model.weight.data.fill_(99.0)
+        assert torch.equal(state['backbone']['weight'], original_weight)
+
 
 # ── Phase 3: oversmoothing_every propagation ─────────────────────────────────
 

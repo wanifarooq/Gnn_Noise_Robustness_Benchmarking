@@ -434,6 +434,8 @@ class GNNGuardModel(nn.Module):
 
 @register('gnnguard')
 class GNNGuardMethodTrainer(BaseTrainer):
+    supports_eval_only = False
+
     def train(self):
         d = self.init_data
         gnnguard_params = self.config.get('gnnguard_params', {})

@@ -303,6 +303,8 @@ class CRGNNModel:
 
 @register('cr_gnn')
 class CRGNNMethodTrainer(BaseTrainer):
+    supports_eval_only = False
+
     def train(self):
         d = self.init_data
         cr_params = self.config.get('cr_gnn_params', {})

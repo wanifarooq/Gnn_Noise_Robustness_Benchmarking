@@ -757,11 +757,14 @@ class RTGNN(nn.Module):
 
 @register('rtgnn')
 class RTGNNMethodTrainer(BaseTrainer):
+    supports_eval_only = False
+
     def train(self):
         d = self.init_data
 
-        self.config.setdefault('training', {})['oversmoothing_every'] = d['oversmoothing_every']
-        rtgnn_config = RTGNNTrainingConfig(self.config)
+        local_config = deepcopy(self.config)
+        local_config.setdefault('training', {})['oversmoothing_every'] = d['oversmoothing_every']
+        rtgnn_config = RTGNNTrainingConfig(local_config)
         self._rtgnn = RTGNN(
             training_config=rtgnn_config,
             device=d['device'],

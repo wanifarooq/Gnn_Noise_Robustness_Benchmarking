@@ -558,6 +558,8 @@ class NRGNN:
 
 @register('nrgnn')
 class NRGNNMethodTrainer(BaseTrainer):
+    supports_eval_only = False
+
     def train(self):
         d = self.init_data
         nrgnn_config = {

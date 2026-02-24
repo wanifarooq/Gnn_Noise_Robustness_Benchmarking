@@ -261,3 +261,17 @@ def test_checkpoint_roundtrip(method, tmp_path):
     # Classification metrics should match (same weights, same data)
     assert result_eval['accuracy'] == pytest.approx(result_train['accuracy'], abs=1e-5)
     assert result_eval['f1'] == pytest.approx(result_train['f1'], abs=1e-5)
+
+
+def test_eval_only_blocked_for_unsupported_method(tmp_path):
+    """eval_only raises NotImplementedError for methods that don't support it."""
+    config = _make_config('cr_gnn')
+    ckpt = str(tmp_path / "cr_gnn.pt")
+
+    # Normal run — saves checkpoint
+    run_experiment(config, run_id=1, checkpoint_path=ckpt)
+    assert os.path.exists(ckpt)
+
+    # eval_only should raise for cr_gnn (supports_eval_only = False)
+    with pytest.raises(NotImplementedError, match="does not support eval_only"):
+        run_experiment(config, run_id=1, checkpoint_path=ckpt, eval_only=True)
