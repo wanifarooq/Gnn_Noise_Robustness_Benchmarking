@@ -45,12 +45,11 @@ class MLP(nn.Module):
 
 class GCN(nn.Module):
     def __init__(self, in_channels: int, hidden_channels: int, out_channels: int,
-                 n_layers: int = 2, dropout: float = 0.5, with_relu: bool = True, 
+                 n_layers: int = 2, dropout: float = 0.5,
                  with_bias: bool = True, self_loop: bool = True, norm_info: dict | None = None,
                  act: str = 'F.relu', input_layer: bool = False, output_layer: bool = False):
         super().__init__()
 
-        self.with_relu = with_relu
         self.dropout = dropout
         self.n_layers = n_layers
         self.input_layer = input_layer
@@ -76,7 +75,7 @@ class GCN(nn.Module):
             in_dim = in_channels if i == 0 and not input_layer else hidden_channels
             out_dim = out_channels if i == n_layers - 1 and not output_layer else hidden_channels
             self.convs.append(GCNConv(in_dim, out_dim, bias=with_bias, add_self_loops=self_loop))
-            if self.is_norm:
+            if self.is_norm and i != n_layers - 1:
                 assert self.norms is not None
                 assert self.norm_type is not None
                 self.norms.append(self.norm_type(out_dim))
@@ -335,7 +334,7 @@ class GPS(nn.Module):
             )
             self.convs.append(conv)
 
-            if self.is_norm:
+            if self.is_norm and i != n_layers - 1:
                 assert self.norms is not None
                 assert self.norm_type is not None
                 self.norms.append(self.norm_type(hidden_channels))
