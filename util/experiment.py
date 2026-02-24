@@ -119,9 +119,43 @@ def initialize_experiment(config, run_id=1):
         'get_model': get_model,
     }
 
-def run_experiment(config, run_id=1):
-    """Run a single experiment: setup -> train -> evaluate via registry."""
+def run_experiment(config, run_id=1, *, checkpoint_path=None, eval_only=False):
+    """Run a single experiment: setup -> train -> evaluate via registry.
+
+    Parameters
+    ----------
+    checkpoint_path : str or None
+        When provided in normal mode, the trained model state is saved here
+        after ``trainer.run()``.  In *eval_only* mode the checkpoint is loaded
+        and only evaluation is performed (no training).
+    eval_only : bool
+        If *True*, skip training and evaluate from a saved checkpoint.
+        Requires *checkpoint_path* to point at an existing file.
+    """
     discover_trainers()
     init_data = initialize_experiment(config, run_id)
     trainer = get_trainer(init_data['method'], init_data, config)
-    return trainer.run()
+
+    if eval_only:
+        if checkpoint_path is None:
+            raise ValueError("eval_only=True requires a checkpoint_path")
+        state = torch.load(checkpoint_path, map_location=init_data['device'],
+                           weights_only=False)
+        trainer.load_checkpoint_state(state)
+        eval_result = trainer.evaluate()
+        return trainer._make_result(
+            eval_result,
+            state.get('train_oversmoothing', {}),
+            state.get('val_oversmoothing'),
+            reduce=False,
+        )
+
+    result = trainer.run()
+
+    if checkpoint_path is not None:
+        state = trainer.get_checkpoint_state()
+        state['train_oversmoothing'] = result.get('train_oversmoothing', {})
+        state['val_oversmoothing'] = result.get('val_oversmoothing', {})
+        torch.save(state, checkpoint_path)
+
+    return result

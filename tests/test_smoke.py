@@ -9,6 +9,7 @@ import math
 import sys
 import os
 import pytest
+import torch
 
 # Ensure project root is on sys.path so `from util import ...` works
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -230,3 +231,33 @@ def test_model_smoke(method):
     assert 'total_flops' in result['flops_info'], (
         f"flops_info missing 'total_flops' for method '{method}'"
     )
+
+
+# ── Checkpoint round-trip ────────────────────────────────────────────────────
+
+@pytest.mark.parametrize('method', ['standard', 'positive_eigenvalues'])
+def test_checkpoint_roundtrip(method, tmp_path):
+    """Train with checkpoint -> verify file -> eval-only -> verify results."""
+    config = _make_config(method)
+    ckpt = str(tmp_path / f"{method}.pt")
+
+    # Normal run — saves checkpoint
+    result_train = run_experiment(config, run_id=1, checkpoint_path=ckpt)
+    assert os.path.exists(ckpt), "Checkpoint file not created"
+
+    # Checkpoint contains backbone key
+    state = torch.load(ckpt, weights_only=False)
+    assert 'backbone' in state
+
+    # Eval-only run — loads checkpoint
+    result_eval = run_experiment(config, run_id=1, checkpoint_path=ckpt,
+                                eval_only=True)
+
+    # Result structure is valid
+    for key in ('accuracy', 'f1', 'precision', 'recall',
+                'oversmoothing', 'train_oversmoothing', 'flops_info'):
+        assert key in result_eval, f"Missing key '{key}' in eval-only result"
+
+    # Classification metrics should match (same weights, same data)
+    assert result_eval['accuracy'] == pytest.approx(result_train['accuracy'], abs=1e-5)
+    assert result_eval['f1'] == pytest.approx(result_train['f1'], abs=1e-5)

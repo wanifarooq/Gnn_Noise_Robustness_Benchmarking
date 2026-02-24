@@ -55,6 +55,9 @@ def run_benchmarking(base_folder='results'):
             'EDir_traditional-Val': [], 'EProj-Val': [], 'MAD-Val': [],
         }
 
+        save_checkpoint = sweep_config.get('save_checkpoint', False)
+        eval_only = sweep_config.get('eval_only', False)
+
         for run in range(1, 6):
             codecarbon_file_name = f"{file_name}_emissions.csv"
             if not os.path.exists(os.path.join(base_folder, codecarbon_file_name)):
@@ -70,7 +73,12 @@ def run_benchmarking(base_folder='results'):
                     print("[WARNING] On macOS, codecarbon requires sudo access to read hardware power metrics.")
                     run_codecarbon = False
             print(f"\nRun {run}/5:")
-            test_metrics = run_experiment(sweep_config, run_id=run)
+            ckpt_path = (os.path.join(base_folder, f"{file_name}_run_{run}.pt")
+                         if save_checkpoint or eval_only else None)
+            test_metrics = run_experiment(
+                sweep_config, run_id=run,
+                checkpoint_path=ckpt_path, eval_only=eval_only,
+            )
             if run_codecarbon:
                 tracker.stop()
                 run_codecarbon = False

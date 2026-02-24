@@ -294,6 +294,54 @@ class TestMakeResult:
         assert out['val_oversmoothing'] == val_os
 
 
+# ── Phase 2b: checkpoint state ────────────────────────────────────────────────
+
+class TestCheckpoint:
+    """Test BaseTrainer checkpoint helpers."""
+
+    def test_get_checkpoint_state_has_backbone(self):
+        from model.base import BaseTrainer
+        import torch.nn as nn
+
+        class DummyTrainer(BaseTrainer):
+            def train(self):
+                pass
+
+        dummy = DummyTrainer.__new__(DummyTrainer)
+        dummy.init_data = {'backbone_model': nn.Linear(3, 2)}
+
+        state = dummy.get_checkpoint_state()
+        assert 'backbone' in state
+        assert isinstance(state['backbone'], dict)
+
+    def test_load_checkpoint_state_restores_weights(self, tmp_path):
+        from model.base import BaseTrainer
+        import torch.nn as nn
+
+        class DummyTrainer(BaseTrainer):
+            def train(self):
+                pass
+
+        dummy = DummyTrainer.__new__(DummyTrainer)
+        model = nn.Linear(3, 2)
+        dummy.init_data = {'backbone_model': model}
+
+        # Save checkpoint to disk (mimics real usage)
+        state = dummy.get_checkpoint_state()
+        ckpt_file = tmp_path / "ckpt.pt"
+        torch.save(state, ckpt_file)
+        original_weight = model.weight.data.clone()
+
+        # Corrupt weights
+        model.weight.data.fill_(99.0)
+        assert not torch.equal(model.weight.data, original_weight)
+
+        # Restore from checkpoint loaded from disk
+        loaded = torch.load(ckpt_file, weights_only=False)
+        dummy.load_checkpoint_state(loaded)
+        assert torch.equal(model.weight.data, original_weight)
+
+
 # ── Phase 3: oversmoothing_every propagation ─────────────────────────────────
 
 class TestOversmoothingEvery:
