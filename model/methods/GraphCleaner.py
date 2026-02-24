@@ -518,7 +518,7 @@ class GraphCleanerNoiseDetector:
 
 @register('graphcleaner')
 class GraphCleanerMethodTrainer(BaseTrainer):
-    def run(self):
+    def train(self):
         d = self.init_data
 
         self.config.setdefault('training', {})['oversmoothing_every'] = d['oversmoothing_every']
@@ -541,11 +541,10 @@ class GraphCleanerMethodTrainer(BaseTrainer):
             .nonzero(as_tuple=True)[0]
         )
 
-        result = train_with_standard_loss(
+        return train_with_standard_loss(
             d['backbone_model'], final_training_data,
             noisy_indices_after, device=d['device'],
             total_epochs=d['epochs'], lr=d['lr'],
             weight_decay=d['weight_decay'], patience=d['patience'],
             oversmoothing_every=d['oversmoothing_every'],
         )
-        return self._make_result(result, result['train_oversmoothing'], result.get('val_oversmoothing'))

@@ -5,7 +5,7 @@ import torch.optim as optim
 from collections import defaultdict
 
 from model.evaluation import (OversmoothingMetrics, ClassificationMetrics,
-                              compute_oversmoothing_for_mask, evaluate_model)
+                              compute_oversmoothing_for_mask)
 from model.base import BaseTrainer
 from model.registry import register
 
@@ -90,40 +90,21 @@ def train_with_standard_loss(
 
     if best_model_state is not None:
         model.load_state_dict(best_model_state)
-    model.eval()
-    with torch.no_grad():
-        def get_predictions():
-            return model(data).argmax(dim=1)
 
-        def get_embeddings():
-            return model(data)
-
-        results = evaluate_model(
-            get_predictions, get_embeddings, data.y,
-            data.train_mask, data.val_mask, data.test_mask,
-            data.edge_index, device
-        )
-
-    results['train_oversmoothing'] = per_epochs_oversmoothing
-    results['val_oversmoothing'] = per_epochs_val_oversmoothing
-
-    if debug:
-        print(f"Test Acc: {results['accuracy']:.4f} | Test F1: {results['f1']:.4f} | "
-              f"Precision: {results['precision']:.4f}, Recall: {results['recall']:.4f}")
-        print(f"Test Oversmoothing: {results['oversmoothing']}")
-
-    return results
+    return {
+        'train_oversmoothing': dict(per_epochs_oversmoothing),
+        'val_oversmoothing': dict(per_epochs_val_oversmoothing),
+    }
 
 
 @register('standard')
 class StandardMethodTrainer(BaseTrainer):
-    def run(self):
+    def train(self):
         d = self.init_data
-        result = train_with_standard_loss(
+        return train_with_standard_loss(
             d['backbone_model'], d['data_for_training'],
             d['global_noisy_indices'], d['device'],
             total_epochs=d['epochs'], lr=d['lr'],
             weight_decay=d['weight_decay'], patience=d['patience'],
             oversmoothing_every=d['oversmoothing_every'],
         )
-        return self._make_result(result, result['train_oversmoothing'], result.get('val_oversmoothing'))
