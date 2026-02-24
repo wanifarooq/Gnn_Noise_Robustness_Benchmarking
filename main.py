@@ -1,3 +1,4 @@
+import argparse
 import numpy as np
 import torch
 import yaml
@@ -8,7 +9,17 @@ from codecarbon import EmissionsTracker
 from util.experiment import run_experiment
 from sweep_utils import *
 
-def run_benchmarking(base_folder='results'):
+
+def parse_args():
+    parser = argparse.ArgumentParser(description='Run multi-run benchmark sweeps')
+    parser.add_argument('--eval-only', action='store_true',
+                        help='Skip training, evaluate from saved checkpoints')
+    parser.add_argument('--no-checkpoint', action='store_true',
+                        help='Disable saving model checkpoints after training')
+    return parser.parse_args()
+
+
+def run_benchmarking(base_folder='results', eval_only=False, no_checkpoint=False):
     run_codecarbon = False
     print("\n" + "-"*50)
     print("Multi-run experiment with parameter sweep")
@@ -30,8 +41,8 @@ def run_benchmarking(base_folder='results'):
         file_path = os.path.join(base_folder, file_name)
         result_json_path = f"{file_path}.json"
 
-        # Skip if already computed (unless force: true)
-        if not should_run_experiment(result_json_path, sweep_config):
+        # Skip if already computed (unless force: true or eval-only)
+        if not eval_only and not should_run_experiment(result_json_path, sweep_config):
             continue
 
         # Device selection (more explicit)
@@ -55,8 +66,9 @@ def run_benchmarking(base_folder='results'):
             'EDir_traditional-Val': [], 'EProj-Val': [], 'MAD-Val': [],
         }
 
-        save_checkpoint = sweep_config.get('save_checkpoint', True)
-        eval_only = sweep_config.get('eval_only', False)
+        # CLI flags override per-config values
+        save_checkpoint = (not no_checkpoint) and sweep_config.get('save_checkpoint', True)
+        run_eval_only = eval_only or sweep_config.get('eval_only', False)
 
         for run in range(1, 6):
             codecarbon_file_name = f"{file_name}_emissions.csv"
@@ -74,10 +86,10 @@ def run_benchmarking(base_folder='results'):
                     run_codecarbon = False
             print(f"\nRun {run}/5:")
             ckpt_path = (os.path.join(base_folder, f"{file_name}_run_{run}.pt")
-                         if save_checkpoint or eval_only else None)
+                         if save_checkpoint or run_eval_only else None)
             test_metrics = run_experiment(
                 sweep_config, run_id=run,
-                checkpoint_path=ckpt_path, eval_only=eval_only,
+                checkpoint_path=ckpt_path, eval_only=run_eval_only,
             )
             if run_codecarbon:
                 tracker.stop()
@@ -150,4 +162,6 @@ def run_benchmarking(base_folder='results'):
 
 
 if __name__ == "__main__":
-    run_benchmarking()
+    args = parse_args()
+    run_benchmarking(eval_only=args.eval_only,
+                     no_checkpoint=args.no_checkpoint)
