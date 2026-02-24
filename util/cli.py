@@ -13,6 +13,15 @@ def parse_arguments():
                        type=int,
                        default=1,
                        help='Fixed run ID for consistent seeds (default: 1)')
+    parser.add_argument('--save-checkpoint',
+                       action='store_true',
+                       help='Save model checkpoints after training')
+    parser.add_argument('--eval-only',
+                       action='store_true',
+                       help='Skip training, evaluate from saved checkpoints')
+    parser.add_argument('--checkpoint-dir',
+                       default='checkpoints',
+                       help='Directory for checkpoint files (default: checkpoints)')
     return parser.parse_args()
 
 

@@ -1,3 +1,4 @@
+import os
 import torch
 import yaml
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -7,18 +8,24 @@ import time
 from util.experiment import run_experiment
 from util.cli import parse_arguments, print_table
 
-def run_single_experiment_fixed_seed(method_name, config, fixed_run_id=1):
+
+def run_single_experiment_fixed_seed(method_name, config, fixed_run_id=1,
+                                     checkpoint_path=None, eval_only=False):
 
     try:
 
         experiment_config = copy.deepcopy(config)
         experiment_config['training']['method'] = method_name
-        
-        print(f"\n[{method_name}] Starting with fixed run_id={fixed_run_id}")
-        test_metrics = run_experiment(experiment_config, run_id=fixed_run_id)
+
+        mode = "eval-only" if eval_only else "training"
+        print(f"\n[{method_name}] Starting {mode} with fixed run_id={fixed_run_id}")
+        test_metrics = run_experiment(
+            experiment_config, run_id=fixed_run_id,
+            checkpoint_path=checkpoint_path, eval_only=eval_only,
+        )
         print(f"[{method_name}] Completed - Test Acc: {test_metrics['accuracy']:.4f}, "
               f"F1: {test_metrics['f1']:.4f}")
-        
+
         return method_name, test_metrics
     except Exception as e:
         print(f"[{method_name}] Failed with error: {str(e)}")
@@ -41,29 +48,46 @@ def run_parallel_single_benchmark():
         print(f"Warning: Maximum {MAX_METHODS} methods allowed. Using first {MAX_METHODS}: {methods_to_test}")
     
     FIXED_RUN_ID = args.run_id
-    
+    save_checkpoint = args.save_checkpoint
+    eval_only = args.eval_only
+    checkpoint_dir = args.checkpoint_dir
+
+    if save_checkpoint or eval_only:
+        os.makedirs(checkpoint_dir, exist_ok=True)
+
     print(f"Dataset: {base_config['dataset']['name']}")
     print(f"Noise Rate: {base_config['noise']['rate']}")
     print(f"Methods: {methods_to_test}")
     print(f"Fixed run_id: {FIXED_RUN_ID} (same seed for all)")
-    
+    if save_checkpoint:
+        print(f"Checkpoints: saving to {checkpoint_dir}/")
+    if eval_only:
+        print(f"Eval-only: loading from {checkpoint_dir}/")
+
     if torch.cuda.is_available():
         max_workers = min(2, len(methods_to_test))
     else:
         max_workers = min(4, len(methods_to_test))
-    
+
     print(f"Using {max_workers} parallel workers")
     print("-"*50)
-    
+
     start_time = time.time()
     results = {}
-    
+
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
 
-        future_to_method = {
-            executor.submit(run_single_experiment_fixed_seed, method, base_config, FIXED_RUN_ID): method
-            for method in methods_to_test
-        }
+        future_to_method = {}
+        for method in methods_to_test:
+            ckpt_path = (
+                os.path.join(checkpoint_dir, f"{method}_run_{FIXED_RUN_ID}.pt")
+                if save_checkpoint or eval_only else None
+            )
+            future = executor.submit(
+                run_single_experiment_fixed_seed, method, base_config,
+                FIXED_RUN_ID, checkpoint_path=ckpt_path, eval_only=eval_only,
+            )
+            future_to_method[future] = method
         
         for future in as_completed(future_to_method):
             method_name, test_metrics = future.result()
