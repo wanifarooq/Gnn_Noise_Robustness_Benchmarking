@@ -285,24 +285,27 @@ class GPS(nn.Module):
         else:
             effective_in_channels = in_channels
 
+        # GPSConv uses residual connections (h + x), so input dim must equal
+        # output dim (= channels).  We project in/out to keep all GPS layers
+        # at a uniform hidden_channels width.
+        self.lin_in = Linear(effective_in_channels, hidden_channels)
+        self.lin_out = Linear(hidden_channels, out_channels)
+
         self.convs = ModuleList()
         self.norms = ModuleList() if self.is_norm else None
 
         for i in range(n_layers):
-            in_dim = effective_in_channels if i == 0 else hidden_channels
-            out_dim = out_channels if i == n_layers - 1 else hidden_channels
-
             nn_module = Sequential(
-                Linear(in_dim, hidden_channels),
+                Linear(hidden_channels, hidden_channels),
                 ReLU(),
-                Linear(hidden_channels, out_dim),
+                Linear(hidden_channels, hidden_channels),
             )
 
             attn_kwargs = {'dropout': dropout}
 
             conv = GPSConv(
-                out_dim, 
-                GINEConv(nn_module), 
+                hidden_channels,
+                GINEConv(nn_module),
                 heads=heads,
                 attn_type=attn_type,
                 attn_kwargs=attn_kwargs
@@ -312,7 +315,7 @@ class GPS(nn.Module):
             if self.is_norm:
                 assert self.norms is not None
                 assert self.norm_type is not None
-                self.norms.append(self.norm_type(out_dim))
+                self.norms.append(self.norm_type(hidden_channels))
 
     def forward(self, data):
         x, edge_index, batch = data.x, data.edge_index, getattr(data, 'batch', None)
@@ -323,18 +326,26 @@ class GPS(nn.Module):
             x_pe = self.pe_lin(x_pe)
             x = torch.cat([x, x_pe], dim=1)
 
+        x = self.lin_in(x)
+
+        # GINEConv requires edge_attr; provide zeros as a no-op fallback.
+        if edge_attr is None:
+            edge_attr = x.new_zeros(edge_index.size(1), x.size(1))
+
         for i, conv in enumerate(self.convs):
             x = conv(x, edge_index, batch, edge_attr=edge_attr)
-            
+
             if i < self.n_layers - 1:
                 if self.is_norm:
                     x = self.norms[i](x)
                 x = self.act(x)
                 x = F.dropout(x, p=self.dropout, training=self.training)
 
-        return x
+        return self.lin_out(x)
 
     def initialize(self):
+        self.lin_in.reset_parameters()
+        self.lin_out.reset_parameters()
         for conv in self.convs:
             conv.reset_parameters()
         if self.norms:
