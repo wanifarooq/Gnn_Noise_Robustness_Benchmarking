@@ -48,7 +48,7 @@ def run_parallel_single_benchmark():
         print(f"Warning: Maximum {MAX_METHODS} methods allowed. Using first {MAX_METHODS}: {methods_to_test}")
     
     FIXED_RUN_ID = args.run_id
-    save_checkpoint = args.save_checkpoint
+    save_checkpoint = not args.no_checkpoint
     eval_only = args.eval_only
     checkpoint_dir = args.checkpoint_dir
 

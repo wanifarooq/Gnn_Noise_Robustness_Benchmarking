@@ -13,9 +13,9 @@ def parse_arguments():
                        type=int,
                        default=1,
                        help='Fixed run ID for consistent seeds (default: 1)')
-    parser.add_argument('--save-checkpoint',
+    parser.add_argument('--no-checkpoint',
                        action='store_true',
-                       help='Save model checkpoints after training')
+                       help='Disable saving model checkpoints after training')
     parser.add_argument('--eval-only',
                        action='store_true',
                        help='Skip training, evaluate from saved checkpoints')

@@ -55,7 +55,7 @@ def run_benchmarking(base_folder='results'):
             'EDir_traditional-Val': [], 'EProj-Val': [], 'MAD-Val': [],
         }
 
-        save_checkpoint = sweep_config.get('save_checkpoint', False)
+        save_checkpoint = sweep_config.get('save_checkpoint', True)
         eval_only = sweep_config.get('eval_only', False)
 
         for run in range(1, 6):
