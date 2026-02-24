@@ -340,7 +340,6 @@ class GPS(nn.Module):
 
     def forward(self, data):
         x, edge_index, batch = data.x, data.edge_index, getattr(data, 'batch', None)
-        edge_attr = getattr(data, 'edge_attr', None)
 
         if self.use_pe and hasattr(data, 'pe'):
             x_pe = self.pe_norm(data.pe)
@@ -349,9 +348,15 @@ class GPS(nn.Module):
 
         x = self.lin_in(x)
 
-        # GINEConv requires edge_attr; provide zeros as a no-op fallback.
-        if edge_attr is None:
-            edge_attr = x.new_zeros(edge_index.size(1), x.size(1))
+        # GINEConv requires (E, D) edge features matching hidden_channels.
+        # Unlike GATConv/GATv2Conv where edge_dim=1 cleanly skips when
+        # edge_attr=None, GINEConv always uses edge_attr (x_j + edge_attr).
+        # Adding edge_dim=1 to project scalar weights would introduce a
+        # Linear(1, hidden_channels, bias=True) whose bias term turns zero
+        # edge features into non-zero vectors — silently changing behavior
+        # for all experiments that don't use edge weights. Zeros are a safe
+        # no-op: x_j + 0 = x_j.
+        edge_attr = x.new_zeros(edge_index.size(1), x.size(1))
 
         for i, conv in enumerate(self.convs):
             x = conv(x, edge_index, batch, edge_attr=edge_attr)
