@@ -2,23 +2,76 @@
 
 from abc import ABC, abstractmethod
 
+import torch
 import numpy as np
+
+from model.evaluation import evaluate_model
 
 
 class BaseTrainer(ABC):
     """Common interface for experiment trainers.
 
-    Subclasses implement ``run()`` which trains + evaluates and returns
-    the standardised 7-key result dict via ``_make_result()``.
+    Subclasses implement ``train()`` which trains and returns oversmoothing
+    dicts.  The default ``run()`` orchestrates train → evaluate → result.
     """
 
     def __init__(self, init_data: dict, config: dict):
         self.init_data = init_data
         self.config = config
 
-    @abstractmethod
+    # ── template ─────────────────────────────────────────────────────────
+
     def run(self) -> dict:
-        """Train + evaluate. Return standardised 7-key result dict."""
+        """Train + evaluate. Return standardised result dict.
+
+        Subclasses that still override ``run()`` bypass this template —
+        nothing breaks.  Once migrated, they only override ``train()``
+        (and optionally ``evaluate()``).
+        """
+        train_out = self.train()
+        eval_result = self.evaluate()
+        return self._make_result(
+            eval_result,
+            train_out.get('train_oversmoothing', {}),
+            train_out.get('val_oversmoothing'),
+            reduce=train_out.get('reduce', True),
+        )
+
+    def train(self) -> dict:
+        """Train the model. Return dict with at least
+        ``train_oversmoothing`` and ``val_oversmoothing`` keys."""
+        raise NotImplementedError
+
+    def evaluate(self) -> dict:
+        """Evaluate after training. Default: backbone_model(data) on test split."""
+        d = self.init_data
+        model = d['backbone_model']
+        data = d['data_for_training']
+        device = d['device']
+
+        model.eval()
+        with torch.no_grad():
+            def get_predictions():
+                return model(data).argmax(dim=1)
+
+            def get_embeddings():
+                return model(data)
+
+            return evaluate_model(
+                get_predictions, get_embeddings, data.y,
+                data.train_mask, data.val_mask, data.test_mask,
+                data.edge_index, device,
+            )
+
+    # ── checkpoint ───────────────────────────────────────────────────────
+
+    def get_checkpoint_state(self) -> dict:
+        """Return serialisable state dict for saving to disk."""
+        return {'backbone': self.init_data['backbone_model'].state_dict()}
+
+    def load_checkpoint_state(self, state: dict) -> None:
+        """Restore model weights from a checkpoint state dict."""
+        self.init_data['backbone_model'].load_state_dict(state['backbone'])
 
     # ── helpers ──────────────────────────────────────────────────────────
 
