@@ -67,6 +67,12 @@ def run_benchmarking(base_folder='results', config_path=DEFAULT_CONFIG,
         test_metrics_runs = {
             'accuracy': [], 'f1': [], 'precision': [], 'recall': [],
         }
+        train_metrics_runs = {
+            'accuracy': [], 'f1': [], 'precision': [], 'recall': [],
+        }
+        val_metrics_runs = {
+            'accuracy': [], 'f1': [], 'precision': [], 'recall': [],
+        }
         compute_metrics_runs = {
             'flops_inference': [], 'flops_training_total': [],
             'time_training_total': [], 'time_inference': [],
@@ -107,10 +113,10 @@ def run_benchmarking(base_folder='results', config_path=DEFAULT_CONFIG,
             if run_codecarbon:
                 tracker.stop()
             # Convert possible numpy/torch scalars to Python floats
-            test_metrics_runs['accuracy'].append(float(test_metrics['accuracy']))
-            test_metrics_runs['f1'].append(float(test_metrics['f1']))
-            test_metrics_runs['precision'].append(float(test_metrics['precision']))
-            test_metrics_runs['recall'].append(float(test_metrics['recall']))
+            for mkey in ('accuracy', 'f1', 'precision', 'recall'):
+                test_metrics_runs[mkey].append(float(test_metrics['test_cls'][mkey]))
+                train_metrics_runs[mkey].append(float(test_metrics['train_cls'][mkey]))
+                val_metrics_runs[mkey].append(float(test_metrics['val_cls'][mkey]))
             for ckey in compute_metrics_runs:
                 compute_metrics_runs[ckey].append(float(test_metrics['compute_info'][ckey]))
 
@@ -135,7 +141,7 @@ def run_benchmarking(base_folder='results', config_path=DEFAULT_CONFIG,
                 else:
                     # It is a single scalar
                     oversmoothing_metrics[key].append(float(raw_val))
-            print(f"Run {run} completed - Test Acc: {float(test_metrics['accuracy']):.4f}, F1: {float(test_metrics['f1']):.4f}, "
+            print(f"Run {run} completed - Test Acc: {float(test_metrics['test_cls']['accuracy']):.4f}, F1: {float(test_metrics['test_cls']['f1']):.4f}, "
                   f"Train: {float(test_metrics['compute_info']['time_training_total']):.2f}s, Eval: {float(test_metrics['compute_info']['time_inference']):.2f}s")
 
         # Compute mean ± std (store as plain floats to simplify JSON)
@@ -144,6 +150,14 @@ def run_benchmarking(base_folder='results', config_path=DEFAULT_CONFIG,
             'F1': [float(np.mean(test_metrics_runs['f1'])), float(np.std(test_metrics_runs['f1']))],
             'Precision': [float(np.mean(test_metrics_runs['precision'])), float(np.std(test_metrics_runs['precision']))],
             'Recall': [float(np.mean(test_metrics_runs['recall'])), float(np.std(test_metrics_runs['recall']))],
+            'Train_Accuracy': [float(np.mean(train_metrics_runs['accuracy'])), float(np.std(train_metrics_runs['accuracy']))],
+            'Train_F1': [float(np.mean(train_metrics_runs['f1'])), float(np.std(train_metrics_runs['f1']))],
+            'Train_Precision': [float(np.mean(train_metrics_runs['precision'])), float(np.std(train_metrics_runs['precision']))],
+            'Train_Recall': [float(np.mean(train_metrics_runs['recall'])), float(np.std(train_metrics_runs['recall']))],
+            'Val_Accuracy': [float(np.mean(val_metrics_runs['accuracy'])), float(np.std(val_metrics_runs['accuracy']))],
+            'Val_F1': [float(np.mean(val_metrics_runs['f1'])), float(np.std(val_metrics_runs['f1']))],
+            'Val_Precision': [float(np.mean(val_metrics_runs['precision'])), float(np.std(val_metrics_runs['precision']))],
+            'Val_Recall': [float(np.mean(val_metrics_runs['recall'])), float(np.std(val_metrics_runs['recall']))],
             'flops_inference': [float(np.mean(compute_metrics_runs['flops_inference'])), float(np.std(compute_metrics_runs['flops_inference']))],
             'flops_training_total': [float(np.mean(compute_metrics_runs['flops_training_total'])), float(np.std(compute_metrics_runs['flops_training_total']))],
             'time_training_total': [float(np.mean(compute_metrics_runs['time_training_total'])), float(np.std(compute_metrics_runs['time_training_total']))],
@@ -173,6 +187,8 @@ def run_benchmarking(base_folder='results', config_path=DEFAULT_CONFIG,
             "config_hash": file_name,
             "config": sweep_config,
             "test_metrics_runs": test_metrics_runs,
+            "train_metrics_runs": train_metrics_runs,
+            "val_metrics_runs": val_metrics_runs,
             "test_metrics_mean_std": mean_std_dict,
             "oversmoothing_metrics_runs": oversmoothing_metrics,
             "oversmoothing_metrics_mean_std": oversmoothing_summary,

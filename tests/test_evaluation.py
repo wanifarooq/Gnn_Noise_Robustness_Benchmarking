@@ -255,8 +255,9 @@ class TestMakeResult:
         dummy = _make_dummy()
 
         result_dict = {
-            'accuracy': 0.8, 'f1': 0.7,
-            'precision': 0.75, 'recall': 0.72,
+            'test_cls': {'accuracy': 0.8, 'f1': 0.7, 'precision': 0.75, 'recall': 0.72},
+            'train_cls': {'accuracy': 0.9, 'f1': 0.85, 'precision': 0.88, 'recall': 0.82},
+            'val_cls': {'accuracy': 0.85, 'f1': 0.80, 'precision': 0.83, 'recall': 0.78},
             'oversmoothing': dict(DEFAULT_OVERSMOOTHING),
         }
         train_os = {'EDir': [1.0, 2.0], 'MAD': [0.5, 0.6]}
@@ -267,12 +268,15 @@ class TestMakeResult:
         assert isinstance(out['val_oversmoothing'], dict)
         assert out['val_oversmoothing']['EDir'] == pytest.approx(1.6, rel=1e-5)
 
+        # test_cls / train_cls / val_cls pass through
+        assert out['test_cls'] == result_dict['test_cls']
+        assert out['train_cls'] == result_dict['train_cls']
+        assert out['val_cls'] == result_dict['val_cls']
+
     def test_val_oversmoothing_none(self):
         dummy = _make_dummy()
 
         result_dict = {
-            'accuracy': 0.8, 'f1': 0.7,
-            'precision': 0.75, 'recall': 0.72,
             'oversmoothing': dict(DEFAULT_OVERSMOOTHING),
         }
         train_os = {'EDir': [1.0], 'MAD': [0.5]}
@@ -281,12 +285,21 @@ class TestMakeResult:
         assert 'val_oversmoothing' in out
         assert out['val_oversmoothing'] == {}
 
+        # test_cls / train_cls / val_cls default to empty dict when absent
+        assert out['test_cls'] == {}
+        assert out['train_cls'] == {}
+        assert out['val_cls'] == {}
+
     def test_val_oversmoothing_no_reduce(self):
         dummy = _make_dummy()
 
+        test_cls = {'accuracy': 0.8, 'f1': 0.7, 'precision': 0.75, 'recall': 0.72}
+        train_cls = {'accuracy': 0.9, 'f1': 0.85, 'precision': 0.88, 'recall': 0.82}
+        val_cls = {'accuracy': 0.85, 'f1': 0.80, 'precision': 0.83, 'recall': 0.78}
         result_dict = {
-            'accuracy': 0.8, 'f1': 0.7,
-            'precision': 0.75, 'recall': 0.72,
+            'test_cls': test_cls,
+            'train_cls': train_cls,
+            'val_cls': val_cls,
             'oversmoothing': dict(DEFAULT_OVERSMOOTHING),
         }
         train_os = {'EDir': [1.0, 2.0]}
@@ -294,6 +307,9 @@ class TestMakeResult:
 
         out = dummy._make_result(result_dict, train_os, val_os, reduce=False)
         assert out['val_oversmoothing'] == val_os
+        assert out['test_cls'] == test_cls
+        assert out['train_cls'] == train_cls
+        assert out['val_cls'] == val_cls
 
 
 # ── Phase 2b: checkpoint state ────────────────────────────────────────────────

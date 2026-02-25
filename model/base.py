@@ -128,7 +128,7 @@ class BaseTrainer(ABC):
         Parameters
         ----------
         result_dict : dict
-            Must contain keys: accuracy, f1, precision, recall, oversmoothing.
+            Must contain keys: test_cls, train_cls, val_cls, oversmoothing.
         train_oversmoothing : dict
             Per-epoch oversmoothing metrics collected during training.
         val_oversmoothing : dict or None
@@ -139,10 +139,9 @@ class BaseTrainer(ABC):
             that already return reduced values.
         """
         return {
-            'accuracy': result_dict['accuracy'],
-            'f1': result_dict['f1'],
-            'precision': result_dict['precision'],
-            'recall': result_dict['recall'],
+            'test_cls': result_dict.get('test_cls', {}),
+            'train_cls': result_dict.get('train_cls', {}),
+            'val_cls': result_dict.get('val_cls', {}),
             'oversmoothing': result_dict['oversmoothing'],
             'train_oversmoothing': (
                 self._reduce_oversmoothing(train_oversmoothing)

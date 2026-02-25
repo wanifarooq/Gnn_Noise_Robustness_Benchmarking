@@ -443,6 +443,8 @@ def evaluate_model(get_predictions, get_embeddings, labels, train_mask, val_mask
 
     predictions = get_predictions()
     test_cls_metrics = cls_evaluator.compute_all_metrics(predictions[test_mask], labels[test_mask])
+    train_cls_metrics = cls_evaluator.compute_all_metrics(predictions[train_mask], labels[train_mask])
+    val_cls_metrics = cls_evaluator.compute_all_metrics(predictions[val_mask], labels[val_mask])
 
     embeddings = get_embeddings()
     test_oversmoothing = compute_oversmoothing_for_mask(
@@ -458,10 +460,9 @@ def evaluate_model(get_predictions, get_embeddings, labels, train_mask, val_mask
         return {k: d.get(k, 0.0) for k in OVERSMOOTHING_KEYS}
 
     return {
-        'accuracy': test_cls_metrics['accuracy'],
-        'f1': test_cls_metrics['f1'],
-        'precision': test_cls_metrics['precision'],
-        'recall': test_cls_metrics['recall'],
+        'test_cls': test_cls_metrics,
+        'train_cls': train_cls_metrics,
+        'val_cls': val_cls_metrics,
         'oversmoothing': normalize_metrics(test_oversmoothing),
         'train_oversmoothing_final': normalize_metrics(train_oversmoothing),
         'val_oversmoothing_final': normalize_metrics(val_oversmoothing),

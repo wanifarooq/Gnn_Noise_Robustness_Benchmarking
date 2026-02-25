@@ -23,8 +23,8 @@ def run_single_experiment_fixed_seed(method_name, config, fixed_run_id=1,
             experiment_config, run_id=fixed_run_id,
             checkpoint_path=checkpoint_path, eval_only=eval_only,
         )
-        print(f"[{method_name}] Completed - Test Acc: {test_metrics['accuracy']:.4f}, "
-              f"F1: {test_metrics['f1']:.4f}")
+        print(f"[{method_name}] Completed - Test Acc: {test_metrics['test_cls']['accuracy']:.4f}, "
+              f"F1: {test_metrics['test_cls']['f1']:.4f}")
 
         return method_name, test_metrics
     except Exception as e:
@@ -108,7 +108,7 @@ def run_parallel_single_benchmark():
         rows = []
         for method in methods_to_test:
             if method in results:
-                r = results[method]
+                r = results[method]['test_cls']
                 rows.append([
                     method,
                     f"{r['accuracy']:.4f}",
@@ -142,8 +142,8 @@ def run_parallel_single_benchmark():
         col_widths_os = [max(len(str(x)) for x in col) for col in zip(*([headers_os] + rows_os))]
         print_table(headers_os, rows_os, col_widths_os)
 
-        best_method = max(results.items(), key=lambda x: x[1]['accuracy'])
-        print(f"\nBest method: {best_method[0]} (Accuracy: {best_method[1]['accuracy']:.4f})")
+        best_method = max(results.items(), key=lambda x: x[1]['test_cls']['accuracy'])
+        print(f"\nBest method: {best_method[0]} (Accuracy: {best_method[1]['test_cls']['accuracy']:.4f})")
     else:
         print("No successful runs.")
     

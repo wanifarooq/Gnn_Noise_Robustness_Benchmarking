@@ -184,22 +184,9 @@ def test_model_smoke(method):
     result = run_experiment(config, run_id=1)
 
     # ── required top-level keys ──────────────────────────────────────────
-    for key in ('accuracy', 'f1', 'precision', 'recall',
+    for key in ('test_cls', 'train_cls', 'val_cls',
                 'oversmoothing', 'train_oversmoothing', 'compute_info'):
         assert key in result, f"Missing key '{key}' in result for method '{method}'"
-
-    # ── classification metrics in [0, 1] and finite ──────────────────────
-    for metric in ('accuracy', 'f1', 'precision', 'recall'):
-        val = result[metric]
-        assert isinstance(val, (int, float)), (
-            f"{metric} should be numeric, got {type(val)} for method '{method}'"
-        )
-        assert math.isfinite(val), (
-            f"{metric} is not finite ({val}) for method '{method}'"
-        )
-        assert 0.0 <= val <= 1.0, (
-            f"{metric} out of [0,1] range ({val}) for method '{method}'"
-        )
 
     # ── oversmoothing dict has the 6 standard keys, all finite ───────────
     os_dict = result['oversmoothing']
@@ -226,6 +213,27 @@ def test_model_smoke(method):
     assert isinstance(result['val_oversmoothing'], dict), (
         f"val_oversmoothing should be dict for method '{method}'"
     )
+
+    # ── test/train/val cls have 4 classification metrics in [0, 1] ─────
+    for split in ('test_cls', 'train_cls', 'val_cls'):
+        cls_dict = result[split]
+        assert isinstance(cls_dict, dict), (
+            f"{split} should be dict, got {type(cls_dict)} for method '{method}'"
+        )
+        for metric in ('accuracy', 'f1', 'precision', 'recall'):
+            assert metric in cls_dict, (
+                f"Missing '{metric}' in {split} for method '{method}'"
+            )
+            val = cls_dict[metric]
+            assert isinstance(val, (int, float)), (
+                f"{split}['{metric}'] should be numeric, got {type(val)} for method '{method}'"
+            )
+            assert math.isfinite(val), (
+                f"{split}['{metric}'] is not finite ({val}) for method '{method}'"
+            )
+            assert 0.0 <= val <= 1.0, (
+                f"{split}['{metric}'] out of [0,1] range ({val}) for method '{method}'"
+            )
 
     # ── compute_info has 4 compute metrics with valid values ──────────────
     ci = result['compute_info']
@@ -269,7 +277,7 @@ def test_checkpoint_roundtrip(method, tmp_path):
                                 eval_only=True)
 
     # Result structure is valid
-    for key in ('accuracy', 'f1', 'precision', 'recall',
+    for key in ('test_cls', 'train_cls', 'val_cls',
                 'oversmoothing', 'train_oversmoothing', 'compute_info'):
         assert key in result_eval, f"Missing key '{key}' in eval-only result"
 
@@ -279,8 +287,8 @@ def test_checkpoint_roundtrip(method, tmp_path):
     assert result_eval['compute_info']['time_inference'] > 0
 
     # Classification metrics should match (same weights, same data)
-    assert result_eval['accuracy'] == pytest.approx(result_train['accuracy'], abs=1e-5)
-    assert result_eval['f1'] == pytest.approx(result_train['f1'], abs=1e-5)
+    assert result_eval['test_cls']['accuracy'] == pytest.approx(result_train['test_cls']['accuracy'], abs=1e-5)
+    assert result_eval['test_cls']['f1'] == pytest.approx(result_train['test_cls']['f1'], abs=1e-5)
 
 
 def test_eval_only_blocked_for_unsupported_method(tmp_path):
