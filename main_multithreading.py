@@ -7,6 +7,7 @@ import time
 
 from util.experiment import run_experiment
 from util.cli import parse_arguments, print_table
+from model.evaluation import OVERSMOOTHING_KEYS
 
 
 def run_single_experiment_fixed_seed(method_name, config, fixed_run_id=1,
@@ -121,7 +122,7 @@ def run_parallel_single_benchmark():
 
         print_table(headers, rows)
 
-        headers_os = ["Method", "NumRank", "Erank", "EDir", "EDir_trad", "EProj", "MAD"]
+        headers_os = ["Method"] + OVERSMOOTHING_KEYS
         rows_os = []
         for method in methods_to_test:
             if method in results:

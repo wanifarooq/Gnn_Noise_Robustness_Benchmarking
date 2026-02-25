@@ -510,9 +510,9 @@ class GraphCleanerNoiseDetector:
             'f1': detection_f1,
             'precision': detection_precision,
             'recall': detection_recall,
-            'mcc': detection_mcc,
-            'auc': detection_auc,
-            'oversmoothing': oversmoothing_results
+            'mcc': detection_mcc, # TODO: add MCC to the evaluation metrics in the main training loop
+            'auc': detection_auc, # TODO: add AUC to the evaluation metrics in the main training loop
+            'test_oversmoothing': oversmoothing_results
         }
 
 

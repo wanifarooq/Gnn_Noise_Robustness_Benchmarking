@@ -1,6 +1,7 @@
 """CLI helpers — argument parsing and table formatting."""
 
 import argparse
+import numpy as np
 
 
 def parse_arguments():
@@ -23,6 +24,11 @@ def parse_arguments():
                        default='checkpoints',
                        help='Directory for checkpoint files (default: checkpoints)')
     return parser.parse_args()
+
+
+def fmt_mean_std(vals):
+    """Format mean\u00b1std for display."""
+    return f"{np.mean(vals):.4f} \u00b1 {np.std(vals):.4f}"
 
 
 def print_table(headers, rows):

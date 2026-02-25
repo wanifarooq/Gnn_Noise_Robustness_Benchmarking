@@ -14,7 +14,7 @@ from collections import defaultdict
 from model.gnns import GCN, GIN, GAT, GATv2, GPS
 from model.evaluation import (OversmoothingMetrics, ClassificationMetrics,
                               compute_oversmoothing_for_mask, evaluate_model,
-                              DEFAULT_OVERSMOOTHING)
+                              DEFAULT_OVERSMOOTHING, ZERO_CLS)
 from model.base import BaseTrainer
 from model.registry import register
 
@@ -621,11 +621,10 @@ class RTGNN(nn.Module):
 
         if self.best_model_state is None:
             print("Model not trained yet.")
-            _zero_cls = {'accuracy': 0.0, 'f1': 0.0, 'precision': 0.0, 'recall': 0.0}
             return {
-                'test_cls': dict(_zero_cls),
-                'train_cls': dict(_zero_cls),
-                'val_cls': dict(_zero_cls),
+                'test_cls': dict(ZERO_CLS),
+                'train_cls': dict(ZERO_CLS),
+                'val_cls': dict(ZERO_CLS),
                 'test_oversmoothing': dict(DEFAULT_OVERSMOOTHING),
                 'train_oversmoothing_final': dict(DEFAULT_OVERSMOOTHING),
                 'val_oversmoothing_final': dict(DEFAULT_OVERSMOOTHING),

@@ -12,15 +12,17 @@ import sys
 import os
 import pytest
 import torch
-import numpy as np
+import torch.nn as nn
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
+from model.base import BaseTrainer
 from model.evaluation import (
     OversmoothingMetrics,
     compute_oversmoothing_for_mask,
     OVERSMOOTHING_KEYS,
     DEFAULT_OVERSMOOTHING,
+    ZERO_CLS,
 )
 
 
@@ -225,9 +227,6 @@ class TestComputeAllMetrics:
 
 # ── Shared DummyTrainer for BaseTrainer tests ────────────────────────────────
 
-from model.base import BaseTrainer
-import torch.nn as nn
-
 _ZERO_COMPUTE_INFO = {
     'flops_inference': 0, 'flops_training_total': 0,
     'time_training_total': 0.0, 'time_inference': 0.0,
@@ -286,10 +285,9 @@ class TestMakeResult:
         assert out['val_oversmoothing'] == {}
 
         # test_cls / train_cls / val_cls default to zero-filled dict when absent
-        _zero_cls = {'accuracy': 0.0, 'f1': 0.0, 'precision': 0.0, 'recall': 0.0}
-        assert out['test_cls'] == _zero_cls
-        assert out['train_cls'] == _zero_cls
-        assert out['val_cls'] == _zero_cls
+        assert out['test_cls'] == ZERO_CLS
+        assert out['train_cls'] == ZERO_CLS
+        assert out['val_cls'] == ZERO_CLS
 
     def test_val_oversmoothing_no_reduce(self):
         dummy = _make_dummy()

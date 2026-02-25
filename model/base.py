@@ -7,7 +7,7 @@ from copy import deepcopy
 import torch
 import numpy as np
 
-from model.evaluation import evaluate_model
+from model.evaluation import evaluate_model, ZERO_CLS
 
 
 class BaseTrainer(ABC):
@@ -138,11 +138,10 @@ class BaseTrainer(ABC):
             ``_reduce_oversmoothing``.  Set to *False* for models (e.g. GCOD)
             that already return reduced values.
         """
-        _zero_cls = {'accuracy': 0.0, 'f1': 0.0, 'precision': 0.0, 'recall': 0.0}
         return {
-            'test_cls': result_dict.get('test_cls', dict(_zero_cls)),
-            'train_cls': result_dict.get('train_cls', dict(_zero_cls)),
-            'val_cls': result_dict.get('val_cls', dict(_zero_cls)),
+            'test_cls': result_dict.get('test_cls', dict(ZERO_CLS)),
+            'train_cls': result_dict.get('train_cls', dict(ZERO_CLS)),
+            'val_cls': result_dict.get('val_cls', dict(ZERO_CLS)),
             'test_oversmoothing': result_dict.get('test_oversmoothing', {}),
             'train_oversmoothing': (
                 self._reduce_oversmoothing(train_oversmoothing)

@@ -7,16 +7,12 @@ import os
 from codecarbon import EmissionsTracker
 
 from util.experiment import run_experiment
-from util.cli import print_table
+from util.cli import print_table, fmt_mean_std
 from model.evaluation import OVERSMOOTHING_KEYS
 from sweep_utils import expand_yaml_sweeps, get_result_filename, should_run_experiment, json_serializer
 
 DEFAULT_CONFIG = "config.yaml"
 
-
-def _fmt(vals):
-    """Format mean\u00b1std for display."""
-    return f"{np.mean(vals):.4f} \u00b1 {np.std(vals):.4f}"
 
 
 def parse_args():
@@ -135,20 +131,20 @@ def run_benchmarking(base_folder='results', config_path=DEFAULT_CONFIG,
         cls_headers = ['split', 'accuracy', 'f1', 'precision', 'recall']
         cls_rows = []
         for split in ('test', 'train', 'val'):
-            cls_rows.append([split] + [_fmt(classification_runs[split][m]) for m in ('accuracy', 'f1', 'precision', 'recall')])
+            cls_rows.append([split] + [fmt_mean_std(classification_runs[split][m]) for m in ('accuracy', 'f1', 'precision', 'recall')])
         print("\nClassification Metrics:")
         print_table(cls_headers, cls_rows)
 
         os_headers = ['split'] + list(OVERSMOOTHING_KEYS)
         os_rows = []
         for split in ('test', 'train', 'val'):
-            os_rows.append([split] + [_fmt(oversmoothing_runs[split][k]) for k in OVERSMOOTHING_KEYS])
+            os_rows.append([split] + [fmt_mean_std(oversmoothing_runs[split][k]) for k in OVERSMOOTHING_KEYS])
         print("\nOversmoothing Metrics:")
         print_table(os_headers, os_rows)
 
         print("\nCompute Metrics:")
         for ckey in compute_runs:
-            print(f"  {ckey}: {_fmt(compute_runs[ckey])}")
+            print(f"  {ckey}: {fmt_mean_std(compute_runs[ckey])}")
         print("-"*50)
 
         all_metrics = {

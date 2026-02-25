@@ -378,6 +378,7 @@ class OversmoothingMetrics:
 
 OVERSMOOTHING_KEYS = ['NumRank', 'Erank', 'EDir', 'EDir_traditional', 'EProj', 'MAD']
 DEFAULT_OVERSMOOTHING = {k: 0.0 for k in OVERSMOOTHING_KEYS}
+ZERO_CLS = {'accuracy': 0.0, 'f1': 0.0, 'precision': 0.0, 'recall': 0.0}
 
 
 def compute_oversmoothing_for_mask(oversmoothing_evaluator, embeddings, edge_index, mask):
