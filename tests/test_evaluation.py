@@ -223,20 +223,36 @@ class TestComputeAllMetrics:
             assert math.isfinite(result[key])
 
 
+# ── Shared DummyTrainer for BaseTrainer tests ────────────────────────────────
+
+from model.base import BaseTrainer
+import torch.nn as nn
+
+_ZERO_COMPUTE_INFO = {
+    'flops_inference': 0, 'flops_training_total': 0,
+    'time_training_total': 0.0, 'time_inference': 0.0,
+}
+
+class DummyTrainer(BaseTrainer):
+    """Minimal concrete BaseTrainer for unit tests."""
+    def train(self):
+        pass
+
+
+def _make_dummy(init_data=None):
+    """Create a DummyTrainer instance with optional init_data overrides."""
+    dummy = DummyTrainer.__new__(DummyTrainer)
+    dummy.init_data = init_data or {'compute_info': dict(_ZERO_COMPUTE_INFO)}
+    return dummy
+
+
 # ── Phase 2: val_oversmoothing in _make_result ──────────────────────────────
 
 class TestMakeResult:
     """Test that BaseTrainer._make_result includes val_oversmoothing."""
 
     def test_val_oversmoothing_present(self):
-        from model.base import BaseTrainer
-
-        class DummyTrainer(BaseTrainer):
-            def train(self):
-                pass
-
-        dummy = DummyTrainer.__new__(DummyTrainer)
-        dummy.init_data = {'compute_info': {'flops_inference': 0, 'flops_training_total': 0, 'time_training_total': 0.0, 'time_inference': 0.0}}
+        dummy = _make_dummy()
 
         result_dict = {
             'accuracy': 0.8, 'f1': 0.7,
@@ -252,14 +268,7 @@ class TestMakeResult:
         assert out['val_oversmoothing']['EDir'] == pytest.approx(1.6, rel=1e-5)
 
     def test_val_oversmoothing_none(self):
-        from model.base import BaseTrainer
-
-        class DummyTrainer(BaseTrainer):
-            def train(self):
-                pass
-
-        dummy = DummyTrainer.__new__(DummyTrainer)
-        dummy.init_data = {'compute_info': {'flops_inference': 0, 'flops_training_total': 0, 'time_training_total': 0.0, 'time_inference': 0.0}}
+        dummy = _make_dummy()
 
         result_dict = {
             'accuracy': 0.8, 'f1': 0.7,
@@ -273,14 +282,7 @@ class TestMakeResult:
         assert out['val_oversmoothing'] == {}
 
     def test_val_oversmoothing_no_reduce(self):
-        from model.base import BaseTrainer
-
-        class DummyTrainer(BaseTrainer):
-            def train(self):
-                pass
-
-        dummy = DummyTrainer.__new__(DummyTrainer)
-        dummy.init_data = {'compute_info': {'flops_inference': 0, 'flops_training_total': 0, 'time_training_total': 0.0, 'time_inference': 0.0}}
+        dummy = _make_dummy()
 
         result_dict = {
             'accuracy': 0.8, 'f1': 0.7,
@@ -300,31 +302,15 @@ class TestCheckpoint:
     """Test BaseTrainer checkpoint helpers."""
 
     def test_get_checkpoint_state_has_backbone(self):
-        from model.base import BaseTrainer
-        import torch.nn as nn
-
-        class DummyTrainer(BaseTrainer):
-            def train(self):
-                pass
-
-        dummy = DummyTrainer.__new__(DummyTrainer)
-        dummy.init_data = {'backbone_model': nn.Linear(3, 2)}
+        dummy = _make_dummy({'backbone_model': nn.Linear(3, 2)})
 
         state = dummy.get_checkpoint_state()
         assert 'backbone' in state
         assert isinstance(state['backbone'], dict)
 
     def test_load_checkpoint_state_restores_weights(self, tmp_path):
-        from model.base import BaseTrainer
-        import torch.nn as nn
-
-        class DummyTrainer(BaseTrainer):
-            def train(self):
-                pass
-
-        dummy = DummyTrainer.__new__(DummyTrainer)
         model = nn.Linear(3, 2)
-        dummy.init_data = {'backbone_model': model}
+        dummy = _make_dummy({'backbone_model': model})
 
         # Save checkpoint to disk (mimics real usage)
         state = dummy.get_checkpoint_state()
@@ -342,17 +328,9 @@ class TestCheckpoint:
         assert torch.equal(model.weight.data, original_weight)
 
     def test_supports_eval_only_default_true(self):
-        from model.base import BaseTrainer
-
-        class DummyTrainer(BaseTrainer):
-            def train(self):
-                pass
-
         assert DummyTrainer.supports_eval_only is True
 
     def test_supports_eval_only_override(self):
-        from model.base import BaseTrainer
-
         class UnsupportedTrainer(BaseTrainer):
             supports_eval_only = False
             def train(self):
@@ -362,16 +340,8 @@ class TestCheckpoint:
 
     def test_get_checkpoint_state_is_snapshot(self, tmp_path):
         """get_checkpoint_state returns an independent copy of the weights."""
-        from model.base import BaseTrainer
-        import torch.nn as nn
-
-        class DummyTrainer(BaseTrainer):
-            def train(self):
-                pass
-
-        dummy = DummyTrainer.__new__(DummyTrainer)
         model = nn.Linear(3, 2)
-        dummy.init_data = {'backbone_model': model}
+        dummy = _make_dummy({'backbone_model': model})
 
         state = dummy.get_checkpoint_state()
         original_weight = state['backbone']['weight'].clone()

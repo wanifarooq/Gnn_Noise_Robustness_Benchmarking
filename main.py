@@ -7,22 +7,27 @@ import os
 from codecarbon import EmissionsTracker
 
 from util.experiment import run_experiment
-from sweep_utils import *
+from model.evaluation import OVERSMOOTHING_KEYS
+from sweep_utils import expand_yaml_sweeps, get_config_hash, should_run_experiment, json_serializer
+
+DEFAULT_CONFIG = "config.yaml"
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Run multi-run benchmark sweeps')
-    parser.add_argument('--config', '-c', default='config3.yaml',
-                        help='Path to YAML config file (default: config3.yaml)')
+    parser.add_argument('--config', '-c', default=DEFAULT_CONFIG,
+                        help=f'Path to YAML config file (default: {DEFAULT_CONFIG})')
     parser.add_argument('--eval-only', action='store_true',
                         help='Skip training, evaluate from saved checkpoints')
     parser.add_argument('--no-checkpoint', action='store_true',
                         help='Disable saving model checkpoints after training')
+    parser.add_argument('--num-runs', type=int, default=None,
+                        help='Number of runs per config (default: from config or 5)')
     return parser.parse_args()
 
 
-def run_benchmarking(base_folder='results', config_path='config3.yaml',
-                     eval_only=False, no_checkpoint=False):
+def run_benchmarking(base_folder='results', config_path=DEFAULT_CONFIG,
+                     eval_only=False, no_checkpoint=False, num_runs=None):
     run_codecarbon = False
     print("\n" + "-"*50)
     print("Multi-run experiment with parameter sweep")
@@ -67,20 +72,18 @@ def run_benchmarking(base_folder='results', config_path='config3.yaml',
             'time_training_total': [], 'time_inference': [],
         }
         oversmoothing_metrics = {
-            'NumRank': [], 'Erank': [], 'EDir': [],
-            'EDir_traditional': [], 'EProj': [], 'MAD': [],
-            'NumRank-Train': [], 'Erank-Train': [], 'EDir-Train': [],
-            'EDir_traditional-Train': [], 'EProj-Train': [], 'MAD-Train': [],
-            'NumRank-Val': [], 'Erank-Val': [], 'EDir-Val': [],
-            'EDir_traditional-Val': [], 'EProj-Val': [], 'MAD-Val': [],
+            f'{key}{suffix}': []
+            for suffix in ('', '-Train', '-Val')
+            for key in OVERSMOOTHING_KEYS
         }
 
         # CLI flags override per-config values
         save_checkpoint = (not no_checkpoint) and sweep_config.get('save_checkpoint', True)
         run_eval_only = eval_only or sweep_config.get('eval_only', False)
 
+        n_runs = num_runs or sweep_config.get('num_runs', 5)
         codecarbon_file_name = f"{file_name}_emissions.csv"
-        for run in range(1, 6):
+        for run in range(1, n_runs + 1):
             try:
                 tracker = EmissionsTracker(output_dir=base_folder,
                                           output_file=codecarbon_file_name,
@@ -94,7 +97,7 @@ def run_benchmarking(base_folder='results', config_path='config3.yaml',
                     print("[WARNING] Carbon emissions data will be missing from results.")
                     print("[WARNING] On macOS, codecarbon requires sudo access to read hardware power metrics.")
                 run_codecarbon = False
-            print(f"\nRun {run}/5:")
+            print(f"\nRun {run}/{n_runs}:")
             ckpt_path = (os.path.join(base_folder, f"{file_name}_run_{run}.pt")
                          if save_checkpoint or run_eval_only else None)
             test_metrics = run_experiment(
@@ -141,10 +144,10 @@ def run_benchmarking(base_folder='results', config_path='config3.yaml',
             'F1': [float(np.mean(test_metrics_runs['f1'])), float(np.std(test_metrics_runs['f1']))],
             'Precision': [float(np.mean(test_metrics_runs['precision'])), float(np.std(test_metrics_runs['precision']))],
             'Recall': [float(np.mean(test_metrics_runs['recall'])), float(np.std(test_metrics_runs['recall']))],
-            'FLOPS_inference': [float(np.mean(compute_metrics_runs['flops_inference'])), float(np.std(compute_metrics_runs['flops_inference']))],
-            'FLOPS_training_total': [float(np.mean(compute_metrics_runs['flops_training_total'])), float(np.std(compute_metrics_runs['flops_training_total']))],
-            'Time_training_total': [float(np.mean(compute_metrics_runs['time_training_total'])), float(np.std(compute_metrics_runs['time_training_total']))],
-            'Time_inference': [float(np.mean(compute_metrics_runs['time_inference'])), float(np.std(compute_metrics_runs['time_inference']))],
+            'flops_inference': [float(np.mean(compute_metrics_runs['flops_inference'])), float(np.std(compute_metrics_runs['flops_inference']))],
+            'flops_training_total': [float(np.mean(compute_metrics_runs['flops_training_total'])), float(np.std(compute_metrics_runs['flops_training_total']))],
+            'time_training_total': [float(np.mean(compute_metrics_runs['time_training_total'])), float(np.std(compute_metrics_runs['time_training_total']))],
+            'time_inference': [float(np.mean(compute_metrics_runs['time_inference'])), float(np.std(compute_metrics_runs['time_inference']))],
         }
 
         print("\nSweep Config Results:")
@@ -187,4 +190,5 @@ if __name__ == "__main__":
     args = parse_args()
     run_benchmarking(config_path=args.config,
                      eval_only=args.eval_only,
-                     no_checkpoint=args.no_checkpoint)
+                     no_checkpoint=args.no_checkpoint,
+                     num_runs=args.num_runs)
