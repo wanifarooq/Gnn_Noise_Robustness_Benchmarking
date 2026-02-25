@@ -33,7 +33,7 @@ def train_with_standard_loss(
     best_model_state = None
     epochs_no_improve = 0
 
-    for epoch in range(1, total_epochs + 1):
+    for epoch in range(total_epochs):
         model.train()
         optimizer.zero_grad()
         out = model(data)
@@ -64,7 +64,7 @@ def train_with_standard_loss(
             epochs_no_improve += 1
 
         os_entry = None
-        if debug and epoch % oversmoothing_every == 0:
+        if debug and (epoch + 1) % oversmoothing_every == 0:
             train_oversmoothing = compute_oversmoothing_for_mask(
                 oversmoothing_evaluator, out, data.edge_index, data.train_mask
             )

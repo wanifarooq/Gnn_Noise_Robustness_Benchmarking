@@ -83,7 +83,7 @@ class PositiveEigenvaluesTrainer:
         best_model_weights = None
         epochs_without_improvement = 0
         
-        for epoch in range(1, max_epochs + 1):
+        for epoch in range(max_epochs):
 
             train_metrics = self.train_single_epoch(train_loader)
 
@@ -100,7 +100,7 @@ class PositiveEigenvaluesTrainer:
 
             # Oversmoothing computation
             os_entry = None
-            if epoch % self.oversmoothing_every == 0:
+            if (epoch + 1) % self.oversmoothing_every == 0:
 
                 self.model.eval()
                 with torch.no_grad():
@@ -155,7 +155,7 @@ class PositiveEigenvaluesTrainer:
                     f"Train NumRank: {train_num_rank:.4f}, Val NumRank: {val_num_rank:.4f} | "
                     f"Train Erank: {train_effective_rank:.4f}, Val Erank: {val_effective_rank:.4f}")
 
-            elif epoch % 10 == 0:
+            elif (epoch + 1) % 10 == 0:
                 print(f"Epoch {epoch:03d} | "
                     f"Train Loss: {train_metrics['loss']:.4f}, Val Loss: {val_metrics['loss']:.4f} | "
                     f"Train Acc: {train_metrics['accuracy']:.4f}, Val Acc: {val_metrics['accuracy']:.4f} | "

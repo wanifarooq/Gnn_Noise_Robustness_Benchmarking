@@ -312,7 +312,7 @@ class GCODTrainer:
         self.gcod_loss_fn.train()
         
         current_acc = self._compute_epoch_training_accuracy()
-        smooth_factor = 0.9 if epoch > 1 else 0.5
+        smooth_factor = 0.9 if epoch > 0 else 0.5
         self.training_accuracy = smooth_factor * self.training_accuracy + (1 - smooth_factor) * current_acc
 
         total_loss = 0
@@ -530,7 +530,7 @@ class GCODTrainer:
             print(f"Training samples: {self.data.train_mask.sum().item()}")
             print(f"Noisy samples: {len(self.noisy_indices)}")
         
-        for epoch in range(1, self.total_epochs + 1):
+        for epoch in range(self.total_epochs):
             train_loss, l1_loss, l2_loss, l3_loss = self.train_single_epoch(epoch)
             
             train_metrics = self.evaluate_model(self.train_loader, 'train')
@@ -561,7 +561,7 @@ class GCODTrainer:
             self.train_metrics_history['val']['f1'].append(val_ce_metrics['f1'])
 
             os_entry = None
-            if self.debug and epoch % self.oversmoothing_every == 0:
+            if self.debug and (epoch + 1) % self.oversmoothing_every == 0:
                 with torch.no_grad():
                     u_mean = self.gcod_loss_fn.uncertainty_params.mean().item()
                     u_std = self.gcod_loss_fn.uncertainty_params.std().item()

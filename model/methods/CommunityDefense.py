@@ -272,7 +272,7 @@ class GraphCommunityDefenseTrainer:
         epochs_without_improvement = 0
         community_labels = self.community_assignments.copy()
         
-        for epoch in range(1, training_epochs + 1):
+        for epoch in range(training_epochs):
             model.train()
             optimizer.zero_grad()
             
@@ -298,7 +298,7 @@ class GraphCommunityDefenseTrainer:
                 node_embeddings = F.dropout(logits, p=0.3, training=True)
 
             # community loss softmax multi-class
-            adaptive_community_weight = self.community_loss_weight * min(1.0, epoch / 50.0)
+            adaptive_community_weight = self.community_loss_weight * min(1.0, (epoch + 1) / 50.0)
             community_loss = self.compute_community_regularization_loss(node_embeddings, community_labels) if adaptive_community_weight > 0 else torch.zeros([], device=self.device)
 
             # Total loss
@@ -340,7 +340,7 @@ class GraphCommunityDefenseTrainer:
                 )
 
                 os_entry = None
-                if epoch % oversmoothing_every == 0:
+                if (epoch + 1) % oversmoothing_every == 0:
                     emb = node_embeddings.detach()
 
                     train_metrics = compute_oversmoothing_for_mask(
