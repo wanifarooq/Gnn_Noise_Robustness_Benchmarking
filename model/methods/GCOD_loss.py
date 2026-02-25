@@ -491,7 +491,7 @@ class GCODTrainer:
         import os
         os.makedirs('output', exist_ok=True)
         plt.savefig('output/oversmoothing_metrics.png', dpi=300, bbox_inches='tight')
-        plt.show()
+        #plt.show()
 
     def plot_training_metrics(self):
 
@@ -520,7 +520,7 @@ class GCODTrainer:
         import os
         os.makedirs('output', exist_ok=True)
         plt.savefig('output/training_metrics.png', dpi=300, bbox_inches='tight')
-        plt.show()
+        #plt.show()
 
     def train_full_model(self):
         per_epochs_train_oversmoothing = defaultdict(list)
