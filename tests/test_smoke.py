@@ -52,6 +52,7 @@ BASE_CONFIG = {
         'weight_decay': 5e-4,
         'epochs': 5,
         'patience': 10,
+        'oversmoothing_every': 5,   # match epochs so oversmoothing path is exercised
     },
 
     # ── method-specific params (reduced for speed) ───────────────────────

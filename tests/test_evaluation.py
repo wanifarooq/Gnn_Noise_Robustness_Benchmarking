@@ -238,15 +238,12 @@ class DummyTrainer(BaseTrainer):
         pass
 
 
-def _make_dummy(init_data=None):
-    """Create a DummyTrainer instance with optional init_data overrides."""
-    dummy = DummyTrainer.__new__(DummyTrainer)
-    dummy.init_data = init_data or {'compute_info': dict(_ZERO_COMPUTE_INFO)}
-    dummy.config = {}
-    dummy.epoch_log = []
-    dummy.best_epoch = None
-    dummy.best_val_loss = float('inf')
-    return dummy
+def _make_dummy(init_data=None, config=None):
+    """Create a DummyTrainer instance via the real constructor."""
+    return DummyTrainer(
+        init_data=init_data or {'compute_info': dict(_ZERO_COMPUTE_INFO)},
+        config=config or {},
+    )
 
 
 # ── Phase 4: log_epoch and training log ──────────────────────────────────────
