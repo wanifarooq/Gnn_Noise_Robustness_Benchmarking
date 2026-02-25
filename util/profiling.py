@@ -59,14 +59,20 @@ def _forward_call(model, data):
     return model(data.x, data.edge_index)
 
 
-def profile_model_flops(model, data, device, n_warmup=1, n_iters=1):
+def profile_model_flops(model, data, device, n_warmup=1, n_iters=1,
+                        forward_fn=None):
     """Profile FLOPs with torch.profiler (forward pass).
 
     Runs *n_warmup* un-profiled forward passes, then *n_iters* profiled passes.
     Returns a dict with ``total_flops`` (int) and ``profiler_table`` (str).
+
+    If *forward_fn* (a zero-arg callable) is provided it is used instead of
+    the default ``_forward_call(model, data)`` – handy for multi-model
+    pipelines.  ``model.eval()`` is still called for setup.
     """
     with _profiler_lock:
         model.eval()
+        fn = forward_fn or (lambda: _forward_call(model, data))
 
         activities = [ProfilerActivity.CPU]
         if device.type == "cuda":
@@ -75,7 +81,7 @@ def profile_model_flops(model, data, device, n_warmup=1, n_iters=1):
         # Warmup outside profiler
         with torch.no_grad():
             for _ in range(n_warmup):
-                _ = _forward_call(model, data)
+                _ = fn()
             if device.type == "cuda":
                 torch.cuda.synchronize()
 
@@ -88,7 +94,7 @@ def profile_model_flops(model, data, device, n_warmup=1, n_iters=1):
         ) as prof:
             with torch.no_grad():
                 for _ in range(n_iters):
-                    _ = _forward_call(model, data)
+                    _ = fn()
                 if device.type == "cuda":
                     torch.cuda.synchronize()
 

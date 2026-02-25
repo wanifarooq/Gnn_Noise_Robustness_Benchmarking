@@ -700,6 +700,12 @@ class ERASEMethodTrainer(BaseTrainer):
             d['data_for_training'], enable_debug_output=True,
         )
 
+    def profile_flops(self):
+        from util.profiling import profile_model_flops
+        d = self.init_data
+        model = self._erase_trainer._trained_model
+        return profile_model_flops(model, d['data_for_training'], d['device'])
+
     def evaluate(self):
         d = self.init_data
         trainer = self._erase_trainer

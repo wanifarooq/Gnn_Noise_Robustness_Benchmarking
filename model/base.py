@@ -31,6 +31,7 @@ class BaseTrainer(ABC):
     def run(self) -> dict:
         """Train + evaluate. Return standardised result dict."""
         train_out = self.train()
+        self.init_data['flops_info'] = self.profile_flops()
         eval_result = self.evaluate()
         return self._make_result(
             eval_result,
@@ -64,6 +65,19 @@ class BaseTrainer(ABC):
                 data.train_mask, data.val_mask, data.test_mask,
                 data.edge_index, device,
             )
+
+    # ── flops ─────────────────────────────────────────────────────────────
+
+    def profile_flops(self) -> dict:
+        """Profile FLOPS for one inference forward pass.
+
+        Override in subclasses that use models beyond the backbone (e.g.
+        adapter heads, dual branches).
+        """
+        from util.profiling import profile_model_flops
+        d = self.init_data
+        return profile_model_flops(d['backbone_model'], d['data_for_training'],
+                                   d['device'])
 
     # ── checkpoint ───────────────────────────────────────────────────────
 

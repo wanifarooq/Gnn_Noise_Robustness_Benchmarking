@@ -778,6 +778,18 @@ class RTGNNMethodTrainer(BaseTrainer):
             'val_oversmoothing': dict(val_oversmoothing),
         }
 
+    def profile_flops(self):
+        from util.profiling import profile_model_flops
+        d = self.init_data
+        rtgnn = self._rtgnn
+        dual = rtgnn.dual_branch_predictor
+        data = d['data_for_training']
+
+        def fwd():
+            return dual(data.x, data.edge_index)
+
+        return profile_model_flops(dual, data, d['device'], forward_fn=fwd)
+
     def evaluate(self):
         d = self.init_data
         clean_labels = d['data'].y_original.cpu().numpy()

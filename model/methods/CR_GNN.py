@@ -325,6 +325,24 @@ class CRGNNMethodTrainer(BaseTrainer):
             d['backbone_model'], d['get_model'],
         )
 
+    def profile_flops(self):
+        from util.profiling import profile_model_flops
+        cr = self._cr
+        backbone = cr._backbone
+        adapter = cr._adapter
+        class_head = cr._class_head
+        data = cr._graph_data
+
+        adapter.eval()
+        class_head.eval()
+
+        def fwd():
+            h = backbone(Data(x=data.x, edge_index=data.edge_index))
+            h = adapter(h)
+            return class_head(h)
+
+        return profile_model_flops(backbone, data, cr.device, forward_fn=fwd)
+
     def evaluate(self):
         cr = self._cr
         backbone = cr._backbone
