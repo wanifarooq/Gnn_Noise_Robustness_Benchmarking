@@ -9,7 +9,7 @@ from torch_geometric.data import Data
 from util.seed import setup_seed_device
 from util.data import load_dataset, ensure_splits, prepare_data_for_method, verify_label_distribution
 from util.noise import noise_operation
-from util.profiling import get_model, profile_model_flops
+from util.profiling import get_model
 
 from model.registry import discover_trainers, get_trainer
 
@@ -87,9 +87,8 @@ def initialize_experiment(config, run_id=1):
         self_loop=config['model'].get('self_loop', True)
     ).to(device)
 
-    flops_info = profile_model_flops(backbone_model, data_for_training, device)
     compute_info = {
-        'flops_inference': flops_info['total_flops'],
+        'flops_inference': 0,
         'flops_training_total': 0,
         'time_training_total': 0.0,
         'time_inference': 0.0,
@@ -158,6 +157,8 @@ def run_experiment(config, run_id=1, *, checkpoint_path=None, eval_only=False):
         state = torch.load(checkpoint_path, map_location=init_data['device'],
                            weights_only=False)
         trainer.load_checkpoint_state(state)
+        flops_result = trainer.profile_flops()
+        init_data['compute_info']['flops_inference'] = flops_result['total_flops']
         t0 = time.perf_counter()
         eval_result = trainer.evaluate()
         time_inference = time.perf_counter() - t0

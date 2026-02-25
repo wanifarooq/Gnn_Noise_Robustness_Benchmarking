@@ -227,12 +227,25 @@ def test_model_smoke(method):
         f"val_oversmoothing should be dict for method '{method}'"
     )
 
-    # ── compute_info has 4 compute metrics ───────────────────────────────
+    # ── compute_info has 4 compute metrics with valid values ──────────────
+    ci = result['compute_info']
     for ckey in ('flops_inference', 'flops_training_total',
                  'time_training_total', 'time_inference'):
-        assert ckey in result['compute_info'], (
+        assert ckey in ci, (
             f"compute_info missing '{ckey}' for method '{method}'"
         )
+    assert ci['flops_inference'] > 0, (
+        f"flops_inference should be positive for method '{method}'"
+    )
+    assert ci['flops_training_total'] > 0, (
+        f"flops_training_total should be positive for method '{method}'"
+    )
+    assert ci['time_training_total'] > 0, (
+        f"time_training_total should be positive for method '{method}'"
+    )
+    assert ci['time_inference'] > 0, (
+        f"time_inference should be positive for method '{method}'"
+    )
 
 
 # ── Checkpoint round-trip ────────────────────────────────────────────────────

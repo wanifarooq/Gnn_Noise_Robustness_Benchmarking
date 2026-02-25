@@ -23,6 +23,12 @@ class BaseTrainer(ABC):
     #: clear error rather than an opaque ``AttributeError``.
     supports_eval_only: bool = True
 
+    #: (PROBABLY) Approximate ratio of training-step FLOPS to inference FLOPS.
+    #: Default: 3 (1× forward + ~2× backward per step).  Override in
+    #: subclasses whose training loop is heavier (extra losses, auxiliary
+    #: models, iterative steps, etc.).
+    TRAINING_FLOPS_MULTIPLIER: int = 3
+
     def __init__(self, init_data: dict, config: dict):
         self.init_data = init_data
         self.config = config
@@ -44,7 +50,7 @@ class BaseTrainer(ABC):
         epochs = self.init_data.get('epochs', 0)
         self.init_data['compute_info'] = {
             'flops_inference': flops_result['total_flops'],
-            'flops_training_total': flops_result['total_flops'] * 3 * epochs,
+            'flops_training_total': flops_result['total_flops'] * self.TRAINING_FLOPS_MULTIPLIER * epochs,
             'time_training_total': round(time_training, 4),
             'time_inference': round(time_inference, 4),
         }

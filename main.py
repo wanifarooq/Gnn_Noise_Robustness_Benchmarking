@@ -59,7 +59,9 @@ def run_benchmarking(base_folder='results', config_path='config3.yaml',
         if device_str == "cuda":
             print(f"CUDA device name: {torch.cuda.get_device_name(torch.cuda.current_device())}")
 
-        test_accuracies, test_f1s, test_precisions, test_recalls = [], [], [], []
+        test_metrics_runs = {
+            'accuracy': [], 'f1': [], 'precision': [], 'recall': [],
+        }
         compute_metrics_runs = {
             'flops_inference': [], 'flops_training_total': [],
             'time_training_total': [], 'time_inference': [],
@@ -102,10 +104,10 @@ def run_benchmarking(base_folder='results', config_path='config3.yaml',
             if run_codecarbon:
                 tracker.stop()
             # Convert possible numpy/torch scalars to Python floats
-            test_accuracies.append(float(test_metrics['accuracy']))
-            test_f1s.append(float(test_metrics['f1']))
-            test_precisions.append(float(test_metrics['precision']))
-            test_recalls.append(float(test_metrics['recall']))
+            test_metrics_runs['accuracy'].append(float(test_metrics['accuracy']))
+            test_metrics_runs['f1'].append(float(test_metrics['f1']))
+            test_metrics_runs['precision'].append(float(test_metrics['precision']))
+            test_metrics_runs['recall'].append(float(test_metrics['recall']))
             for ckey in compute_metrics_runs:
                 compute_metrics_runs[ckey].append(float(test_metrics['compute_info'][ckey]))
 
@@ -135,10 +137,10 @@ def run_benchmarking(base_folder='results', config_path='config3.yaml',
 
         # Compute mean ± std (store as plain floats to simplify JSON)
         mean_std_dict = {
-            'Accuracy': [float(np.mean(test_accuracies)), float(np.std(test_accuracies))],
-            'F1': [float(np.mean(test_f1s)), float(np.std(test_f1s))],
-            'Precision': [float(np.mean(test_precisions)), float(np.std(test_precisions))],
-            'Recall': [float(np.mean(test_recalls)), float(np.std(test_recalls))],
+            'Accuracy': [float(np.mean(test_metrics_runs['accuracy'])), float(np.std(test_metrics_runs['accuracy']))],
+            'F1': [float(np.mean(test_metrics_runs['f1'])), float(np.std(test_metrics_runs['f1']))],
+            'Precision': [float(np.mean(test_metrics_runs['precision'])), float(np.std(test_metrics_runs['precision']))],
+            'Recall': [float(np.mean(test_metrics_runs['recall'])), float(np.std(test_metrics_runs['recall']))],
             'FLOPS_inference': [float(np.mean(compute_metrics_runs['flops_inference'])), float(np.std(compute_metrics_runs['flops_inference']))],
             'FLOPS_training_total': [float(np.mean(compute_metrics_runs['flops_training_total'])), float(np.std(compute_metrics_runs['flops_training_total']))],
             'Time_training_total': [float(np.mean(compute_metrics_runs['time_training_total'])), float(np.std(compute_metrics_runs['time_training_total']))],
@@ -167,6 +169,7 @@ def run_benchmarking(base_folder='results', config_path='config3.yaml',
         all_metrics = {
             "config_hash": file_name,
             "config": sweep_config,
+            "test_metrics_runs": test_metrics_runs,
             "test_metrics_mean_std": mean_std_dict,
             "oversmoothing_metrics_runs": oversmoothing_metrics,
             "oversmoothing_metrics_mean_std": oversmoothing_summary,
