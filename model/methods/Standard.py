@@ -17,6 +17,7 @@ def train_with_standard_loss(
     patience=20,
     debug=True,
     oversmoothing_every=20,
+    log_epoch_fn=None,
 ):
 
     per_epochs_oversmoothing = defaultdict(list)
@@ -54,18 +55,15 @@ def train_with_standard_loss(
             train_f1 = cls_evaluator.compute_f1(pred[train_idx], data.y[train_idx])
             val_f1 = cls_evaluator.compute_f1(pred[val_idx], data.y[val_idx])
 
-        if val_loss < best_val_loss:
+        is_best = val_loss < best_val_loss
+        if is_best:
             best_val_loss = val_loss
             best_model_state = copy.deepcopy(model.state_dict())
             epochs_no_improve = 0
         else:
             epochs_no_improve += 1
 
-        if epochs_no_improve >= patience:
-            print(f"Early stopping at epoch {epoch}")
-            model.load_state_dict(best_model_state)
-            break
-
+        os_entry = None
         if debug and epoch % oversmoothing_every == 0:
             train_oversmoothing = compute_oversmoothing_for_mask(
                 oversmoothing_evaluator, out, data.edge_index, data.train_mask
@@ -79,6 +77,8 @@ def train_with_standard_loss(
             for key, value in val_oversmoothing.items():
                 per_epochs_val_oversmoothing[key].append(value)
 
+            os_entry = {'train': dict(train_oversmoothing), 'val': dict(val_oversmoothing)}
+
             print(f"Epoch {epoch:03d} | Train Acc: {train_acc:.4f}, Val Acc: {val_acc:.4f} | "
                   f"Train F1: {train_f1:.4f}, Val F1: {val_f1:.4f}")
             print(f"Train DE: {train_oversmoothing['EDir']:.4f}, Val DE: {val_oversmoothing['EDir']:.4f} | "
@@ -88,12 +88,23 @@ def train_with_standard_loss(
                   f"Train NumRank: {train_oversmoothing['NumRank']:.4f}, Val NumRank: {val_oversmoothing['NumRank']:.4f} | "
                   f"Train Erank: {train_oversmoothing['Erank']:.4f}, Val Erank: {val_oversmoothing['Erank']:.4f}")
 
+        if log_epoch_fn is not None:
+            log_epoch_fn(epoch, loss_train, val_loss, train_acc, val_acc,
+                         train_f1=train_f1, val_f1=val_f1,
+                         oversmoothing=os_entry, is_best=is_best)
+
+        if epochs_no_improve >= patience:
+            print(f"Early stopping at epoch {epoch}")
+            model.load_state_dict(best_model_state)
+            break
+
     if best_model_state is not None:
         model.load_state_dict(best_model_state)
 
     return {
         'train_oversmoothing': dict(per_epochs_oversmoothing),
         'val_oversmoothing': dict(per_epochs_val_oversmoothing),
+        'stopped_at_epoch': epoch,
     }
 
 
@@ -107,4 +118,5 @@ class StandardMethodTrainer(BaseTrainer):
             total_epochs=d['epochs'], lr=d['lr'],
             weight_decay=d['weight_decay'], patience=d['patience'],
             oversmoothing_every=d['oversmoothing_every'],
+            log_epoch_fn=self.log_epoch,
         )

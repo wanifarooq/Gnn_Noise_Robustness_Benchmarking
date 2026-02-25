@@ -313,7 +313,7 @@ class NRGNN:
         
         return confident_edge_index, confident_nodes.cpu().numpy()
 
-    def train_single_epoch(self, epoch, train_indices, validation_indices):
+    def train_single_epoch(self, epoch, train_indices, validation_indices, log_epoch_fn=None):
         start_time = time.time()
         
         self.main_model.train()
@@ -385,28 +385,28 @@ class NRGNN:
         total_loss.backward()
         self.optimizer.step()
 
-        metrics = self.evaluate_epoch(epoch, train_indices, validation_indices, 
-                          predictor_edges, predictor_weights, 
-                          main_model_edges, main_model_weights, 
-                          total_loss, start_time)
+        metrics = self.evaluate_epoch(epoch, train_indices, validation_indices,
+                          predictor_edges, predictor_weights,
+                          main_model_edges, main_model_weights,
+                          total_loss, start_time, log_epoch_fn=log_epoch_fn)
         return metrics
 
-    def evaluate_epoch(self, epoch, train_indices, validation_indices, 
+    def evaluate_epoch(self, epoch, train_indices, validation_indices,
                       predictor_edges, predictor_weights,
-                      main_model_edges, main_model_weights, 
-                      total_loss, start_time):
+                      main_model_edges, main_model_weights,
+                      total_loss, start_time, log_epoch_fn=None):
         logging = False
         self.main_model.eval()
         self.node_predictor.eval()
         self.edge_weight_estimator.eval()
-        
+
         with torch.no_grad():
 
             predictor_output = self.node_predictor.forward(self.node_features, predictor_edges, predictor_weights)
             predictor_probabilities = F.softmax(predictor_output, dim=1)
 
             main_model_output = self.main_model.forward(self.node_features, main_model_edges, main_model_weights.detach())
-            
+
             # Compute metrics
             train_loss = F.cross_entropy(main_model_output[train_indices], self.node_labels[train_indices]).item()
             validation_loss = F.cross_entropy(main_model_output[validation_indices], self.node_labels[validation_indices]).item()
@@ -414,8 +414,11 @@ class NRGNN:
             train_accuracy = self.compute_accuracy(main_model_output[train_indices], self.node_labels[train_indices])
             validation_accuracy = self.compute_accuracy(main_model_output[validation_indices], self.node_labels[validation_indices])
             predictor_validation_accuracy = self.compute_accuracy(predictor_probabilities[validation_indices], self.node_labels[validation_indices])
-                
-            
+
+            train_f1 = None
+            validation_f1 = None
+            os_entry = None
+
             if self.debug_mode and epoch % self.oversmoothing_every == 0:
 
                 train_f1 = self.cls_evaluator.compute_f1(main_model_output[train_indices].argmax(dim=1), self.node_labels[train_indices])
@@ -426,7 +429,7 @@ class NRGNN:
                 val_mask = self._indices_to_mask(validation_indices, self.node_features.shape[0])
                 train_oversmoothing = compute_oversmoothing_for_mask(self.oversmoothing_evaluator, main_model_output, main_model_edges, train_mask)
                 validation_oversmoothing = compute_oversmoothing_for_mask(self.oversmoothing_evaluator, main_model_output, main_model_edges, val_mask)
-                
+
                 if train_oversmoothing is not None:
                     self.oversmoothing_metrics_history['train'].append(train_oversmoothing)
                 if validation_oversmoothing is not None:
@@ -434,7 +437,9 @@ class NRGNN:
 
                 train_metrics = train_oversmoothing if train_oversmoothing else {}
                 val_metrics = validation_oversmoothing if validation_oversmoothing else {}
-                    
+
+                os_entry = {'train': dict(train_metrics), 'val': dict(val_metrics)}
+
                 print(f"Epoch {epoch:03d} | Train Loss: {train_loss:.4f}, Val Loss: {validation_loss:.4f} | "
                         f"Train Acc: {train_accuracy:.4f}, Val Acc: {validation_accuracy:.4f} | "
                         f"Train F1: {train_f1:.4f}, Val F1: {validation_f1:.4f}")
@@ -454,10 +459,11 @@ class NRGNN:
                 self.best_predictor_edge_weights = predictor_weights.detach()
                 self.best_predictions = predictor_probabilities.detach()
                 self.best_predictor_weights = deepcopy(self.node_predictor.state_dict())
-                
+
                 self.confident_edge_index, self.confident_node_indices = self.identify_confident_edges(self.best_predictions)
 
-            if validation_loss < self.best_validation_loss:
+            is_best = validation_loss < self.best_validation_loss
+            if is_best:
                 self.best_validation_loss = validation_loss
                 self.best_edge_weights = main_model_weights.detach()
                 self.best_edge_indices = main_model_edges
@@ -465,6 +471,13 @@ class NRGNN:
                 self.early_stopping_counter = 0
             else:
                 self.early_stopping_counter += 1
+
+            if log_epoch_fn is not None:
+                log_epoch_fn(epoch, train_loss, validation_loss,
+                             float(train_accuracy), float(validation_accuracy),
+                             train_f1=train_f1 if logging else None,
+                             val_f1=validation_f1 if logging else None,
+                             oversmoothing=os_entry, is_best=is_best)
 
             # Early stopping
             if self.early_stopping_counter >= self.patience:
@@ -482,7 +495,8 @@ class NRGNN:
         if self.best_predictor_weights is not None:
             self.node_predictor.load_state_dict(self.best_predictor_weights)
 
-    def fit(self, features, adjacency_matrix, labels, train_indices, validation_indices):
+    def fit(self, features, adjacency_matrix, labels, train_indices, validation_indices,
+            log_epoch_fn=None):
 
         self.prepare_training_data(features, adjacency_matrix, labels, train_indices)
         self.train_indices = train_indices
@@ -495,7 +509,8 @@ class NRGNN:
         start_time = time.time()
         try:
             for epoch in range(self.max_epochs):
-                results = self.train_single_epoch(epoch, train_indices, validation_indices)
+                results = self.train_single_epoch(epoch, train_indices, validation_indices,
+                                                  log_epoch_fn=log_epoch_fn)
                 if results is not None:
                     train_metrics, val_metrics = results
                     for key, value in train_metrics.items():
@@ -510,7 +525,11 @@ class NRGNN:
         print(f"\nTraining completed in {total_training_time:.2f}s")
 
         self.load_best_model_weights()
-        return per_epochs_oversmoothing, per_epochs_val_oversmoothing
+        return {
+            'train_oversmoothing': dict(per_epochs_oversmoothing),
+            'val_oversmoothing': dict(per_epochs_val_oversmoothing),
+            'stopped_at_epoch': epoch,
+        }
 
     def test(self, test_indices):
         self.main_model.eval()
@@ -580,16 +599,13 @@ class NRGNNMethodTrainer(BaseTrainer):
         val_idx = d['val_mask'].nonzero(as_tuple=True)[0].cpu().numpy()
         self._test_idx = d['test_mask'].nonzero(as_tuple=True)[0].cpu().numpy()
 
-        train_oversmoothing, val_oversmoothing = self._nrgnn.fit(
+        return self._nrgnn.fit(
             d['data_for_training'].x.to(d['device']),
             adj,
             d['data_for_training'].y.to(d['device']),
             train_idx, val_idx,
+            log_epoch_fn=self.log_epoch,
         )
-        return {
-            'train_oversmoothing': dict(train_oversmoothing),
-            'val_oversmoothing': dict(val_oversmoothing),
-        }
 
     def evaluate(self):
         return self._nrgnn.test(self._test_idx)

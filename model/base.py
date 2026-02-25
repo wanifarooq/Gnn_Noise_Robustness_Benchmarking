@@ -1,5 +1,7 @@
 """BaseTrainer ABC — unified interface for all 13 GNN robustness trainers."""
 
+import json
+import os
 import time
 from abc import ABC, abstractmethod
 from copy import deepcopy
@@ -8,6 +10,7 @@ import torch
 import numpy as np
 
 from model.evaluation import evaluate_model, ZERO_CLS
+from sweep_utils import json_serializer
 
 
 class BaseTrainer(ABC):
@@ -32,6 +35,77 @@ class BaseTrainer(ABC):
     def __init__(self, init_data: dict, config: dict):
         self.init_data = init_data
         self.config = config
+        self.epoch_log: list = []
+        self.best_epoch: int | None = None
+        self.best_val_loss: float = float('inf')
+
+    # ── epoch logging ───────────────────────────────────────────────────
+
+    def log_epoch(self, epoch, train_loss, val_loss, train_acc, val_acc,
+                  *, train_f1=None, val_f1=None, oversmoothing=None,
+                  is_best=False):
+        """Record one epoch's metrics and optionally save a checkpoint."""
+        entry = {
+            'epoch': epoch,
+            'train_loss': float(train_loss) if train_loss is not None else None,
+            'val_loss': float(val_loss) if val_loss is not None else None,
+            'train_acc': float(train_acc) if train_acc is not None else None,
+            'val_acc': float(val_acc) if val_acc is not None else None,
+            'train_f1': float(train_f1) if train_f1 is not None else None,
+            'val_f1': float(val_f1) if val_f1 is not None else None,
+            'oversmoothing': oversmoothing,
+        }
+        self.epoch_log.append(entry)
+
+        if is_best:
+            self.best_epoch = epoch
+            self.best_val_loss = float(val_loss) if val_loss is not None else 0.0
+
+        run_dir = self.init_data.get('run_dir')
+        checkpoint_every = self.config.get('training', {}).get('checkpoint_every_epoch', True)
+        should_save = (checkpoint_every or is_best) and run_dir and self.supports_eval_only
+        if should_save:
+            vl = float(val_loss) if val_loss is not None else 0.0
+            fname = f"epoch_{epoch:03d}_valloss_{vl:.4f}.pt"
+            state = self.get_checkpoint_state()
+            torch.save(state, os.path.join(run_dir, fname))
+
+    def save_training_log(self, run_id, config, duration, stopped_at_epoch,
+                          final_result):
+        """Write training_log.json to the run directory."""
+        run_dir = self.init_data.get('run_dir')
+        if not run_dir:
+            return
+
+        best_ckpt = None
+        if self.best_epoch is not None and self.supports_eval_only:
+            best_ckpt = f"epoch_{self.best_epoch:03d}_valloss_{self.best_val_loss:.4f}.pt"
+
+        training_params = {
+            'method': self.init_data.get('method'),
+            'lr': self.init_data.get('lr'),
+            'weight_decay': self.init_data.get('weight_decay'),
+            'epochs': self.init_data.get('epochs'),
+            'patience': self.init_data.get('patience'),
+            'oversmoothing_every': self.init_data.get('oversmoothing_every'),
+        }
+
+        log = {
+            'run_id': run_id,
+            'config': config,
+            'training_params': training_params,
+            'duration_seconds': round(duration, 4),
+            'stopped_at_epoch': stopped_at_epoch,
+            'best_epoch': self.best_epoch,
+            'best_val_loss': self.best_val_loss if self.best_epoch is not None else None,
+            'best_checkpoint': best_ckpt,
+            'epoch_log': self.epoch_log,
+            'final_result': final_result,
+        }
+
+        path = os.path.join(run_dir, 'training_log.json')
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(log, f, indent=2, default=json_serializer)
 
     # ── template ─────────────────────────────────────────────────────────
 
@@ -39,27 +113,39 @@ class BaseTrainer(ABC):
         """Train + evaluate. Return standardised result dict."""
         t0 = time.perf_counter()
         train_out = self.train()
-        time_training = time.perf_counter() - t0
+        duration = time.perf_counter() - t0
+
+        stopped_at_epoch = train_out.get('stopped_at_epoch')
 
         flops_result = self.profile_flops()
 
-        t0 = time.perf_counter()
+        t0_eval = time.perf_counter()
         eval_result = self.evaluate()
-        time_inference = time.perf_counter() - t0
+        time_inference = time.perf_counter() - t0_eval
 
         epochs = self.init_data.get('epochs', 0)
         self.init_data['compute_info'] = {
             'flops_inference': flops_result['total_flops'],
             'flops_training_total': flops_result['total_flops'] * self.TRAINING_FLOPS_MULTIPLIER * epochs,
-            'time_training_total': round(time_training, 4),
+            'time_training_total': round(duration, 4),
             'time_inference': round(time_inference, 4),
         }
-        return self._make_result(
+        result = self._make_result(
             eval_result,
             train_out.get('train_oversmoothing', {}),
             train_out.get('val_oversmoothing'),
             reduce=train_out.get('reduce', True),
         )
+
+        self.save_training_log(
+            run_id=self.init_data.get('_run_id', 1),
+            config=self.init_data.get('_config', {}),
+            duration=duration,
+            stopped_at_epoch=stopped_at_epoch,
+            final_result=result,
+        )
+
+        return result
 
     @abstractmethod
     def train(self) -> dict:

@@ -142,7 +142,8 @@ class PiGnnTrainer:
             return performance_metrics, train_oversmoothing_metrics, val_oversmoothing_metrics
 
 
-    def train_model(self, model, graph_data, config=None, model_factory_function=None):
+    def train_model(self, model, graph_data, config=None, model_factory_function=None,
+                    log_epoch_fn=None):
         per_epochs_oversmoothing = defaultdict(list)
         per_epochs_val_oversmoothing = defaultdict(list)
         training_start_time = time.time()
@@ -286,21 +287,29 @@ class PiGnnTrainer:
                 self.training_history['val'].append(val_oversmoothing)
 
             # logging
+            os_entry = None
             if current_epoch % self.oversmoothing_every == 0:
                 logged_train_os, logged_val_os = self._log_training_progress(current_epoch, current_metrics, train_oversmoothing, val_oversmoothing)
                 for key, value in logged_train_os.items():
                     per_epochs_oversmoothing[key].append(value)
                 for key, value in logged_val_os.items():
                     per_epochs_val_oversmoothing[key].append(value)
+                os_entry = {'train': dict(logged_train_os), 'val': dict(logged_val_os)}
+
             # Early stopping
-            if current_metrics['val_loss'] < best_validation_loss:
+            is_best = current_metrics['val_loss'] < best_validation_loss
+            if log_epoch_fn is not None:
+                log_epoch_fn(current_epoch, current_metrics['train_loss'], current_metrics['val_loss'],
+                             current_metrics['train_acc'], current_metrics['val_acc'],
+                             train_f1=current_metrics['train_f1'], val_f1=current_metrics['val_f1'],
+                             oversmoothing=os_entry, is_best=is_best)
+            if is_best:
                 best_validation_loss = current_metrics['val_loss']
                 best_training_epoch = current_epoch
                 patience_counter = 0
                 best_model_weights = deepcopy(model.state_dict())
             else:
                 patience_counter += 1
-
 
             if patience_counter >= self.early_stop_patience:
                 print(f"Early stopping at epoch {current_epoch}, best epoch {best_training_epoch}")
@@ -315,6 +324,7 @@ class PiGnnTrainer:
         return {
             'train_oversmoothing': dict(per_epochs_oversmoothing),
             'val_oversmoothing': dict(per_epochs_val_oversmoothing),
+            'stopped_at_epoch': current_epoch,
         }
 
     def _log_training_progress(self, epoch, metrics, train_oversmoothing, val_oversmoothing):
@@ -377,4 +387,5 @@ class PiGnnMethodTrainer(BaseTrainer):
         return trainer.train_model(
             pi_gnn_model, d['data_for_training'],
             self.config, d['get_model'],
+            log_epoch_fn=self.log_epoch,
         )

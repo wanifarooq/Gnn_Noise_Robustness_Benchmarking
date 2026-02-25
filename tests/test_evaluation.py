@@ -242,7 +242,105 @@ def _make_dummy(init_data=None):
     """Create a DummyTrainer instance with optional init_data overrides."""
     dummy = DummyTrainer.__new__(DummyTrainer)
     dummy.init_data = init_data or {'compute_info': dict(_ZERO_COMPUTE_INFO)}
+    dummy.config = {}
+    dummy.epoch_log = []
+    dummy.best_epoch = None
+    dummy.best_val_loss = float('inf')
     return dummy
+
+
+# ── Phase 4: log_epoch and training log ──────────────────────────────────────
+
+class TestLogEpoch:
+    """Test BaseTrainer.log_epoch() epoch logging."""
+
+    def test_log_epoch_populates_epoch_log(self):
+        dummy = _make_dummy()
+        dummy.log_epoch(1, 1.5, 1.2, 0.3, 0.35, train_f1=0.2, val_f1=0.25)
+        dummy.log_epoch(2, 1.0, 0.9, 0.5, 0.55, train_f1=0.4, val_f1=0.45)
+        assert len(dummy.epoch_log) == 2
+        assert dummy.epoch_log[0]['epoch'] == 1
+        assert dummy.epoch_log[0]['train_loss'] == 1.5
+        assert dummy.epoch_log[1]['val_acc'] == 0.55
+
+    def test_log_epoch_tracks_best(self):
+        dummy = _make_dummy()
+        dummy.log_epoch(1, 1.5, 1.2, 0.3, 0.35, is_best=True)
+        assert dummy.best_epoch == 1
+        assert dummy.best_val_loss == 1.2
+
+        dummy.log_epoch(2, 1.0, 0.8, 0.5, 0.55, is_best=True)
+        assert dummy.best_epoch == 2
+        assert dummy.best_val_loss == 0.8
+
+    def test_log_epoch_not_best_keeps_previous(self):
+        dummy = _make_dummy()
+        dummy.log_epoch(1, 1.5, 1.2, 0.3, 0.35, is_best=True)
+        dummy.log_epoch(2, 1.0, 1.5, 0.5, 0.55, is_best=False)
+        assert dummy.best_epoch == 1
+        assert dummy.best_val_loss == 1.2
+
+    def test_log_epoch_oversmoothing_null(self):
+        dummy = _make_dummy()
+        dummy.log_epoch(1, 1.5, 1.2, 0.3, 0.35)
+        assert dummy.epoch_log[0]['oversmoothing'] is None
+
+    def test_log_epoch_oversmoothing_present(self):
+        dummy = _make_dummy()
+        os_data = {'train': {'EDir': 1.0}, 'val': {'EDir': 0.8}}
+        dummy.log_epoch(1, 1.5, 1.2, 0.3, 0.35, oversmoothing=os_data)
+        assert dummy.epoch_log[0]['oversmoothing'] == os_data
+
+    def test_log_epoch_saves_checkpoint_on_best(self, tmp_path):
+        model = nn.Linear(3, 2)
+        dummy = _make_dummy({
+            'backbone_model': model,
+            'run_dir': str(tmp_path),
+            'compute_info': dict(_ZERO_COMPUTE_INFO),
+        })
+        dummy.log_epoch(5, 1.0, 0.5, 0.6, 0.65, is_best=True)
+        expected_file = tmp_path / "epoch_005_valloss_0.5000.pt"
+        assert expected_file.exists()
+
+    def test_log_epoch_checkpoint_saved_every_epoch(self, tmp_path):
+        model = nn.Linear(3, 2)
+        dummy = _make_dummy({
+            'backbone_model': model,
+            'run_dir': str(tmp_path),
+            'compute_info': dict(_ZERO_COMPUTE_INFO),
+        })
+        dummy.log_epoch(5, 1.0, 0.5, 0.6, 0.65, is_best=False)
+        assert len(list(tmp_path.glob("epoch_*.pt"))) == 1
+
+    def test_save_training_log(self, tmp_path):
+        import json
+        dummy = _make_dummy({
+            'run_dir': str(tmp_path),
+            'method': 'standard',
+            'lr': 0.01,
+            'weight_decay': 5e-4,
+            'epochs': 100,
+            'patience': 20,
+            'oversmoothing_every': 20,
+            'compute_info': dict(_ZERO_COMPUTE_INFO),
+        })
+        dummy.epoch_log.append({'epoch': 1, 'train_loss': 1.5, 'val_loss': 1.2})
+        dummy.best_epoch = 1
+        dummy.best_val_loss = 1.2
+        dummy.save_training_log(
+            run_id=1, config={'seed': 42}, duration=5.0,
+            stopped_at_epoch=10, final_result={'test_cls': {}}
+        )
+        log_file = tmp_path / 'training_log.json'
+        assert log_file.exists()
+        with open(log_file) as f:
+            log = json.load(f)
+        assert log['run_id'] == 1
+        assert log['duration_seconds'] == 5.0
+        assert log['stopped_at_epoch'] == 10
+        assert log['best_epoch'] == 1
+        assert len(log['epoch_log']) == 1
+        assert 'training_params' in log
 
 
 # ── Phase 2: val_oversmoothing in _make_result ──────────────────────────────

@@ -242,7 +242,8 @@ class GraphCommunityDefenseTrainer:
                                    learning_rate: float = 0.005,
                                    weight_decay_rate: float = 1e-3,
                                    enable_debug: bool = True,
-                                   oversmoothing_every: int = 20):
+                                   oversmoothing_every: int = 20,
+                                   log_epoch_fn=None):
 
         training_start_time = time.time()
         per_epochs_oversmoothing = defaultdict(list)
@@ -338,6 +339,7 @@ class GraphCommunityDefenseTrainer:
                     f"Train F1: {train_f1:.4f}, Val F1: {val_f1:.4f}"
                 )
 
+                os_entry = None
                 if epoch % oversmoothing_every == 0:
                     emb = node_embeddings.detach()
 
@@ -347,6 +349,8 @@ class GraphCommunityDefenseTrainer:
                     val_metrics = compute_oversmoothing_for_mask(
                         self.oversmoothing_evaluator, emb, edge_index, self.val_node_mask
                     )
+
+                    os_entry = {'train': dict(train_metrics), 'val': dict(val_metrics)}
 
                     print(
                         f"Epoch {epoch}: | Oversmoothing | "
@@ -370,12 +374,18 @@ class GraphCommunityDefenseTrainer:
                         per_epochs_val_oversmoothing[key].append(value)
 
                 # Early stopping
-                if validation_loss < best_validation_loss:
+                is_best = validation_loss < best_validation_loss
+                if is_best:
                     best_validation_loss = validation_loss
                     best_model_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
                     epochs_without_improvement = 0
                 else:
                     epochs_without_improvement += 1
+
+                if log_epoch_fn is not None:
+                    log_epoch_fn(epoch, train_loss, validation_loss, train_acc, val_acc,
+                                 train_f1=train_f1, val_f1=val_f1,
+                                 oversmoothing=os_entry, is_best=is_best)
 
                 if epochs_without_improvement >= early_stopping_patience:
                     if self.verbose and enable_debug:
@@ -392,6 +402,7 @@ class GraphCommunityDefenseTrainer:
         return {
             'train_oversmoothing': dict(per_epochs_oversmoothing),
             'val_oversmoothing': dict(per_epochs_val_oversmoothing),
+            'stopped_at_epoch': epoch,
         }
 
 
@@ -421,4 +432,5 @@ class CommunityDefenseMethodTrainer(BaseTrainer):
             weight_decay_rate=d['weight_decay'],
             enable_debug=True,
             oversmoothing_every=d['oversmoothing_every'],
+            log_epoch_fn=self.log_epoch,
         )

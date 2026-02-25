@@ -115,7 +115,8 @@ class CRGNNModel:
         self.oversmoothing_evaluator = OversmoothingMetrics(device=self.device)
         self.cls_evaluator = ClassificationMetrics(average='macro')
 
-    def train_model(self, backbone_model, graph_data, model_config, model_factory_function):
+    def train_model(self, backbone_model, graph_data, model_config, model_factory_function,
+                    log_epoch_fn=None):
         per_epochs_oversmoothing = defaultdict(list)
         per_epochs_val_oversmoothing = defaultdict(list)
         graph_data = graph_data.to(self.device)
@@ -176,11 +177,12 @@ class CRGNNModel:
                                              graph_data.x, graph_data.edge_index,
                                              noisy_labels, val_mask)
             
+            os_entry = None
             if epoch % self.oversmoothing_every == 0:
                 with torch.no_grad():
                     embeddings = backbone(Data(x=graph_data.x, edge_index=graph_data.edge_index))
                     embeddings = adapter(embeddings)
-                    
+
                     train_oversmooth_metrics = compute_oversmoothing_for_mask(
                         self.oversmoothing_evaluator, embeddings, graph_data.edge_index, train_mask
                     )
@@ -191,6 +193,7 @@ class CRGNNModel:
                         per_epochs_oversmoothing[key].append(value)
                     for key, value in val_oversmooth_metrics.items():
                         per_epochs_val_oversmoothing[key].append(value)
+                    os_entry = {'train': dict(train_oversmooth_metrics), 'val': dict(val_oversmooth_metrics)}
                     print(f"Epoch {epoch+1:03d} | Train Acc: {train_acc:.4f}, Val Acc: {val_acc:.4f}, Total Loss: {loss:.4f}")
                     print(f"Train EDir: {train_oversmooth_metrics['EDir']:.4f}, Val EDir: {val_oversmooth_metrics['EDir']:.4f} | "
                           f"Train EDir_trad: {train_oversmooth_metrics['EDir_traditional']:.4f}, Val EDir_trad: {val_oversmooth_metrics['EDir_traditional']:.4f} | "
@@ -200,9 +203,14 @@ class CRGNNModel:
                           f"Train Erank: {train_oversmooth_metrics['Erank']:.4f}, Val Erank: {val_oversmooth_metrics['Erank']:.4f}")
             elif epoch % 10 == 0 or epoch < 5:
                 print(f"Epoch {epoch+1:03d} | Train Acc: {train_acc:.4f}, Val Acc: {val_acc:.4f}, Total Loss: {loss:.4f}")
-            
+
             # Early stopping
-            if val_loss < self.best_val_loss: #if val_acc > self.best_val_acc:
+            is_best = val_loss < self.best_val_loss
+            if log_epoch_fn is not None:
+                log_epoch_fn(epoch, loss, val_loss, train_acc, val_acc,
+                             train_f1=None, val_f1=None,
+                             oversmoothing=os_entry, is_best=is_best)
+            if is_best: #if val_acc > self.best_val_acc:
                 self.best_val_loss = val_loss #self.best_val_acc = val_acc
                 self.early_stop_counter = 0
                 self.best_weights = {
@@ -231,6 +239,7 @@ class CRGNNModel:
         return {
             'train_oversmoothing': dict(per_epochs_oversmoothing),
             'val_oversmoothing': dict(per_epochs_val_oversmoothing),
+            'stopped_at_epoch': epoch,
         }
 
     def _train_step(self, backbone, adapter, proj_head, class_head, 
@@ -323,6 +332,7 @@ class CRGNNMethodTrainer(BaseTrainer):
         return self._cr.train_model(
             d['backbone_model'], d['data_for_training'],
             d['backbone_model'], d['get_model'],
+            log_epoch_fn=self.log_epoch,
         )
 
     def profile_flops(self):

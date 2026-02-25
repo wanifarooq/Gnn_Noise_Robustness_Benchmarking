@@ -72,7 +72,7 @@ class GraphCleanerNoiseDetector:
         
         return metrics_dict
 
-    def _train_base_neural_network(self, graph_data, neural_network_model, total_training_epochs=200):
+    def _train_base_neural_network(self, graph_data, neural_network_model, total_training_epochs=200, log_epoch_fn=None):
 
         print("Training base GNN for GraphCleaner")
         training_start_time = time.time()
@@ -109,27 +109,30 @@ class GraphCleanerNoiseDetector:
             with torch.no_grad():
                 model_output = neural_network_model(graph_data)
                 current_metrics = self._calculate_training_metrics(graph_data, neural_network_model, model_output)
-                
+
+                os_entry = None
                 if (current_epoch + 1) % self.oversmoothing_every == 0:
                     train_oversmoothing_metrics = compute_oversmoothing_for_mask(
                         self.oversmoothing_calculator, model_output, graph_data.edge_index, graph_data.train_mask)
                     val_oversmoothing_metrics = compute_oversmoothing_for_mask(
                         self.oversmoothing_calculator, model_output, graph_data.edge_index, graph_data.val_mask)
-                    
+
+                    os_entry = {'train': dict(train_oversmoothing_metrics), 'val': dict(val_oversmoothing_metrics)}
+
                     train_dirichlet_energy = train_oversmoothing_metrics.get('EDir', 0.0) if train_oversmoothing_metrics else 0.0
                     train_dirichlet_traditional = train_oversmoothing_metrics.get('EDir_traditional', 0.0) if train_oversmoothing_metrics else 0.0
                     train_effective_projection = train_oversmoothing_metrics.get('EProj', 0.0) if train_oversmoothing_metrics else 0.0
                     train_mean_absolute_deviation = train_oversmoothing_metrics.get('MAD', 0.0) if train_oversmoothing_metrics else 0.0
                     train_numerical_rank = train_oversmoothing_metrics.get('NumRank', 0.0) if train_oversmoothing_metrics else 0.0
                     train_effective_rank = train_oversmoothing_metrics.get('Erank', 0.0) if train_oversmoothing_metrics else 0.0
-                    
+
                     val_dirichlet_energy = val_oversmoothing_metrics.get('EDir', 0.0) if val_oversmoothing_metrics else 0.0
                     val_dirichlet_traditional = val_oversmoothing_metrics.get('EDir_traditional', 0.0) if val_oversmoothing_metrics else 0.0
                     val_effective_projection = val_oversmoothing_metrics.get('EProj', 0.0) if val_oversmoothing_metrics else 0.0
                     val_mean_absolute_deviation = val_oversmoothing_metrics.get('MAD', 0.0) if val_oversmoothing_metrics else 0.0
                     val_numerical_rank = val_oversmoothing_metrics.get('NumRank', 0.0) if val_oversmoothing_metrics else 0.0
                     val_effective_rank = val_oversmoothing_metrics.get('Erank', 0.0) if val_oversmoothing_metrics else 0.0
-                    
+
                     print(f"Epoch {current_epoch:03d} | Train Loss: {current_metrics['train_loss']:.4f}, Val Loss: {current_metrics['val_loss']:.4f} | "
                         f"Train Acc: {current_metrics['train_acc']:.4f}, Val Acc: {current_metrics['val_acc']:.4f} | "
                         f"Train F1: {current_metrics['train_f1']:.4f}, Val F1: {current_metrics['val_f1']:.4f}")
@@ -145,16 +148,24 @@ class GraphCleanerNoiseDetector:
                         f"Train Acc: {current_metrics['train_acc']:.4f}, Val Acc: {current_metrics['val_acc']:.4f} | "
                         f"Train F1: {current_metrics['train_f1']:.4f}, Val F1: {current_metrics['val_f1']:.4f}")
 
-                if current_metrics['val_loss'] < best_validation_loss:
+                is_best = current_metrics['val_loss'] < best_validation_loss
+                if is_best:
                     best_validation_loss = current_metrics['val_loss']
                     optimal_model_state = copy.deepcopy(neural_network_model.state_dict())
                     optimal_predictions = model_output.cpu().detach().numpy()
                     patience_counter = 0
                 else:
                     patience_counter += 1
-                    if patience_counter >= self.early_stopping_patience:
-                        print(f"Early stopping triggered at epoch {current_epoch+1}")
-                        break
+
+                if log_epoch_fn is not None:
+                    log_epoch_fn(current_epoch, current_metrics['train_loss'], current_metrics['val_loss'],
+                                 current_metrics['train_acc'], current_metrics['val_acc'],
+                                 train_f1=current_metrics['train_f1'], val_f1=current_metrics['val_f1'],
+                                 oversmoothing=os_entry, is_best=is_best)
+
+                if patience_counter >= self.early_stopping_patience:
+                    print(f"Early stopping triggered at epoch {current_epoch+1}")
+                    break
 
             prediction_history_list.append(model_output.cpu().detach().numpy())
 
@@ -420,7 +431,9 @@ class GraphCleanerNoiseDetector:
         else:
             graph_data.held_mask = graph_data.test_mask
 
-        # Train base GNN model on noisy training data
+        # Train base GNN model on noisy training data (noise-detection phase;
+        # intentionally not logged via log_epoch_fn — this is a disposable
+        # preprocessing model, not the final training run).
         prediction_history, optimal_predictions, trained_neural_network = self._train_base_neural_network(
             graph_data, neural_network_model, self.training_epochs
         )
@@ -547,4 +560,5 @@ class GraphCleanerMethodTrainer(BaseTrainer):
             total_epochs=d['epochs'], lr=d['lr'],
             weight_decay=d['weight_decay'], patience=d['patience'],
             oversmoothing_every=d['oversmoothing_every'],
+            log_epoch_fn=self.log_epoch,
         )

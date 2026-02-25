@@ -291,6 +291,45 @@ def test_checkpoint_roundtrip(method, tmp_path):
     assert result_eval['test_cls']['f1'] == pytest.approx(result_train['test_cls']['f1'], abs=1e-5)
 
 
+@pytest.mark.parametrize('method', ['standard'])
+def test_training_log_written(method, tmp_path):
+    """run_experiment writes training_log.json when run_dir is provided."""
+    import json
+    config = _make_config(method)
+    run_dir = str(tmp_path / 'run_1')
+    ckpt = str(tmp_path / 'best_run_1.pt')
+
+    result = run_experiment(config, run_id=1, checkpoint_path=ckpt, run_dir=run_dir)
+
+    # training_log.json should exist
+    log_path = os.path.join(run_dir, 'training_log.json')
+    assert os.path.exists(log_path), "training_log.json not created"
+
+    with open(log_path) as f:
+        log = json.load(f)
+
+    # Required top-level keys
+    for key in ('run_id', 'config', 'training_params', 'duration_seconds',
+                'stopped_at_epoch', 'best_epoch', 'epoch_log', 'final_result'):
+        assert key in log, f"Missing key '{key}' in training_log.json"
+
+    # epoch_log is a non-empty list
+    assert isinstance(log['epoch_log'], list)
+    assert len(log['epoch_log']) > 0
+
+    # Each entry has expected fields
+    entry = log['epoch_log'][0]
+    for field in ('epoch', 'train_loss', 'val_loss', 'train_acc', 'val_acc'):
+        assert field in entry, f"Missing field '{field}' in epoch_log entry"
+
+    # Best checkpoint file should exist (standard has supports_eval_only=True)
+    assert os.path.exists(ckpt), "Best checkpoint not created"
+
+    # Per-epoch checkpoint files in run_dir (at least one for best epoch)
+    epoch_ckpts = [f for f in os.listdir(run_dir) if f.startswith('epoch_') and f.endswith('.pt')]
+    assert len(epoch_ckpts) >= 1, "No per-epoch checkpoints saved"
+
+
 def test_eval_only_blocked_for_unsupported_method(tmp_path):
     """eval_only raises NotImplementedError for methods that don't support it."""
     config = _make_config('cr_gnn')

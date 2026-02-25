@@ -407,7 +407,7 @@ class GNNCleanerTrainer:
         
         return evaluation_results
 
-    def execute_full_training(self, enable_debug_output=True):
+    def execute_full_training(self, enable_debug_output=True, log_epoch_fn=None):
         per_epochs_oversmoothing = defaultdict(list)
         per_epochs_val_oversmoothing = defaultdict(list)
         training_start_time = time.time()
@@ -425,7 +425,8 @@ class GNNCleanerTrainer:
             
             train_oversmoothing_metrics = None
             validation_oversmoothing_metrics = None
-            
+            os_entry = None
+
             if training_epoch % oversmoothing_calculation_interval == 0 or training_epoch == self.max_training_epochs - 1:
                 try:
                     current_embeddings = self.gnn_model(self.data)
@@ -448,8 +449,11 @@ class GNNCleanerTrainer:
                     for key, value in validation_oversmoothing_metrics.items():
                         per_epochs_val_oversmoothing[key].append(value)
 
+                os_entry = {'train': dict(train_oversmoothing_metrics), 'val': dict(validation_oversmoothing_metrics)}
+
             # Early stopping
-            if current_metrics['val_loss'] < best_validation_loss:
+            is_best = current_metrics['val_loss'] < best_validation_loss
+            if is_best:
                 best_validation_loss = current_metrics['val_loss']
                 best_model_checkpoint = {
                     "gnn_model": self.gnn_model.state_dict(),
@@ -458,15 +462,10 @@ class GNNCleanerTrainer:
                 early_stopping_counter = 0
             else:
                 early_stopping_counter += 1
-            
-            if early_stopping_counter >= self.early_stopping_patience:
-                if enable_debug_output:
-                    print(f"Early stopping triggered at epoch {training_epoch}")
-                break
 
             if enable_debug_output:
                 newly_selected_count = self.expanding_clean_sample_mask.sum().item() - self.initial_clean_mask.sum().item()
-                
+
                 if training_epoch % oversmoothing_calculation_interval == 0 or training_epoch == self.max_training_epochs - 1:
 
                     train_energy_direction = train_oversmoothing_metrics['EDir'] if train_oversmoothing_metrics else 0.0
@@ -475,14 +474,14 @@ class GNNCleanerTrainer:
                     train_mean_absolute_deviation = train_oversmoothing_metrics['MAD'] if train_oversmoothing_metrics else 0.0
                     train_numerical_rank = train_oversmoothing_metrics['NumRank'] if train_oversmoothing_metrics else 0.0
                     train_e_rank = train_oversmoothing_metrics['Erank'] if train_oversmoothing_metrics else 0.0
-                    
+
                     val_energy_direction = validation_oversmoothing_metrics['EDir'] if validation_oversmoothing_metrics else 0.0
                     val_energy_direction_traditional = validation_oversmoothing_metrics['EDir_traditional'] if validation_oversmoothing_metrics else 0.0
                     val_energy_projection = validation_oversmoothing_metrics['EProj'] if validation_oversmoothing_metrics else 0.0
                     val_mean_absolute_deviation = validation_oversmoothing_metrics['MAD'] if validation_oversmoothing_metrics else 0.0
                     val_numerical_rank = validation_oversmoothing_metrics['NumRank'] if validation_oversmoothing_metrics else 0.0
                     val_e_rank = validation_oversmoothing_metrics['Erank'] if validation_oversmoothing_metrics else 0.0
-                    
+
                     print(f"Epoch {training_epoch+1:03d} | Train Loss: {epoch_training_loss:.4f}, Val Loss: {current_metrics['val_loss']:.4f} | "
                         f"Train Acc: {current_metrics['train_acc']:.4f}, Val Acc: {current_metrics['val_acc']:.4f} | "
                         f"Train F1: {current_metrics['train_f1']:.4f}, Val F1: {current_metrics['val_f1']:.4f} | "
@@ -499,6 +498,17 @@ class GNNCleanerTrainer:
                         f"Train Acc: {current_metrics['train_acc']:.4f}, Val Acc: {current_metrics['val_acc']:.4f} | "
                         f"Train F1: {current_metrics['train_f1']:.4f}, Val F1: {current_metrics['val_f1']:.4f} | "
                         f"Newly Selected: {newly_selected_count}")
+
+            if log_epoch_fn is not None:
+                log_epoch_fn(training_epoch, epoch_training_loss, current_metrics['val_loss'],
+                             current_metrics['train_acc'], current_metrics['val_acc'],
+                             train_f1=current_metrics['train_f1'], val_f1=current_metrics['val_f1'],
+                             oversmoothing=os_entry, is_best=is_best)
+
+            if early_stopping_counter >= self.early_stopping_patience:
+                if enable_debug_output:
+                    print(f"Early stopping triggered at epoch {training_epoch}")
+                break
         
         if best_model_checkpoint is not None:
             self.gnn_model.load_state_dict(best_model_checkpoint["gnn_model"])
@@ -512,8 +522,9 @@ class GNNCleanerTrainer:
         return {
             'train_oversmoothing': dict(per_epochs_oversmoothing),
             'val_oversmoothing': dict(per_epochs_val_oversmoothing),
+            'stopped_at_epoch': training_epoch,
         }
-    
+
     def get_oversmoothing_training_history(self):
         return self.oversmoothing_training_history
 
@@ -539,4 +550,4 @@ class GNNCleanerMethodTrainer(BaseTrainer):
             gnn_cleaner_config, d['data_for_training'],
             d['device'], d['num_classes'], d['backbone_model'],
         )
-        return trainer.execute_full_training(enable_debug_output=True)
+        return trainer.execute_full_training(enable_debug_output=True, log_epoch_fn=self.log_epoch)

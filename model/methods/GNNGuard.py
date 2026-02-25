@@ -124,7 +124,8 @@ class GNNGuardTrainer:
         elif hasattr(self.model, 'initialize'):
             self.model.initialize()
 
-    def train_model(self, node_features=None, node_labels=None, max_epochs=200, verbose=True, patience=5):
+    def train_model(self, node_features=None, node_labels=None, max_epochs=200, verbose=True, patience=5,
+                    log_epoch_fn=None):
         self._reset_model_parameters()
 
         if node_features is not None:
@@ -136,19 +137,19 @@ class GNNGuardTrainer:
             self._convert_sparse_matrix_to_torch_tensor(self.adjacency_matrix)
         )
 
-        train_oversmoothing, val_oversmoothing = self._train_with_early_stopping(
+        return self._train_with_early_stopping(
             self.node_labels,
             self.train_indices,
             self.val_indices,
             self.test_indices,
             max_epochs,
             patience,
-            verbose
+            verbose,
+            log_epoch_fn=log_epoch_fn,
         )
-        return train_oversmoothing, val_oversmoothing
     
-    def _train_with_early_stopping(self, labels, train_indices, val_indices, test_indices, 
-                                  max_epochs, patience, verbose):
+    def _train_with_early_stopping(self, labels, train_indices, val_indices, test_indices,
+                                  max_epochs, patience, verbose, log_epoch_fn=None):
 
         if verbose:
             print('Training GNNGuard model')
@@ -196,6 +197,8 @@ class GNNGuardTrainer:
                 val_node_mask[val_indices] = True
                 
                 edge_connectivity = self.normalized_adjacency._indices()
+                train_oversmoothing_metrics = None
+                val_oversmoothing_metrics = None
                 if epoch % self.oversmoothing_every == 0:
                     train_oversmoothing_metrics = compute_oversmoothing_for_mask(
                         self.oversmoothing_evaluator, train_output, edge_connectivity, train_node_mask)
@@ -212,9 +215,15 @@ class GNNGuardTrainer:
                 self._log_training_progress(epoch, train_loss, val_loss, train_accuracy, val_accuracy,
                                           train_f1_score, val_f1_score, train_oversmoothing_metrics,
                                           val_oversmoothing_metrics)
-            
-            # Early stopping
-            if val_loss < best_validation_loss:
+
+            # Build oversmoothing entry for callback
+            os_entry = None
+            if epoch % self.oversmoothing_every == 0:
+                os_entry = {'train': dict(train_oversmoothing_metrics), 'val': dict(val_oversmoothing_metrics)}
+
+            # Early stopping tracking
+            is_best = val_loss < best_validation_loss
+            if is_best:
                 best_validation_loss = val_loss
                 self.model_output = val_output
                 best_model_weights = deepcopy(self.model.state_dict())
@@ -222,14 +231,23 @@ class GNNGuardTrainer:
             else:
                 epochs_no_improve += 1
 
+            if log_epoch_fn is not None:
+                log_epoch_fn(epoch, train_loss, val_loss, train_accuracy, val_accuracy,
+                             train_f1=train_f1_score, val_f1=val_f1_score,
+                             oversmoothing=os_entry, is_best=is_best)
+
             if epochs_no_improve >= patience:
                 if verbose:
                     print(f'Early stopping at epoch {epoch}, best_val_loss={best_validation_loss:.4f}')
                 break
-        
+
         self.model.load_state_dict(best_model_weights)
-        
-        return per_epochs_oversmoothing, per_epochs_val_oversmoothing
+
+        return {
+            'train_oversmoothing': dict(per_epochs_oversmoothing),
+            'val_oversmoothing': dict(per_epochs_val_oversmoothing),
+            'stopped_at_epoch': epoch,
+        }
 
     def _log_training_progress(self, epoch, train_loss, val_loss, train_acc, val_acc, 
                              train_f1, val_f1, train_oversmoothing, val_oversmoothing):
@@ -458,17 +476,14 @@ class GNNGuardMethodTrainer(BaseTrainer):
         )
         self._trainer.prepare_data()
 
-        train_oversmoothing, val_oversmoothing = self._trainer.train_model(
+        return self._trainer.train_model(
             node_features=d['data_for_training'].x,
             node_labels=d['data_for_training'].y,
             max_epochs=d['epochs'],
             verbose=True,
             patience=d['patience'],
+            log_epoch_fn=self.log_epoch,
         )
-        return {
-            'train_oversmoothing': dict(train_oversmoothing),
-            'val_oversmoothing': dict(val_oversmoothing),
-        }
 
     def evaluate(self):
         return self._trainer.evaluate_model()

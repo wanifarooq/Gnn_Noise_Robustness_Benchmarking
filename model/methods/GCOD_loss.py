@@ -522,7 +522,7 @@ class GCODTrainer:
         plt.savefig('output/training_metrics.png', dpi=300, bbox_inches='tight')
         #plt.show()
 
-    def train_full_model(self):
+    def train_full_model(self, log_epoch_fn=None):
         per_epochs_train_oversmoothing = defaultdict(list)
         per_epochs_val_oversmoothing = defaultdict(list)
         if self.debug:
@@ -560,19 +560,7 @@ class GCODTrainer:
             self.train_metrics_history['val']['accuracy'].append(val_ce_metrics['accuracy'])
             self.train_metrics_history['val']['f1'].append(val_ce_metrics['f1'])
 
-            # Eearly Stopping
-            if val_loss_ce < self.best_val_loss:
-                self.best_val_loss = val_loss_ce
-                self.best_model_state = deepcopy(self.model.state_dict())
-                self.epochs_without_improvement = 0
-            else:
-                self.epochs_without_improvement += 1
-
-            if self.epochs_without_improvement >= self.patience:
-                if self.debug:
-                    print(f"Early stopping triggered at epoch {epoch}")
-                break
-
+            os_entry = None
             if self.debug and epoch % self.oversmoothing_every == 0:
                 with torch.no_grad():
                     u_mean = self.gcod_loss_fn.uncertainty_params.mean().item()
@@ -601,20 +589,40 @@ class GCODTrainer:
                 train_mad = train_os.get('MAD', 0.0)
                 train_num_rank = train_os.get('NumRank', 0.0)
                 train_effective_rank = train_os.get('Erank', 0.0)
-                
+
                 val_edir = val_os.get('EDir', 0.0)
                 val_edir_traditional = val_os.get('EDir_traditional', 0.0)
                 val_eproj = val_os.get('EProj', 0.0)
                 val_mad = val_os.get('MAD', 0.0)
                 val_num_rank = val_os.get('NumRank', 0.0)
                 val_effective_rank = val_os.get('Erank', 0.0)
-                
+
                 print(f"Train DE: {train_edir:.4f}, Val DE: {val_edir:.4f} | "
                     f"Train DE_trad: {train_edir_traditional:.4f}, Val DE_trad: {val_edir_traditional:.4f} | "
                     f"Train EProj: {train_eproj:.4f}, Val EProj: {val_eproj:.4f} | "
                     f"Train MAD: {train_mad:.4f}, Val MAD: {val_mad:.4f} | "
                     f"Train NumRank: {train_num_rank:.4f}, Val NumRank: {val_num_rank:.4f} | "
                     f"Train Erank: {train_effective_rank:.4f}, Val Erank: {val_effective_rank:.4f}")
+                os_entry = {'train': dict(train_os), 'val': dict(val_os)}
+
+            # Early stopping
+            is_best = val_loss_ce < self.best_val_loss
+            if log_epoch_fn is not None:
+                log_epoch_fn(epoch, train_metrics['loss'], val_loss_ce,
+                             train_metrics['accuracy'], val_ce_metrics['accuracy'],
+                             train_f1=train_metrics['f1'], val_f1=val_ce_metrics['f1'],
+                             oversmoothing=os_entry, is_best=is_best)
+            if is_best:
+                self.best_val_loss = val_loss_ce
+                self.best_model_state = deepcopy(self.model.state_dict())
+                self.epochs_without_improvement = 0
+            else:
+                self.epochs_without_improvement += 1
+
+            if self.epochs_without_improvement >= self.patience:
+                if self.debug:
+                    print(f"Early stopping triggered at epoch {epoch}")
+                break
         
         if self.debug:
             print("\nGenerating plots")
@@ -628,6 +636,7 @@ class GCODTrainer:
             'train_oversmoothing': dict(per_epochs_train_oversmoothing),
             'val_oversmoothing': dict(per_epochs_val_oversmoothing),
             'reduce': False,
+            'stopped_at_epoch': epoch,
         }
 
 
@@ -652,4 +661,4 @@ class GCODMethodTrainer(BaseTrainer):
             debug=True,
             oversmoothing_every=d['oversmoothing_every'],
         )
-        return trainer.train_full_model()
+        return trainer.train_full_model(log_epoch_fn=self.log_epoch)

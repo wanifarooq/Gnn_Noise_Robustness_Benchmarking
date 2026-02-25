@@ -126,7 +126,8 @@ def initialize_experiment(config, run_id=1):
         'get_model': get_model,
     }
 
-def run_experiment(config, run_id=1, *, checkpoint_path=None, eval_only=False):
+def run_experiment(config, run_id=1, *, checkpoint_path=None, eval_only=False,
+                   run_dir=None):
     """Run a single experiment: setup -> train -> evaluate via registry.
 
     Parameters
@@ -138,9 +139,16 @@ def run_experiment(config, run_id=1, *, checkpoint_path=None, eval_only=False):
     eval_only : bool
         If *True*, skip training and evaluate from a saved checkpoint.
         Requires *checkpoint_path* to point at an existing file.
+    run_dir : str or None
+        Directory for per-run training logs and per-epoch checkpoints.
     """
     discover_trainers()
     init_data = initialize_experiment(config, run_id)
+    init_data['run_dir'] = run_dir
+    init_data['_run_id'] = run_id
+    init_data['_config'] = config
+    if run_dir:
+        os.makedirs(run_dir, exist_ok=True)
     trainer = get_trainer(init_data['method'], init_data, config)
 
     if eval_only:
@@ -176,9 +184,23 @@ def run_experiment(config, run_id=1, *, checkpoint_path=None, eval_only=False):
         ckpt_dir = os.path.dirname(checkpoint_path)
         if ckpt_dir:
             os.makedirs(ckpt_dir, exist_ok=True)
-        state = trainer.get_checkpoint_state()
-        state['train_oversmoothing'] = result.get('train_oversmoothing', {})
-        state['val_oversmoothing'] = result.get('val_oversmoothing', {})
-        torch.save(state, checkpoint_path)
+        # Prefer the best-epoch checkpoint from run_dir if available
+        best_ckpt_src = None
+        if run_dir and trainer.best_epoch is not None and trainer.supports_eval_only:
+            fname = f"epoch_{trainer.best_epoch:03d}_valloss_{trainer.best_val_loss:.4f}.pt"
+            candidate = os.path.join(run_dir, fname)
+            if os.path.exists(candidate):
+                best_ckpt_src = candidate
+        if best_ckpt_src:
+            # Load the per-epoch checkpoint, augment with oversmoothing, re-save
+            state = torch.load(best_ckpt_src, weights_only=False)
+            state['train_oversmoothing'] = result.get('train_oversmoothing', {})
+            state['val_oversmoothing'] = result.get('val_oversmoothing', {})
+            torch.save(state, checkpoint_path)
+        else:
+            state = trainer.get_checkpoint_state()
+            state['train_oversmoothing'] = result.get('train_oversmoothing', {})
+            state['val_oversmoothing'] = result.get('val_oversmoothing', {})
+            torch.save(state, checkpoint_path)
 
     return result

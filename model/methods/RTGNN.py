@@ -440,7 +440,7 @@ class RTGNN(nn.Module):
             
             return performance_metrics, train_oversmoothing, val_oversmoothing
 
-    def train_model(self):
+    def train_model(self, log_epoch_fn=None):
 
 
         per_epochs_oversmoothing = defaultdict(list)
@@ -564,9 +564,15 @@ class RTGNN(nn.Module):
                 print(f"Epoch {epoch:03d} | Train Acc: {performance_metrics['train_acc']:.4f}, Val Acc: {performance_metrics['val_acc']:.4f} | "
                       f"Train F1: {performance_metrics['train_f1']:.4f}, Val F1: {performance_metrics['val_f1']:.4f}")
 
+            # Build oversmoothing entry for callback
+            os_entry = None
+            if compute_oversmoothing:
+                os_entry = {'train': dict(train_oversmoothing), 'val': dict(val_oversmoothing)}
+
             # Early stopping
             current_val_loss = performance_metrics['val_loss'].item() #current_val_accuracy = performance_metrics['val_acc']
-            if current_val_loss < best_validation_loss: #if current_val_accuracy > best_validation_accuracy:
+            is_best = current_val_loss < best_validation_loss
+            if is_best: #if current_val_accuracy > best_validation_accuracy:
                 best_validation_loss = current_val_loss # best_validation_accuracy = current_val_accuracy
                 patience_counter = 0
                 self.best_model_state = {
@@ -576,9 +582,18 @@ class RTGNN(nn.Module):
                 }
             else:
                 patience_counter += 1
-                if patience_counter >= early_stop_patience:
-                    print(f"Early stopping at epoch {epoch} (no improvement for {early_stop_patience} epochs)")
-                    break
+
+            if log_epoch_fn is not None:
+                log_epoch_fn(epoch, float(performance_metrics['train_loss']),
+                             float(performance_metrics['val_loss']),
+                             performance_metrics['train_acc'], performance_metrics['val_acc'],
+                             train_f1=performance_metrics['train_f1'],
+                             val_f1=performance_metrics['val_f1'],
+                             oversmoothing=os_entry, is_best=is_best)
+
+            if patience_counter >= early_stop_patience:
+                print(f"Early stopping at epoch {epoch} (no improvement for {early_stop_patience} epochs)")
+                break
 
         if self.best_model_state is not None:
             self.load_state_dict(self.best_model_state['model'])
@@ -611,7 +626,11 @@ class RTGNN(nn.Module):
                       f"NumRank: {final_test_oversmoothing['NumRank']:.4f}, Erank: {final_test_oversmoothing['Erank']:.4f}")
             
         print(f"Training completed! Best validation loss: {best_validation_loss:.4f}") #print(f"Training completed! Best validation accuracy: {best_validation_accuracy:.4f}")
-        return per_epochs_oversmoothing, per_epochs_val_oversmoothing
+        return {
+            'train_oversmoothing': dict(per_epochs_oversmoothing),
+            'val_oversmoothing': dict(per_epochs_val_oversmoothing),
+            'stopped_at_epoch': epoch,
+        }
 
 
     def evaluate_final_performance(self, clean_labels=None):
@@ -771,11 +790,7 @@ class RTGNNMethodTrainer(BaseTrainer):
             data_for_training=d['data_for_training'],
         ).to(d['device'])
 
-        train_oversmoothing, val_oversmoothing = self._rtgnn.train_model()
-        return {
-            'train_oversmoothing': dict(train_oversmoothing),
-            'val_oversmoothing': dict(val_oversmoothing),
-        }
+        return self._rtgnn.train_model(log_epoch_fn=self.log_epoch)
 
     def profile_flops(self):
         from util.profiling import profile_model_flops

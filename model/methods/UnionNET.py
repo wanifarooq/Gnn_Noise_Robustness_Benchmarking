@@ -193,7 +193,7 @@ class UnionNET:
         
         return combined_loss
 
-    def train_model(self, enable_debug=True):
+    def train_model(self, enable_debug=True, log_epoch_fn=None):
         per_epochs_oversmoothing = defaultdict(list)
         per_epochs_val_oversmoothing = defaultdict(list)
 
@@ -220,6 +220,7 @@ class UnionNET:
             val_f1_score = self.cls_evaluator.compute_f1(val_pred_labels, val_true_labels)
             
             # Compute oversmoothing metrics
+            os_entry = None
             if current_epoch % self.oversmoothing_every == 0:
                 train_oversmooth_metrics = compute_oversmoothing_for_mask(
                     self.oversmoothing_evaluator, model_predictions, self.edge_connections, self.train_node_mask
@@ -231,6 +232,8 @@ class UnionNET:
                     per_epochs_oversmoothing[key].append(value)
                 for key, value in val_oversmooth_metrics.items():
                     per_epochs_val_oversmoothing[key].append(value)
+
+                os_entry = {'train': dict(train_oversmooth_metrics), 'val': dict(val_oversmooth_metrics)}
 
                 if enable_debug:
                     print(f"Epoch {current_epoch+1:03d} | Train Acc: {train_accuracy:.4f}, Val Acc: {val_accuracy:.4f} | "
@@ -245,9 +248,10 @@ class UnionNET:
                 if enable_debug and current_epoch % 5 == 0:
                     print(f"Epoch {current_epoch+1:03d} | Train Acc: {train_accuracy:.4f}, Val Acc: {val_accuracy:.4f} | "
                           f"Train F1: {train_f1_score:.4f}, Val F1: {val_f1_score:.4f}")
-            
+
             # Early stopping
-            if validation_loss.item() < self.best_validation_loss:
+            is_best = validation_loss.item() < self.best_validation_loss
+            if is_best:
                 self.best_validation_loss = validation_loss.item()
                 self.patience_counter = 0
                 self.training_results['train'] = train_accuracy
@@ -255,6 +259,11 @@ class UnionNET:
                 self.best_model_weights = deepcopy(self.gnn_model.state_dict())
             else:
                 self.patience_counter += 1
+
+            if log_epoch_fn is not None:
+                log_epoch_fn(current_epoch, training_loss, validation_loss, train_accuracy, val_accuracy,
+                             train_f1=train_f1_score, val_f1=val_f1_score,
+                             oversmoothing=os_entry, is_best=is_best)
 
             if self.early_stop_patience and self.patience_counter >= self.early_stop_patience:
                 if enable_debug:
@@ -272,6 +281,7 @@ class UnionNET:
         return {
             'train_oversmoothing': dict(per_epochs_oversmoothing),
             'val_oversmoothing': dict(per_epochs_val_oversmoothing),
+            'stopped_at_epoch': current_epoch,
         }
 
 
@@ -297,4 +307,4 @@ class UnionNETMethodTrainer(BaseTrainer):
             d['backbone_model'], d['data_for_training'],
             d['num_classes'], unionnet_config,
         )
-        return trainer.train_model(enable_debug=True)
+        return trainer.train_model(enable_debug=True, log_epoch_fn=self.log_epoch)

@@ -11,7 +11,8 @@ from model.evaluation import OVERSMOOTHING_KEYS
 
 
 def run_single_experiment_fixed_seed(method_name, config, fixed_run_id=1,
-                                     checkpoint_path=None, eval_only=False):
+                                     checkpoint_path=None, eval_only=False,
+                                     run_dir=None):
 
     try:
 
@@ -23,6 +24,7 @@ def run_single_experiment_fixed_seed(method_name, config, fixed_run_id=1,
         test_metrics = run_experiment(
             experiment_config, run_id=fixed_run_id,
             checkpoint_path=checkpoint_path, eval_only=eval_only,
+            run_dir=run_dir if not eval_only else None,
         )
         print(f"[{method_name}] Completed - Test Acc: {test_metrics['test_cls']['accuracy']:.4f}, "
               f"F1: {test_metrics['test_cls']['f1']:.4f}")
@@ -84,9 +86,14 @@ def run_parallel_single_benchmark():
                 os.path.join(checkpoint_dir, f"{method}_run_{FIXED_RUN_ID}.pt")
                 if save_checkpoint or eval_only else None
             )
+            method_run_dir = (
+                os.path.join(checkpoint_dir, f"{method}_run_{FIXED_RUN_ID}")
+                if not eval_only else None
+            )
             future = executor.submit(
                 run_single_experiment_fixed_seed, method, base_config,
                 FIXED_RUN_ID, checkpoint_path=ckpt_path, eval_only=eval_only,
+                run_dir=method_run_dir,
             )
             future_to_method[future] = method
         

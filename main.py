@@ -48,11 +48,14 @@ def run_benchmarking(base_folder='results', config_path=DEFAULT_CONFIG,
 
         # Decide output path *before* running
         file_name = get_result_filename(sweep_config)
-        result_json_path = os.path.join(base_folder, f"{file_name}.json")
+        experiment_dir = os.path.join(base_folder, file_name)
+        result_json_path = os.path.join(experiment_dir, 'experiment.json')
 
         # Skip if already computed (unless force: true or eval-only)
         if not eval_only and not should_run_experiment(result_json_path, sweep_config):
             continue
+
+        os.makedirs(experiment_dir, exist_ok=True)
 
         # Device selection (more explicit)
         requested_device = sweep_config.get("device", "cpu")
@@ -81,10 +84,10 @@ def run_benchmarking(base_folder='results', config_path=DEFAULT_CONFIG,
         run_eval_only = eval_only or sweep_config.get('eval_only', False)
 
         n_runs = num_runs or sweep_config.get('num_runs', 5)
-        codecarbon_file_name = f"{file_name}_emissions.csv"
+        codecarbon_file_name = "emissions.csv"
         for run in range(1, n_runs + 1):
             try:
-                tracker = EmissionsTracker(output_dir=base_folder,
+                tracker = EmissionsTracker(output_dir=experiment_dir,
                                           output_file=codecarbon_file_name,
                                           log_level="critical",
                                           allow_multiple_runs=True)
@@ -97,11 +100,13 @@ def run_benchmarking(base_folder='results', config_path=DEFAULT_CONFIG,
                     print("[WARNING] On macOS, codecarbon requires sudo access to read hardware power metrics.")
                 run_codecarbon = False
             print(f"\nRun {run}/{n_runs}:")
-            ckpt_path = (os.path.join(base_folder, f"{file_name}_run_{run}.pt")
+            run_dir = os.path.join(experiment_dir, f"run_{run}")
+            ckpt_path = (os.path.join(experiment_dir, f"best_run_{run}.pt")
                          if save_checkpoint or run_eval_only else None)
             run_result = run_experiment(
                 sweep_config, run_id=run,
                 checkpoint_path=ckpt_path, eval_only=run_eval_only,
+                run_dir=run_dir if not run_eval_only else None,
             )
             if run_codecarbon:
                 tracker.stop()

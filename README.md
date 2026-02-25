@@ -261,11 +261,11 @@ result = trainer.train_full_model()
 
 # Print the results
 print("Single run results:")
-print(f"Accuracy: {result['accuracy']:.4f}")
-print(f"F1 Score: {result['f1']:.4f}")
-print(f"Precision: {result['precision']:.4f}")
-print(f"Recall: {result['recall']:.4f}")
-oversmoothing_results = result['oversmoothing']
+print(f"Accuracy: {result['test_cls']['accuracy']:.4f}")
+print(f"F1 Score: {result['test_cls']['f1']:.4f}")
+print(f"Precision: {result['test_cls']['precision']:.4f}")
+print(f"Recall: {result['test_cls']['recall']:.4f}")
+oversmoothing_results = result['test_oversmoothing']
 print("Oversmoothing metrics:")
 print(f"NumRank: {oversmoothing_results['NumRank']:.4f}")
 print(f"Erank: {oversmoothing_results['Erank']:.4f}")

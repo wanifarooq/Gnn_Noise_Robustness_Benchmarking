@@ -70,8 +70,9 @@ class PositiveEigenvaluesTrainer:
                         module.weight.data = constrained_weight
                         break
     
-    def train_with_positive_eigenvalue_constraint(self, max_epochs=200, batch_size=32, 
-                                                patience=20, noisy_indices=None):
+    def train_with_positive_eigenvalue_constraint(self, max_epochs=200, batch_size=32,
+                                                patience=20, noisy_indices=None,
+                                                log_epoch_fn=None):
 
         
         per_epochs_oversmoothing = defaultdict(list)
@@ -87,26 +88,24 @@ class PositiveEigenvaluesTrainer:
             train_metrics = self.train_single_epoch(train_loader)
 
             val_metrics = self.evaluate_on_split(val_loader, 'val')
-            
-            # Early stopping
-            if val_metrics['loss'] < best_validation_loss:
+
+            # Early stopping tracking
+            is_best = val_metrics['loss'] < best_validation_loss
+            if is_best:
                 best_validation_loss = val_metrics['loss']
                 best_model_weights = deepcopy(self.model.state_dict())
                 epochs_without_improvement = 0
             else:
                 epochs_without_improvement += 1
-                
-            if epochs_without_improvement >= patience:
-                print(f"Early stopping at epoch {epoch}")
-                self.model.load_state_dict(best_model_weights)
-                break
-            
+
+            # Oversmoothing computation
+            os_entry = None
             if epoch % self.oversmoothing_every == 0:
 
                 self.model.eval()
                 with torch.no_grad():
                     full_embeddings = self.model(self.data)
-                
+
                 train_oversmoothing = compute_oversmoothing_for_mask(
                     self.oversmoothing_evaluator, full_embeddings, self.data.edge_index, self.data.train_mask
                 )
@@ -114,7 +113,9 @@ class PositiveEigenvaluesTrainer:
                 val_oversmoothing = compute_oversmoothing_for_mask(
                     self.oversmoothing_evaluator, full_embeddings, self.data.edge_index, self.data.val_mask
                 )
-                
+
+                os_entry = {'train': dict(train_oversmoothing), 'val': dict(val_oversmoothing)}
+
                 metrics = {
                     'train_loss': train_metrics['loss'],
                     'val_loss': val_metrics['loss'],
@@ -123,11 +124,11 @@ class PositiveEigenvaluesTrainer:
                     'train_f1': train_metrics['f1'],
                     'val_f1': val_metrics['f1']
                 }
-                
+
                 print(f"Epoch {epoch:03d} | Train Loss: {metrics['train_loss']:.4f}, Val Loss: {metrics['val_loss']:.4f} | "
                     f"Train Acc: {metrics['train_acc']:.4f}, Val Acc: {metrics['val_acc']:.4f} | "
                     f"Train F1: {metrics['train_f1']:.4f}, Val F1: {metrics['val_f1']:.4f}")
-                
+
 
                 for key, value in train_oversmoothing.items():
                     per_epochs_oversmoothing[key].append(value)
@@ -139,32 +140,44 @@ class PositiveEigenvaluesTrainer:
                 train_mad = train_oversmoothing.get('MAD', 0.0) if train_oversmoothing else 0.0
                 train_num_rank = train_oversmoothing.get('NumRank', 0.0) if train_oversmoothing else 0.0
                 train_effective_rank = train_oversmoothing.get('Erank', 0.0) if train_oversmoothing else 0.0
-                
+
                 val_edir = val_oversmoothing.get('EDir', 0.0) if val_oversmoothing else 0.0
                 val_edir_traditional = val_oversmoothing.get('EDir_traditional', 0.0) if val_oversmoothing else 0.0
                 val_eproj = val_oversmoothing.get('EProj', 0.0) if val_oversmoothing else 0.0
                 val_mad = val_oversmoothing.get('MAD', 0.0) if val_oversmoothing else 0.0
                 val_num_rank = val_oversmoothing.get('NumRank', 0.0) if val_oversmoothing else 0.0
                 val_effective_rank = val_oversmoothing.get('Erank', 0.0) if val_oversmoothing else 0.0
-                
+
                 print(f"Train DE: {train_edir:.4f}, Val DE: {val_edir:.4f} | "
                     f"Train DE_trad: {train_edir_traditional:.4f}, Val DE_trad: {val_edir_traditional:.4f} | "
                     f"Train EProj: {train_eproj:.4f}, Val EProj: {val_eproj:.4f} | "
                     f"Train MAD: {train_mad:.4f}, Val MAD: {val_mad:.4f} | "
                     f"Train NumRank: {train_num_rank:.4f}, Val NumRank: {val_num_rank:.4f} | "
                     f"Train Erank: {train_effective_rank:.4f}, Val Erank: {val_effective_rank:.4f}")
-            
+
             elif epoch % 10 == 0:
                 print(f"Epoch {epoch:03d} | "
                     f"Train Loss: {train_metrics['loss']:.4f}, Val Loss: {val_metrics['loss']:.4f} | "
                     f"Train Acc: {train_metrics['accuracy']:.4f}, Val Acc: {val_metrics['accuracy']:.4f} | "
                     f"Train F1: {train_metrics['f1']:.4f}, Val F1: {val_metrics['f1']:.4f}")
+
+            if log_epoch_fn is not None:
+                log_epoch_fn(epoch, train_metrics['loss'], val_metrics['loss'],
+                             train_metrics['accuracy'], val_metrics['accuracy'],
+                             train_f1=train_metrics['f1'], val_f1=val_metrics.get('f1'),
+                             oversmoothing=os_entry, is_best=is_best)
+
+            if epochs_without_improvement >= patience:
+                print(f"Early stopping at epoch {epoch}")
+                self.model.load_state_dict(best_model_weights)
+                break
         
         print("\nPositive Eigenvalues Training completed")
 
         return {
             'train_oversmoothing': dict(per_epochs_oversmoothing),
             'val_oversmoothing': dict(per_epochs_val_oversmoothing),
+            'stopped_at_epoch': epoch,
         }
     
     def create_data_loaders(self, batch_size=32):
@@ -340,4 +353,5 @@ class PositiveEigenvaluesMethodTrainer(BaseTrainer):
             batch_size=int(pe_params.get('batch_size', 32)),
             patience=d['patience'],
             noisy_indices=d['global_noisy_indices'],
+            log_epoch_fn=self.log_epoch,
         )
