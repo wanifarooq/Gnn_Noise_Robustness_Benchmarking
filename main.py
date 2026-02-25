@@ -12,6 +12,8 @@ from sweep_utils import *
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Run multi-run benchmark sweeps')
+    parser.add_argument('--config', '-c', default='config3.yaml',
+                        help='Path to YAML config file (default: config3.yaml)')
     parser.add_argument('--eval-only', action='store_true',
                         help='Skip training, evaluate from saved checkpoints')
     parser.add_argument('--no-checkpoint', action='store_true',
@@ -19,13 +21,14 @@ def parse_args():
     return parser.parse_args()
 
 
-def run_benchmarking(base_folder='results', eval_only=False, no_checkpoint=False):
+def run_benchmarking(base_folder='results', config_path='config3.yaml',
+                     eval_only=False, no_checkpoint=False):
     run_codecarbon = False
     print("\n" + "-"*50)
     print("Multi-run experiment with parameter sweep")
     print("-"*50)
 
-    with open("config3.yaml", "r", encoding="utf-8") as f:
+    with open(config_path, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
     print("Loaded configuration file")
 
@@ -70,20 +73,21 @@ def run_benchmarking(base_folder='results', eval_only=False, no_checkpoint=False
         save_checkpoint = (not no_checkpoint) and sweep_config.get('save_checkpoint', True)
         run_eval_only = eval_only or sweep_config.get('eval_only', False)
 
+        codecarbon_file_name = f"{file_name}_emissions.csv"
         for run in range(1, 6):
-            codecarbon_file_name = f"{file_name}_emissions.csv"
-            if not os.path.exists(os.path.join(base_folder, codecarbon_file_name)):
-                try:
-                    tracker = EmissionsTracker(output_dir=base_folder,
-                                            output_file = codecarbon_file_name,
-                                            log_level = "critical", allow_multiple_runs=True)
-                    tracker.start()
-                    run_codecarbon = True
-                except Exception as e:
+            try:
+                tracker = EmissionsTracker(output_dir=base_folder,
+                                          output_file=codecarbon_file_name,
+                                          log_level="critical",
+                                          allow_multiple_runs=True)
+                tracker.start()
+                run_codecarbon = True
+            except Exception as e:
+                if run == 1:
                     print(f"[WARNING] Could not start EmissionsTracker: {e}")
                     print("[WARNING] Carbon emissions data will be missing from results.")
                     print("[WARNING] On macOS, codecarbon requires sudo access to read hardware power metrics.")
-                    run_codecarbon = False
+                run_codecarbon = False
             print(f"\nRun {run}/5:")
             ckpt_path = (os.path.join(base_folder, f"{file_name}_run_{run}.pt")
                          if save_checkpoint or run_eval_only else None)
@@ -93,7 +97,6 @@ def run_benchmarking(base_folder='results', eval_only=False, no_checkpoint=False
             )
             if run_codecarbon:
                 tracker.stop()
-                run_codecarbon = False
             # Convert possible numpy/torch scalars to Python floats
             test_accuracies.append(float(test_metrics['accuracy']))
             test_f1s.append(float(test_metrics['f1']))
@@ -163,5 +166,6 @@ def run_benchmarking(base_folder='results', eval_only=False, no_checkpoint=False
 
 if __name__ == "__main__":
     args = parse_args()
-    run_benchmarking(eval_only=args.eval_only,
+    run_benchmarking(config_path=args.config,
+                     eval_only=args.eval_only,
                      no_checkpoint=args.no_checkpoint)
