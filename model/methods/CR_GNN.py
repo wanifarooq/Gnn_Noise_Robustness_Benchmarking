@@ -165,17 +165,17 @@ class CRGNNModel:
             
             optimizer.zero_grad()
             
-            loss, train_acc = self._train_step(backbone, adapter, proj_head, class_head,
-                                             graph_data.x, graph_data.edge_index, 
-                                             noisy_labels, train_mask)
+            loss, train_acc, train_f1 = self._train_step(backbone, adapter, proj_head, class_head,
+                                                        graph_data.x, graph_data.edge_index,
+                                                        noisy_labels, train_mask)
             
             if loss is not None and torch.isfinite(loss):
                 loss.backward()
                 optimizer.step()
             
-            val_loss, val_acc = self._evaluate(backbone, adapter, class_head,
-                                             graph_data.x, graph_data.edge_index,
-                                             noisy_labels, val_mask)
+            val_loss, val_acc, val_f1 = self._evaluate(backbone, adapter, class_head,
+                                                      graph_data.x, graph_data.edge_index,
+                                                      noisy_labels, val_mask)
             
             os_entry = None
             if epoch % self.oversmoothing_every == 0:
@@ -207,8 +207,8 @@ class CRGNNModel:
             # Early stopping
             is_best = val_loss < self.best_val_loss
             if log_epoch_fn is not None:
-                log_epoch_fn(epoch, loss, val_loss, train_acc, val_acc,
-                             train_f1=None, val_f1=None,
+                log_epoch_fn(epoch, loss.item(), val_loss.item(), train_acc, val_acc,
+                             train_f1=train_f1, val_f1=val_f1,
                              oversmoothing=os_entry, is_best=is_best)
             if is_best: #if val_acc > self.best_val_acc:
                 self.best_val_loss = val_loss #self.best_val_acc = val_acc
@@ -287,10 +287,12 @@ class CRGNNModel:
             pred_orig = class_head(h_orig)[mask].exp().argmax(dim=1)
             if mask.sum() > 0:
                 acc = self.cls_evaluator.compute_accuracy(pred_orig, labels[mask])
+                f1 = self.cls_evaluator.compute_f1(pred_orig, labels[mask])
             else:
                 acc = 0.0
-        
-        return total_loss, acc
+                f1 = 0.0
+
+        return total_loss, acc, f1
 
     def _evaluate(self, backbone, adapter, class_head, x, edge_index, labels, mask):
 
@@ -306,8 +308,9 @@ class CRGNNModel:
             loss = F.nll_loss(preds[mask], labels[mask])
             pred_labels = preds[mask].exp().argmax(dim=1)
             acc = self.cls_evaluator.compute_accuracy(pred_labels, labels[mask])
-            
-        return loss, acc
+            f1 = self.cls_evaluator.compute_f1(pred_labels, labels[mask])
+
+        return loss, acc, f1
 
 
 @register('cr_gnn')
