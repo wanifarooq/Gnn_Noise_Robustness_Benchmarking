@@ -435,8 +435,9 @@ def evaluate_model(get_predictions, get_embeddings, labels, train_mask, val_mask
         device: computation device
 
     Returns:
-        dict with accuracy, f1, precision, recall, oversmoothing,
-        train_oversmoothing_final, val_oversmoothing_final
+        dict with test_cls, train_cls, val_cls (each a dict with accuracy,
+        f1, precision, recall), test_oversmoothing, train_oversmoothing_final,
+        val_oversmoothing_final
     """
     oversmoothing_evaluator = OversmoothingMetrics(device=device)
     cls_evaluator = ClassificationMetrics(average='macro')
@@ -463,7 +464,7 @@ def evaluate_model(get_predictions, get_embeddings, labels, train_mask, val_mask
         'test_cls': test_cls_metrics,
         'train_cls': train_cls_metrics,
         'val_cls': val_cls_metrics,
-        'oversmoothing': normalize_metrics(test_oversmoothing),
+        'test_oversmoothing': normalize_metrics(test_oversmoothing),
         'train_oversmoothing_final': normalize_metrics(train_oversmoothing),
         'val_oversmoothing_final': normalize_metrics(val_oversmoothing),
     }

@@ -258,7 +258,7 @@ class TestMakeResult:
             'test_cls': {'accuracy': 0.8, 'f1': 0.7, 'precision': 0.75, 'recall': 0.72},
             'train_cls': {'accuracy': 0.9, 'f1': 0.85, 'precision': 0.88, 'recall': 0.82},
             'val_cls': {'accuracy': 0.85, 'f1': 0.80, 'precision': 0.83, 'recall': 0.78},
-            'oversmoothing': dict(DEFAULT_OVERSMOOTHING),
+            'test_oversmoothing': dict(DEFAULT_OVERSMOOTHING),
         }
         train_os = {'EDir': [1.0, 2.0], 'MAD': [0.5, 0.6]}
         val_os = {'EDir': [1.1, 2.1], 'MAD': [0.51, 0.61]}
@@ -277,7 +277,7 @@ class TestMakeResult:
         dummy = _make_dummy()
 
         result_dict = {
-            'oversmoothing': dict(DEFAULT_OVERSMOOTHING),
+            'test_oversmoothing': dict(DEFAULT_OVERSMOOTHING),
         }
         train_os = {'EDir': [1.0], 'MAD': [0.5]}
 
@@ -285,10 +285,11 @@ class TestMakeResult:
         assert 'val_oversmoothing' in out
         assert out['val_oversmoothing'] == {}
 
-        # test_cls / train_cls / val_cls default to empty dict when absent
-        assert out['test_cls'] == {}
-        assert out['train_cls'] == {}
-        assert out['val_cls'] == {}
+        # test_cls / train_cls / val_cls default to zero-filled dict when absent
+        _zero_cls = {'accuracy': 0.0, 'f1': 0.0, 'precision': 0.0, 'recall': 0.0}
+        assert out['test_cls'] == _zero_cls
+        assert out['train_cls'] == _zero_cls
+        assert out['val_cls'] == _zero_cls
 
     def test_val_oversmoothing_no_reduce(self):
         dummy = _make_dummy()
@@ -300,7 +301,7 @@ class TestMakeResult:
             'test_cls': test_cls,
             'train_cls': train_cls,
             'val_cls': val_cls,
-            'oversmoothing': dict(DEFAULT_OVERSMOOTHING),
+            'test_oversmoothing': dict(DEFAULT_OVERSMOOTHING),
         }
         train_os = {'EDir': [1.0, 2.0]}
         val_os = {'EDir': [1.1, 2.1]}

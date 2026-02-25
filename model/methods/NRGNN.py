@@ -539,18 +539,18 @@ class NRGNN:
                     self.best_edge_indices, self.device
                 )
 
-                print(f"Test Acc: {results['accuracy']:.4f} | Test F1: {results['f1']:.4f} | "
-                      f"Precision: {results['precision']:.4f}, Recall: {results['recall']:.4f}")
-                print(f"Test Oversmoothing: {results['oversmoothing']}")
+                print(f"Test Acc: {results['test_cls']['accuracy']:.4f} | Test F1: {results['test_cls']['f1']:.4f} | "
+                      f"Precision: {results['test_cls']['precision']:.4f}, Recall: {results['test_cls']['recall']:.4f}")
+                print(f"Test Oversmoothing: {results['test_oversmoothing']}")
 
                 return results
 
+            _zero_cls = {'accuracy': 0.0, 'f1': 0.0, 'precision': 0.0, 'recall': 0.0}
             return {
-                'accuracy': 0.0,
-                'f1': 0.0,
-                'precision': 0.0,
-                'recall': 0.0,
-                'oversmoothing': dict(DEFAULT_OVERSMOOTHING),
+                'test_cls': dict(_zero_cls),
+                'train_cls': dict(_zero_cls),
+                'val_cls': dict(_zero_cls),
+                'test_oversmoothing': dict(DEFAULT_OVERSMOOTHING),
                 'train_oversmoothing_final': dict(DEFAULT_OVERSMOOTHING),
                 'val_oversmoothing_final': dict(DEFAULT_OVERSMOOTHING),
             }

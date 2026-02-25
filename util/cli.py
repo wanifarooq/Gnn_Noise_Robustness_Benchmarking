@@ -25,7 +25,8 @@ def parse_arguments():
     return parser.parse_args()
 
 
-def print_table(headers, rows, col_widths):
+def print_table(headers, rows):
+    col_widths = [max(len(str(x)) for x in col) for col in zip(*([headers] + rows))]
 
     def separator():
         return "+" + "+".join("-" * (w + 2) for w in col_widths) + "+"

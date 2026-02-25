@@ -119,14 +119,13 @@ def run_parallel_single_benchmark():
             else:
                 rows.append([method, "FAILED", "FAILED", "FAILED", "FAILED"])
 
-        col_widths = [max(len(str(x)) for x in col) for col in zip(*([headers] + rows))]
-        print_table(headers, rows, col_widths)
+        print_table(headers, rows)
 
         headers_os = ["Method", "NumRank", "Erank", "EDir", "EDir_trad", "EProj", "MAD"]
         rows_os = []
         for method in methods_to_test:
             if method in results:
-                o = results[method]['oversmoothing']
+                o = results[method]['test_oversmoothing']
                 rows_os.append([
                     method,
                     f"{o['NumRank']:.4f}",
@@ -139,8 +138,7 @@ def run_parallel_single_benchmark():
             else:
                 rows_os.append([method] + ["Failed"]*6)
 
-        col_widths_os = [max(len(str(x)) for x in col) for col in zip(*([headers_os] + rows_os))]
-        print_table(headers_os, rows_os, col_widths_os)
+        print_table(headers_os, rows_os)
 
         best_method = max(results.items(), key=lambda x: x[1]['test_cls']['accuracy'])
         print(f"\nBest method: {best_method[0]} (Accuracy: {best_method[1]['test_cls']['accuracy']:.4f})")

@@ -128,7 +128,7 @@ class BaseTrainer(ABC):
         Parameters
         ----------
         result_dict : dict
-            Must contain keys: test_cls, train_cls, val_cls, oversmoothing.
+            Must contain keys: test_cls, train_cls, val_cls, test_oversmoothing.
         train_oversmoothing : dict
             Per-epoch oversmoothing metrics collected during training.
         val_oversmoothing : dict or None
@@ -138,11 +138,12 @@ class BaseTrainer(ABC):
             ``_reduce_oversmoothing``.  Set to *False* for models (e.g. GCOD)
             that already return reduced values.
         """
+        _zero_cls = {'accuracy': 0.0, 'f1': 0.0, 'precision': 0.0, 'recall': 0.0}
         return {
-            'test_cls': result_dict.get('test_cls', {}),
-            'train_cls': result_dict.get('train_cls', {}),
-            'val_cls': result_dict.get('val_cls', {}),
-            'oversmoothing': result_dict['oversmoothing'],
+            'test_cls': result_dict.get('test_cls', dict(_zero_cls)),
+            'train_cls': result_dict.get('train_cls', dict(_zero_cls)),
+            'val_cls': result_dict.get('val_cls', dict(_zero_cls)),
+            'test_oversmoothing': result_dict.get('test_oversmoothing', {}),
             'train_oversmoothing': (
                 self._reduce_oversmoothing(train_oversmoothing)
                 if reduce else train_oversmoothing

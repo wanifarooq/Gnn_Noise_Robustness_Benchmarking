@@ -185,11 +185,11 @@ def test_model_smoke(method):
 
     # ── required top-level keys ──────────────────────────────────────────
     for key in ('test_cls', 'train_cls', 'val_cls',
-                'oversmoothing', 'train_oversmoothing', 'compute_info'):
+                'test_oversmoothing', 'train_oversmoothing', 'compute_info'):
         assert key in result, f"Missing key '{key}' in result for method '{method}'"
 
     # ── oversmoothing dict has the 6 standard keys, all finite ───────────
-    os_dict = result['oversmoothing']
+    os_dict = result['test_oversmoothing']
     assert isinstance(os_dict, dict), (
         f"oversmoothing should be dict, got {type(os_dict)} for method '{method}'"
     )
@@ -278,7 +278,7 @@ def test_checkpoint_roundtrip(method, tmp_path):
 
     # Result structure is valid
     for key in ('test_cls', 'train_cls', 'val_cls',
-                'oversmoothing', 'train_oversmoothing', 'compute_info'):
+                'test_oversmoothing', 'train_oversmoothing', 'compute_info'):
         assert key in result_eval, f"Missing key '{key}' in eval-only result"
 
     # Eval-only should have zero training metrics and positive inference time

@@ -7,10 +7,16 @@ import os
 from codecarbon import EmissionsTracker
 
 from util.experiment import run_experiment
+from util.cli import print_table
 from model.evaluation import OVERSMOOTHING_KEYS
-from sweep_utils import expand_yaml_sweeps, get_config_hash, should_run_experiment, json_serializer
+from sweep_utils import expand_yaml_sweeps, get_result_filename, should_run_experiment, json_serializer
 
 DEFAULT_CONFIG = "config.yaml"
+
+
+def _fmt(vals):
+    """Format mean\u00b1std for display."""
+    return f"{np.mean(vals):.4f} \u00b1 {np.std(vals):.4f}"
 
 
 def parse_args():
@@ -45,9 +51,8 @@ def run_benchmarking(base_folder='results', config_path=DEFAULT_CONFIG,
         print(f"\n=== Sweep Config {idx}/{len(configs)} ===")
 
         # Decide output path *before* running
-        file_name = get_config_hash(sweep_config)
-        file_path = os.path.join(base_folder, file_name)
-        result_json_path = f"{file_path}.json"
+        file_name = get_result_filename(sweep_config)
+        result_json_path = os.path.join(base_folder, f"{file_name}.json")
 
         # Skip if already computed (unless force: true or eval-only)
         if not eval_only and not should_run_experiment(result_json_path, sweep_config):
@@ -64,24 +69,16 @@ def run_benchmarking(base_folder='results', config_path=DEFAULT_CONFIG,
         if device_str == "cuda":
             print(f"CUDA device name: {torch.cuda.get_device_name(torch.cuda.current_device())}")
 
-        test_metrics_runs = {
-            'accuracy': [], 'f1': [], 'precision': [], 'recall': [],
+        classification_runs = {
+            split: {k: [] for k in ('accuracy', 'f1', 'precision', 'recall')}
+            for split in ('test', 'train', 'val')
         }
-        train_metrics_runs = {
-            'accuracy': [], 'f1': [], 'precision': [], 'recall': [],
+        oversmoothing_runs = {
+            split: {k: [] for k in OVERSMOOTHING_KEYS}
+            for split in ('test', 'train', 'val')
         }
-        val_metrics_runs = {
-            'accuracy': [], 'f1': [], 'precision': [], 'recall': [],
-        }
-        compute_metrics_runs = {
-            'flops_inference': [], 'flops_training_total': [],
-            'time_training_total': [], 'time_inference': [],
-        }
-        oversmoothing_metrics = {
-            f'{key}{suffix}': []
-            for suffix in ('', '-Train', '-Val')
-            for key in OVERSMOOTHING_KEYS
-        }
+        compute_runs = {k: [] for k in ('flops_inference', 'flops_training_total',
+                                         'time_training_total', 'time_inference')}
 
         # CLI flags override per-config values
         save_checkpoint = (not no_checkpoint) and sweep_config.get('save_checkpoint', True)
@@ -106,93 +103,59 @@ def run_benchmarking(base_folder='results', config_path=DEFAULT_CONFIG,
             print(f"\nRun {run}/{n_runs}:")
             ckpt_path = (os.path.join(base_folder, f"{file_name}_run_{run}.pt")
                          if save_checkpoint or run_eval_only else None)
-            test_metrics = run_experiment(
+            run_result = run_experiment(
                 sweep_config, run_id=run,
                 checkpoint_path=ckpt_path, eval_only=run_eval_only,
             )
             if run_codecarbon:
                 tracker.stop()
-            # Convert possible numpy/torch scalars to Python floats
-            for mkey in ('accuracy', 'f1', 'precision', 'recall'):
-                test_metrics_runs[mkey].append(float(test_metrics['test_cls'][mkey]))
-                train_metrics_runs[mkey].append(float(test_metrics['train_cls'][mkey]))
-                val_metrics_runs[mkey].append(float(test_metrics['val_cls'][mkey]))
-            for ckey in compute_metrics_runs:
-                compute_metrics_runs[ckey].append(float(test_metrics['compute_info'][ckey]))
+            # Accumulate per-run results
+            for split in ('test', 'train', 'val'):
+                src = run_result[f'{split}_cls']
+                for mkey in classification_runs[split]:
+                    classification_runs[split][mkey].append(float(src[mkey]))
 
-            for key in oversmoothing_metrics:
-                if '-Train' in key:
-                    base_key = key.replace('-Train', '')
-                    source = test_metrics.get('train_oversmoothing', {})
-                    raw_val = source.get(base_key, float('nan'))
-                elif '-Val' in key:
-                    base_key = key.replace('-Val', '')
-                    source = test_metrics.get('val_oversmoothing', {})
-                    raw_val = source.get(base_key, float('nan'))
-                else:
-                    raw_val = test_metrics['oversmoothing'][key]
+            for split, key_prefix in (('test', 'test_oversmoothing'), ('train', 'train_oversmoothing'), ('val', 'val_oversmoothing')):
+                src = run_result.get(key_prefix, {})
+                for okey in OVERSMOOTHING_KEYS:
+                    raw = src.get(okey, float('nan'))
+                    if isinstance(raw, torch.Tensor) and raw.dim() == 0:
+                        raw = raw.item()
+                    elif isinstance(raw, (list, np.ndarray, torch.Tensor)):
+                        raw = float(np.mean([float(x) for x in raw]))
+                    oversmoothing_runs[split][okey].append(float(raw))
 
-                # Check if raw_val is a list (or iterable)
-                if isinstance(raw_val, list) or (isinstance(raw_val, (np.ndarray, torch.Tensor)) and hasattr(raw_val, '__len__') and len(raw_val) > 1):
-                    # It is a list (e.g., layer-wise metrics). Take the mean.
-                    # We map float() first to handle lists of Tensors
-                    clean_mean = np.mean([float(x) for x in raw_val])
-                    oversmoothing_metrics[key].append(float(clean_mean))
-                else:
-                    # It is a single scalar
-                    oversmoothing_metrics[key].append(float(raw_val))
-            print(f"Run {run} completed - Test Acc: {float(test_metrics['test_cls']['accuracy']):.4f}, F1: {float(test_metrics['test_cls']['f1']):.4f}, "
-                  f"Train: {float(test_metrics['compute_info']['time_training_total']):.2f}s, Eval: {float(test_metrics['compute_info']['time_inference']):.2f}s")
+            for ckey in compute_runs:
+                compute_runs[ckey].append(float(run_result['compute_info'][ckey]))
 
-        # Compute mean ± std (store as plain floats to simplify JSON)
-        mean_std_dict = {
-            'Accuracy': [float(np.mean(test_metrics_runs['accuracy'])), float(np.std(test_metrics_runs['accuracy']))],
-            'F1': [float(np.mean(test_metrics_runs['f1'])), float(np.std(test_metrics_runs['f1']))],
-            'Precision': [float(np.mean(test_metrics_runs['precision'])), float(np.std(test_metrics_runs['precision']))],
-            'Recall': [float(np.mean(test_metrics_runs['recall'])), float(np.std(test_metrics_runs['recall']))],
-            'Train_Accuracy': [float(np.mean(train_metrics_runs['accuracy'])), float(np.std(train_metrics_runs['accuracy']))],
-            'Train_F1': [float(np.mean(train_metrics_runs['f1'])), float(np.std(train_metrics_runs['f1']))],
-            'Train_Precision': [float(np.mean(train_metrics_runs['precision'])), float(np.std(train_metrics_runs['precision']))],
-            'Train_Recall': [float(np.mean(train_metrics_runs['recall'])), float(np.std(train_metrics_runs['recall']))],
-            'Val_Accuracy': [float(np.mean(val_metrics_runs['accuracy'])), float(np.std(val_metrics_runs['accuracy']))],
-            'Val_F1': [float(np.mean(val_metrics_runs['f1'])), float(np.std(val_metrics_runs['f1']))],
-            'Val_Precision': [float(np.mean(val_metrics_runs['precision'])), float(np.std(val_metrics_runs['precision']))],
-            'Val_Recall': [float(np.mean(val_metrics_runs['recall'])), float(np.std(val_metrics_runs['recall']))],
-            'flops_inference': [float(np.mean(compute_metrics_runs['flops_inference'])), float(np.std(compute_metrics_runs['flops_inference']))],
-            'flops_training_total': [float(np.mean(compute_metrics_runs['flops_training_total'])), float(np.std(compute_metrics_runs['flops_training_total']))],
-            'time_training_total': [float(np.mean(compute_metrics_runs['time_training_total'])), float(np.std(compute_metrics_runs['time_training_total']))],
-            'time_inference': [float(np.mean(compute_metrics_runs['time_inference'])), float(np.std(compute_metrics_runs['time_inference']))],
-        }
+            print(f"Run {run} completed - Test Acc: {float(run_result['test_cls']['accuracy']):.4f}, F1: {float(run_result['test_cls']['f1']):.4f}, "
+                  f"Train: {float(run_result['compute_info']['time_training_total']):.2f}s, Eval: {float(run_result['compute_info']['time_inference']):.2f}s")
 
-        print("\nSweep Config Results:")
-        for metric, (mean_val, std_val) in mean_std_dict.items():
-            print(f"{metric}: {mean_val:.4f} ± {std_val:.4f}")
+        # ── Print summary tables ──
+        cls_headers = ['split', 'accuracy', 'f1', 'precision', 'recall']
+        cls_rows = []
+        for split in ('test', 'train', 'val'):
+            cls_rows.append([split] + [_fmt(classification_runs[split][m]) for m in ('accuracy', 'f1', 'precision', 'recall')])
+        print("\nClassification Metrics:")
+        print_table(cls_headers, cls_rows)
 
+        os_headers = ['split'] + list(OVERSMOOTHING_KEYS)
+        os_rows = []
+        for split in ('test', 'train', 'val'):
+            os_rows.append([split] + [_fmt(oversmoothing_runs[split][k]) for k in OVERSMOOTHING_KEYS])
         print("\nOversmoothing Metrics:")
-        oversmoothing_summary = {}
-        for key in oversmoothing_metrics:
-            mean_val = float(np.mean(oversmoothing_metrics[key]))
-            std_val = float(np.std(oversmoothing_metrics[key]))
-            oversmoothing_summary[key] = [mean_val, std_val]
-            print(f"{key}: {mean_val:.4f} ± {std_val:.4f}")
+        print_table(os_headers, os_rows)
 
         print("\nCompute Metrics:")
-        for key in compute_metrics_runs:
-            mean_val = float(np.mean(compute_metrics_runs[key]))
-            std_val = float(np.std(compute_metrics_runs[key]))
-            print(f"{key}: {mean_val:.4f} ± {std_val:.4f}")
+        for ckey in compute_runs:
+            print(f"  {ckey}: {_fmt(compute_runs[ckey])}")
         print("-"*50)
 
         all_metrics = {
-            "config_hash": file_name,
             "config": sweep_config,
-            "test_metrics_runs": test_metrics_runs,
-            "train_metrics_runs": train_metrics_runs,
-            "val_metrics_runs": val_metrics_runs,
-            "test_metrics_mean_std": mean_std_dict,
-            "oversmoothing_metrics_runs": oversmoothing_metrics,
-            "oversmoothing_metrics_mean_std": oversmoothing_summary,
-            "compute_metrics_runs": compute_metrics_runs,
+            "classification": classification_runs,
+            "oversmoothing": oversmoothing_runs,
+            "compute": compute_runs,
         }
 
         # Save results

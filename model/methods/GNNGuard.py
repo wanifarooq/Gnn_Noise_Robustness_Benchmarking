@@ -287,9 +287,9 @@ class GNNGuardTrainer:
             )
 
         print("GNNGuard Training completed!")
-        print(f"Test Acc: {results['accuracy']:.4f} | Test F1: {results['f1']:.4f} | "
-              f"Precision: {results['precision']:.4f}, Recall: {results['recall']:.4f}")
-        print(f"Test Oversmoothing: {results['oversmoothing']}")
+        print(f"Test Acc: {results['test_cls']['accuracy']:.4f} | Test F1: {results['test_cls']['f1']:.4f} | "
+              f"Precision: {results['test_cls']['precision']:.4f}, Recall: {results['test_cls']['recall']:.4f}")
+        print(f"Test Oversmoothing: {results['test_oversmoothing']}")
 
         return results
     
