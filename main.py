@@ -59,7 +59,11 @@ def run_benchmarking(base_folder='results', config_path='config3.yaml',
         if device_str == "cuda":
             print(f"CUDA device name: {torch.cuda.get_device_name(torch.cuda.current_device())}")
 
-        test_accuracies, test_f1s, test_precisions, test_recalls, test_flops = [], [], [], [], []
+        test_accuracies, test_f1s, test_precisions, test_recalls = [], [], [], []
+        compute_metrics_runs = {
+            'flops_inference': [], 'flops_training_total': [],
+            'time_training_total': [], 'time_inference': [],
+        }
         oversmoothing_metrics = {
             'NumRank': [], 'Erank': [], 'EDir': [],
             'EDir_traditional': [], 'EProj': [], 'MAD': [],
@@ -102,7 +106,8 @@ def run_benchmarking(base_folder='results', config_path='config3.yaml',
             test_f1s.append(float(test_metrics['f1']))
             test_precisions.append(float(test_metrics['precision']))
             test_recalls.append(float(test_metrics['recall']))
-            test_flops.append(float(test_metrics['flops_info']['total_flops']))
+            for ckey in compute_metrics_runs:
+                compute_metrics_runs[ckey].append(float(test_metrics['compute_info'][ckey]))
 
             for key in oversmoothing_metrics:
                 if '-Train' in key:
@@ -125,7 +130,8 @@ def run_benchmarking(base_folder='results', config_path='config3.yaml',
                 else:
                     # It is a single scalar
                     oversmoothing_metrics[key].append(float(raw_val))
-            print(f"Run {run} completed - Test Acc: {float(test_metrics['accuracy']):.4f}, F1: {float(test_metrics['f1']):.4f}")
+            print(f"Run {run} completed - Test Acc: {float(test_metrics['accuracy']):.4f}, F1: {float(test_metrics['f1']):.4f}, "
+                  f"Train: {float(test_metrics['compute_info']['time_training_total']):.2f}s, Eval: {float(test_metrics['compute_info']['time_inference']):.2f}s")
 
         # Compute mean ± std (store as plain floats to simplify JSON)
         mean_std_dict = {
@@ -133,7 +139,10 @@ def run_benchmarking(base_folder='results', config_path='config3.yaml',
             'F1': [float(np.mean(test_f1s)), float(np.std(test_f1s))],
             'Precision': [float(np.mean(test_precisions)), float(np.std(test_precisions))],
             'Recall': [float(np.mean(test_recalls)), float(np.std(test_recalls))],
-            'FLOPS': [float(np.mean(test_flops)), float(np.std(test_flops))],
+            'FLOPS_inference': [float(np.mean(compute_metrics_runs['flops_inference'])), float(np.std(compute_metrics_runs['flops_inference']))],
+            'FLOPS_training_total': [float(np.mean(compute_metrics_runs['flops_training_total'])), float(np.std(compute_metrics_runs['flops_training_total']))],
+            'Time_training_total': [float(np.mean(compute_metrics_runs['time_training_total'])), float(np.std(compute_metrics_runs['time_training_total']))],
+            'Time_inference': [float(np.mean(compute_metrics_runs['time_inference'])), float(np.std(compute_metrics_runs['time_inference']))],
         }
 
         print("\nSweep Config Results:")
@@ -147,14 +156,21 @@ def run_benchmarking(base_folder='results', config_path='config3.yaml',
             std_val = float(np.std(oversmoothing_metrics[key]))
             oversmoothing_summary[key] = [mean_val, std_val]
             print(f"{key}: {mean_val:.4f} ± {std_val:.4f}")
+
+        print("\nCompute Metrics:")
+        for key in compute_metrics_runs:
+            mean_val = float(np.mean(compute_metrics_runs[key]))
+            std_val = float(np.std(compute_metrics_runs[key]))
+            print(f"{key}: {mean_val:.4f} ± {std_val:.4f}")
         print("-"*50)
 
         all_metrics = {
             "config_hash": file_name,
-            "config": sweep_config, 
+            "config": sweep_config,
             "test_metrics_mean_std": mean_std_dict,
             "oversmoothing_metrics_runs": oversmoothing_metrics,
-            "oversmoothing_metrics_mean_std": oversmoothing_summary
+            "oversmoothing_metrics_mean_std": oversmoothing_summary,
+            "compute_metrics_runs": compute_metrics_runs,
         }
 
         # Save results

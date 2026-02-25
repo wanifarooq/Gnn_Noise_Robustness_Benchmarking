@@ -236,7 +236,7 @@ class TestMakeResult:
                 pass
 
         dummy = DummyTrainer.__new__(DummyTrainer)
-        dummy.init_data = {'flops_info': {'total_flops': 0}}
+        dummy.init_data = {'compute_info': {'flops_inference': 0, 'flops_training_total': 0, 'time_training_total': 0.0, 'time_inference': 0.0}}
 
         result_dict = {
             'accuracy': 0.8, 'f1': 0.7,
@@ -259,7 +259,7 @@ class TestMakeResult:
                 pass
 
         dummy = DummyTrainer.__new__(DummyTrainer)
-        dummy.init_data = {'flops_info': {'total_flops': 0}}
+        dummy.init_data = {'compute_info': {'flops_inference': 0, 'flops_training_total': 0, 'time_training_total': 0.0, 'time_inference': 0.0}}
 
         result_dict = {
             'accuracy': 0.8, 'f1': 0.7,
@@ -280,7 +280,7 @@ class TestMakeResult:
                 pass
 
         dummy = DummyTrainer.__new__(DummyTrainer)
-        dummy.init_data = {'flops_info': {'total_flops': 0}}
+        dummy.init_data = {'compute_info': {'flops_inference': 0, 'flops_training_total': 0, 'time_training_total': 0.0, 'time_inference': 0.0}}
 
         result_dict = {
             'accuracy': 0.8, 'f1': 0.7,

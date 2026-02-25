@@ -1,6 +1,7 @@
 """Experiment orchestration — setup pipeline and registry-based dispatch."""
 
 import os
+import time
 
 import torch
 from torch_geometric.data import Data
@@ -87,7 +88,12 @@ def initialize_experiment(config, run_id=1):
     ).to(device)
 
     flops_info = profile_model_flops(backbone_model, data_for_training, device)
-
+    compute_info = {
+        'flops_inference': flops_info['total_flops'],
+        'flops_training_total': 0,
+        'time_training_total': 0.0,
+        'time_inference': 0.0,
+    }
 
     # training parameters
     trainer_params = config.get('training', {})
@@ -117,7 +123,7 @@ def initialize_experiment(config, run_id=1):
         'method': method,
         'seed': seed,
         'oversmoothing_every': oversmoothing_every,
-        'flops_info': flops_info,
+        'compute_info': compute_info,
         'get_model': get_model,
     }
 
@@ -152,7 +158,10 @@ def run_experiment(config, run_id=1, *, checkpoint_path=None, eval_only=False):
         state = torch.load(checkpoint_path, map_location=init_data['device'],
                            weights_only=False)
         trainer.load_checkpoint_state(state)
+        t0 = time.perf_counter()
         eval_result = trainer.evaluate()
+        time_inference = time.perf_counter() - t0
+        init_data['compute_info']['time_inference'] = round(time_inference, 4)
         return trainer._make_result(
             eval_result,
             state.get('train_oversmoothing', {}),

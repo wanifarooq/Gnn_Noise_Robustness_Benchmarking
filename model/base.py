@@ -1,5 +1,6 @@
 """BaseTrainer ABC — unified interface for all 13 GNN robustness trainers."""
 
+import time
 from abc import ABC, abstractmethod
 from copy import deepcopy
 
@@ -30,9 +31,23 @@ class BaseTrainer(ABC):
 
     def run(self) -> dict:
         """Train + evaluate. Return standardised result dict."""
+        t0 = time.perf_counter()
         train_out = self.train()
-        self.init_data['flops_info'] = self.profile_flops()
+        time_training = time.perf_counter() - t0
+
+        flops_result = self.profile_flops()
+
+        t0 = time.perf_counter()
         eval_result = self.evaluate()
+        time_inference = time.perf_counter() - t0
+
+        epochs = self.init_data.get('epochs', 0)
+        self.init_data['compute_info'] = {
+            'flops_inference': flops_result['total_flops'],
+            'flops_training_total': flops_result['total_flops'] * 3 * epochs,
+            'time_training_total': round(time_training, 4),
+            'time_inference': round(time_inference, 4),
+        }
         return self._make_result(
             eval_result,
             train_out.get('train_oversmoothing', {}),
@@ -131,5 +146,5 @@ class BaseTrainer(ABC):
                 self._reduce_oversmoothing(val_oversmoothing)
                 if reduce else val_oversmoothing
             ) if val_oversmoothing else {},
-            'flops_info': self.init_data['flops_info'],
+            'compute_info': self.init_data['compute_info'],
         }

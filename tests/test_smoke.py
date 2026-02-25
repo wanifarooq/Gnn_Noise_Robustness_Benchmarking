@@ -185,7 +185,7 @@ def test_model_smoke(method):
 
     # ── required top-level keys ──────────────────────────────────────────
     for key in ('accuracy', 'f1', 'precision', 'recall',
-                'oversmoothing', 'train_oversmoothing', 'flops_info'):
+                'oversmoothing', 'train_oversmoothing', 'compute_info'):
         assert key in result, f"Missing key '{key}' in result for method '{method}'"
 
     # ── classification metrics in [0, 1] and finite ──────────────────────
@@ -227,10 +227,12 @@ def test_model_smoke(method):
         f"val_oversmoothing should be dict for method '{method}'"
     )
 
-    # ── flops_info has total_flops ───────────────────────────────────────
-    assert 'total_flops' in result['flops_info'], (
-        f"flops_info missing 'total_flops' for method '{method}'"
-    )
+    # ── compute_info has 4 compute metrics ───────────────────────────────
+    for ckey in ('flops_inference', 'flops_training_total',
+                 'time_training_total', 'time_inference'):
+        assert ckey in result['compute_info'], (
+            f"compute_info missing '{ckey}' for method '{method}'"
+        )
 
 
 # ── Checkpoint round-trip ────────────────────────────────────────────────────
@@ -255,8 +257,13 @@ def test_checkpoint_roundtrip(method, tmp_path):
 
     # Result structure is valid
     for key in ('accuracy', 'f1', 'precision', 'recall',
-                'oversmoothing', 'train_oversmoothing', 'flops_info'):
+                'oversmoothing', 'train_oversmoothing', 'compute_info'):
         assert key in result_eval, f"Missing key '{key}' in eval-only result"
+
+    # Eval-only should have zero training metrics and positive inference time
+    assert result_eval['compute_info']['time_training_total'] == 0.0
+    assert result_eval['compute_info']['flops_training_total'] == 0
+    assert result_eval['compute_info']['time_inference'] > 0
 
     # Classification metrics should match (same weights, same data)
     assert result_eval['accuracy'] == pytest.approx(result_train['accuracy'], abs=1e-5)
