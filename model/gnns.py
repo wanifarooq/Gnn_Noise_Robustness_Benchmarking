@@ -1,3 +1,5 @@
+import warnings
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -165,9 +167,17 @@ class GIN(nn.Module):
     Each GINConv wraps an MLP. Last conv's MLP projects hidden_channels -> out_channels.
     get_embeddings() runs convs[:-1], returning hidden_channels dim.
     forward() runs all convs, returning out_channels dim.
+
+    NOTE: GINConv does not support edge weights. Any edge_weight on the input
+    data is silently ignored. This is by design — GIN's theoretical power
+    (injective multiset aggregation) requires unweighted sum. Methods that
+    produce adaptive edge weights (RTGNN, NRGNN, GNNGuard) will not benefit
+    from them when using GIN as backbone.
     """
+    _edge_weight_warned = False
+
     def __init__(self, in_channels: int, hidden_channels: int, out_channels: int,
-                 n_layers: int = 3, mlp_layers: int = 2, dropout: float = 0.5, 
+                 n_layers: int = 3, mlp_layers: int = 2, dropout: float = 0.5,
                  train_eps: bool = True):
         super().__init__()
         self.dropout = dropout
@@ -182,6 +192,14 @@ class GIN(nn.Module):
 
     def _forward_body(self, data):
         """Run convs[:-1] (last conv is the projection). Returns hidden_channels dim."""
+        if not GIN._edge_weight_warned and getattr(data, 'edge_weight', None) is not None:
+            warnings.warn(
+                "GIN backbone ignores edge_weight (GINConv uses unweighted sum "
+                "to preserve injective aggregation). Consider using GCN, GAT, "
+                "or GATv2 if edge weights are important.",
+                stacklevel=2,
+            )
+            GIN._edge_weight_warned = True
         x, edge_index = data.x, data.edge_index
         for conv in self.convs[:-1]:
             x = conv(x, edge_index)
