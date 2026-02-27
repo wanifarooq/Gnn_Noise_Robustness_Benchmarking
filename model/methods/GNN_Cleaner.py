@@ -428,10 +428,10 @@ class GNNCleanerTrainer:
             os_entry = None
 
             if training_epoch % oversmoothing_calculation_interval == 0 or training_epoch == self.max_training_epochs - 1:
-                try:
-                    current_embeddings = self.gnn_model(self.data)
-                except Exception:
-                    current_embeddings = self.gnn_model(self.data.x.to(self.device), self.data.edge_index.to(self.device))
+                self.gnn_model.eval()
+                with torch.no_grad():
+                    current_embeddings = self.gnn_model.get_embeddings(self.data)
+                self.gnn_model.train()
 
                 train_oversmoothing_metrics = compute_oversmoothing_for_mask(
                     self.oversmoothing_metric_evaluator, current_embeddings, self.data.edge_index.to(self.device), self.data.train_mask

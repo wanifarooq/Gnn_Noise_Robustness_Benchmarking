@@ -346,6 +346,10 @@ class EnhancedGNNWrapper(nn.Module):
             
         return enhanced_features
     
+    def get_embeddings(self, graph_data):
+        """Return hidden_channels-dim representations from the base GNN."""
+        return self.base_gnn_model.get_embeddings(graph_data)
+
     def reset_parameters(self):
 
         if hasattr(self.base_gnn_model, 'reset_parameters'):
@@ -470,11 +474,11 @@ class ERASETrainer:
                 if should_compute_oversmoothing:
                     model.eval()
                     with torch.no_grad():
-                        learned_features = model(graph_data)
+                        embeddings = model.get_embeddings(graph_data)
                     train_oversmoothing = compute_oversmoothing_for_mask(
-                        self.oversmoothing_metrics_calculator, learned_features, graph_data.edge_index, graph_data.train_mask)
+                        self.oversmoothing_metrics_calculator, embeddings, graph_data.edge_index, graph_data.train_mask)
                     validation_oversmoothing = compute_oversmoothing_for_mask(
-                        self.oversmoothing_metrics_calculator, learned_features, graph_data.edge_index, graph_data.val_mask)
+                        self.oversmoothing_metrics_calculator, embeddings, graph_data.edge_index, graph_data.val_mask)
                     for key, value in train_oversmoothing.items():
                         per_epochs_oversmoothing[key].append(value)
                     for key, value in validation_oversmoothing.items():
@@ -603,6 +607,7 @@ class ERASETrainer:
 
     @torch.no_grad()
     def _compute_cross_entropy_loss_for_split(self, model, graph_data, split_mask):
+        # TODO: verify - are logits here okay, or should be a hidden embedding instead
         learned_features = model(graph_data)
         split_true_labels = graph_data.y[split_mask]
         cross_entropy_loss = torch.nn.CrossEntropyLoss()
@@ -727,6 +732,7 @@ class ERASEMethodTrainer(BaseTrainer):
 
         model.eval()
         with torch.no_grad():
+            # TODO: verify - are logits here okay, or should be a hidden embedding instead
             learned_features = model(data)
 
         normalized_features = normalize(learned_features.detach().cpu().numpy(), norm='l2')
@@ -744,7 +750,7 @@ class ERASEMethodTrainer(BaseTrainer):
             return torch.tensor(preds, device=device, dtype=torch.long)
 
         def get_embeddings():
-            return learned_features
+            return model.get_embeddings(data)
 
         return evaluate_model(
             get_predictions, get_embeddings, data.y,

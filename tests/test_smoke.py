@@ -343,3 +343,49 @@ def test_eval_only_blocked_for_unsupported_method(tmp_path):
     # eval_only should raise for cr_gnn (supports_eval_only = False)
     with pytest.raises(NotImplementedError, match="does not support eval_only"):
         run_experiment(config, run_id=1, checkpoint_path=ckpt, eval_only=True)
+
+
+# ── get_embeddings shape tests ─────────────────────────────────────────────
+
+@pytest.mark.parametrize('model_name', ['gcn', 'gin', 'gat', 'gatv2', 'gps'])
+def test_get_embeddings_shape(model_name):
+    """Verify get_embeddings returns hidden_channels dim, forward returns num_classes."""
+    from torch_geometric.data import Data
+    from util.profiling import get_model
+
+    num_features = 8
+    hidden_channels = 16
+    num_classes = 4
+    num_nodes = 20
+    num_edges = 40
+    heads = 4
+
+    x = torch.randn(num_nodes, num_features)
+    edge_index = torch.randint(0, num_nodes, (2, num_edges))
+    data = Data(x=x, edge_index=edge_index)
+
+    model = get_model(
+        model_name=model_name,
+        in_channels=num_features,
+        hidden_channels=hidden_channels,
+        out_channels=num_classes,
+        n_layers=2,
+        dropout=0.0,
+        self_loop=True,
+        mlp_layers=1,
+        train_eps=False,
+        heads=heads,
+    )
+    model.eval()
+    with torch.no_grad():
+        out = model(data)
+        emb = model.get_embeddings(data)
+
+    assert out.shape == (num_nodes, num_classes), (
+        f"forward shape {out.shape} != expected ({num_nodes}, {num_classes}) for {model_name}"
+    )
+    # GAT concatenates heads, so its hidden dim is hidden_channels * heads
+    expected_emb_dim = hidden_channels * heads if model_name == 'gat' else hidden_channels
+    assert emb.shape == (num_nodes, expected_emb_dim), (
+        f"get_embeddings shape {emb.shape} != expected ({num_nodes}, {expected_emb_dim}) for {model_name}"
+    )

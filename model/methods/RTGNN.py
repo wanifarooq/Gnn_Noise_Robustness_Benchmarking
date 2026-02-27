@@ -22,13 +22,12 @@ from model.registry import register
 class DualBranchGNNModel(nn.Module):
     
     def __init__(self, gnn_type: str, input_features: int, hidden_dim: int, num_classes: int,
-                 dropout_rate: float = 0.5, use_edge_weights: bool = False, attention_heads: int = 4,
+                 dropout_rate: float = 0.5, attention_heads: int = 4,
                  num_layers: int | None = None, device=None, add_self_loops: bool = False,
                  attn_type: str = 'multihead', use_pe: bool = False, pe_dim: int = 8):
         super().__init__()
         self.device = device
         self.gnn_type = gnn_type.lower()
-        self.use_edge_weights = use_edge_weights
         self.dropout_rate = dropout_rate
         self.add_self_loops = add_self_loops
         self.attn_type = attn_type
@@ -42,10 +41,10 @@ class DualBranchGNNModel(nn.Module):
             elif self.gnn_type == 'gin':
                 return GIN(input_features, hidden_dim, num_classes, n_layers=num_layers or 3,
                           mlp_layers=2, dropout=dropout_rate)
-            elif self.gnn_type == 'gat' and not use_edge_weights:
+            elif self.gnn_type == 'gat':
                 return GAT(input_features, hidden_dim, num_classes, n_layers=num_layers or 3,
                           heads=attention_heads, dropout=dropout_rate, self_loop=self.add_self_loops)
-            elif self.gnn_type == 'gatv2' and not use_edge_weights:
+            elif self.gnn_type == 'gatv2':
                 return GATv2(input_features, hidden_dim, num_classes, n_layers=num_layers or 3,
                             heads=attention_heads, dropout=dropout_rate, self_loop=self.add_self_loops)
             elif self.gnn_type == 'gps':
@@ -58,16 +57,27 @@ class DualBranchGNNModel(nn.Module):
         self.first_branch = create_gnn_branch()
         self.second_branch = create_gnn_branch()
 
-    def forward(self, node_features, edge_indices, edge_weights=None):
+    def _to_graph_data(self, node_features, edge_indices, edge_weights=None):
         graph_data = Data(x=node_features, edge_index=edge_indices)
-        if self.use_edge_weights and edge_weights is not None:
+        if edge_weights is not None:
             graph_data.edge_weight = edge_weights
         if self.device is not None:
             graph_data = graph_data.to(self.device)
+        return graph_data
 
+    def forward(self, node_features, edge_indices, edge_weights=None):
+        """Return (out_channels-dim logits, out_channels-dim logits) from both branches."""
+        graph_data = self._to_graph_data(node_features, edge_indices, edge_weights)
         first_branch_output = self.first_branch(graph_data)
         second_branch_output = self.second_branch(graph_data)
         return first_branch_output, second_branch_output
+
+    def get_embeddings(self, node_features, edge_indices, edge_weights=None):
+        """Return averaged hidden_channels-dim representations from both branches."""
+        graph_data = self._to_graph_data(node_features, edge_indices, edge_weights)
+        first_emb = self.first_branch.get_embeddings(graph_data)
+        second_emb = self.second_branch.get_embeddings(graph_data)
+        return (first_emb + second_emb) / 2
 
     def reset_parameters(self):
         if hasattr(self.first_branch, "reset_parameters"):
@@ -385,17 +395,9 @@ class RTGNN(nn.Module):
             )
             averaged_output = (first_branch_output + second_branch_output) / 2
             
-            graph_data = Data(x=node_features, edge_index=final_edge_indices)
-            if final_edge_weights is not None:
-                graph_data.edge_weight = final_edge_weights
-            graph_data = graph_data.to(self.device)
-
-            try:
-                first_embeddings = self.dual_branch_predictor.first_branch.get_embeddings(graph_data) if hasattr(self.dual_branch_predictor.first_branch, 'get_embeddings') else self.dual_branch_predictor.first_branch(graph_data)
-                second_embeddings = self.dual_branch_predictor.second_branch.get_embeddings(graph_data) if hasattr(self.dual_branch_predictor.second_branch, 'get_embeddings') else self.dual_branch_predictor.second_branch(graph_data)
-                averaged_embeddings = (first_embeddings + second_embeddings) / 2
-            except Exception:
-                averaged_embeddings = averaged_output
+            averaged_embeddings = self.dual_branch_predictor.get_embeddings(
+                node_features, final_edge_indices, final_edge_weights
+            )
             
             performance_metrics = {}
             
@@ -667,17 +669,7 @@ class RTGNN(nn.Module):
                 return ((out1 + out2) / 2).argmax(dim=1)
 
             def _get_embeddings():
-                graph_data = Data(x=node_features, edge_index=best_edges)
-                if best_weights is not None:
-                    graph_data.edge_weight = best_weights
-                graph_data = graph_data.to(self.device)
-                try:
-                    first_emb = self.dual_branch_predictor.first_branch.get_embeddings(graph_data) if hasattr(self.dual_branch_predictor.first_branch, 'get_embeddings') else self.dual_branch_predictor.first_branch(graph_data)
-                    second_emb = self.dual_branch_predictor.second_branch.get_embeddings(graph_data) if hasattr(self.dual_branch_predictor.second_branch, 'get_embeddings') else self.dual_branch_predictor.second_branch(graph_data)
-                    return (first_emb + second_emb) / 2
-                except Exception:
-                    out1, out2 = self.dual_branch_predictor(node_features, best_edges, best_weights)
-                    return (out1 + out2) / 2
+                return self.dual_branch_predictor.get_embeddings(node_features, best_edges, best_weights)
 
             results = evaluate_model(
                 _get_predictions, _get_embeddings, node_labels,

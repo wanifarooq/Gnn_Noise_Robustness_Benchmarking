@@ -112,10 +112,11 @@ class GraphCleanerNoiseDetector:
 
                 os_entry = None
                 if (current_epoch + 1) % self.oversmoothing_every == 0:
+                    embeddings = neural_network_model.get_embeddings(graph_data)
                     train_oversmoothing_metrics = compute_oversmoothing_for_mask(
-                        self.oversmoothing_calculator, model_output, graph_data.edge_index, graph_data.train_mask)
+                        self.oversmoothing_calculator, embeddings, graph_data.edge_index, graph_data.train_mask)
                     val_oversmoothing_metrics = compute_oversmoothing_for_mask(
-                        self.oversmoothing_calculator, model_output, graph_data.edge_index, graph_data.val_mask)
+                        self.oversmoothing_calculator, embeddings, graph_data.edge_index, graph_data.val_mask)
 
                     os_entry = {'train': dict(train_oversmoothing_metrics), 'val': dict(val_oversmoothing_metrics)}
 
@@ -181,21 +182,22 @@ class GraphCleanerNoiseDetector:
         neural_network_model.eval()
         with torch.no_grad():
             final_model_output = neural_network_model(graph_data)
+            final_embeddings = neural_network_model.get_embeddings(graph_data)
             final_metrics_dict = {}
-            
+
             test_predictions = final_model_output[graph_data.test_mask].argmax(dim=-1).cpu()
             test_ground_truth = graph_data.y[graph_data.test_mask].cpu()
             final_metrics_dict['test_loss'] = F.cross_entropy(final_model_output[graph_data.test_mask], graph_data.y_noisy[graph_data.test_mask]).item()
             test_cls = self.cls_evaluator.compute_all_metrics(test_predictions, test_ground_truth)
             final_metrics_dict['test_acc'] = test_cls['accuracy']
             final_metrics_dict['test_f1'] = test_cls['f1']
-            
+
             final_train_oversmoothing = compute_oversmoothing_for_mask(
-                self.oversmoothing_calculator, final_model_output, graph_data.edge_index, graph_data.train_mask)
+                self.oversmoothing_calculator, final_embeddings, graph_data.edge_index, graph_data.train_mask)
             final_val_oversmoothing = compute_oversmoothing_for_mask(
-                self.oversmoothing_calculator, final_model_output, graph_data.edge_index, graph_data.val_mask)
+                self.oversmoothing_calculator, final_embeddings, graph_data.edge_index, graph_data.val_mask)
             final_test_oversmoothing = compute_oversmoothing_for_mask(
-                self.oversmoothing_calculator, final_model_output, graph_data.edge_index, graph_data.test_mask)
+                self.oversmoothing_calculator, final_embeddings, graph_data.edge_index, graph_data.test_mask)
 
         total_training_time = time.time() - training_start_time
 
@@ -503,9 +505,9 @@ class GraphCleanerNoiseDetector:
         if trained_model is not None and graph_data is not None:
             trained_model.eval()
             with torch.no_grad():
-                model_predictions = trained_model(graph_data)
+                model_embeddings = trained_model.get_embeddings(graph_data)
                 oversmoothing_results = compute_oversmoothing_for_mask(
-                    self.oversmoothing_calculator, model_predictions, graph_data.edge_index, graph_data.test_mask
+                    self.oversmoothing_calculator, model_embeddings, graph_data.edge_index, graph_data.test_mask
                 )
         
         print("GraphCleaner Training completed!")

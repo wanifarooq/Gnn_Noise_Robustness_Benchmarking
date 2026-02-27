@@ -115,16 +115,27 @@ class NRGNN:
         return estimator
 
     def create_gnn_wrapper(self, base_model):
+        """Wrap a backbone GNN to accept (features, edge_index, edge_weights) instead of Data.
+
+        Exposes forward(), get_embeddings(), and reset_parameters().
+        get_embeddings() delegates to base_model.get_embeddings() returning hidden_channels dim.
+        """
         wrapper = nn.Module()
         wrapper.base_gnn_model = base_model
-        
-        def forward_fn(node_features, edge_index, edge_weights=None):
+
+        def _make_data(node_features, edge_index, edge_weights):
             data_obj = type('GraphData', (), {})()
             data_obj.x = node_features
             data_obj.edge_index = edge_index
             data_obj.edge_weight = edge_weights
-            return wrapper.base_gnn_model(data_obj)
-            
+            return data_obj
+
+        def forward_fn(node_features, edge_index, edge_weights=None):
+            return wrapper.base_gnn_model(wrapper._make_data(node_features, edge_index, edge_weights))
+
+        def get_embeddings_fn(node_features, edge_index, edge_weights=None):
+            return wrapper.base_gnn_model.get_embeddings(wrapper._make_data(node_features, edge_index, edge_weights))
+
         def reset_params_fn():
             if hasattr(wrapper.base_gnn_model, 'initialize'):
                 wrapper.base_gnn_model.initialize()
@@ -132,8 +143,10 @@ class NRGNN:
                 for module in wrapper.base_gnn_model.modules():
                     if hasattr(module, 'reset_parameters'):
                         module.reset_parameters()
-        
+
+        wrapper._make_data = _make_data
         wrapper.forward = forward_fn
+        wrapper.get_embeddings = get_embeddings_fn
         wrapper.reset_parameters = reset_params_fn
         return wrapper
 
@@ -427,8 +440,9 @@ class NRGNN:
                 # Compute oversmoothing metrics
                 train_mask = self._indices_to_mask(train_indices, self.node_features.shape[0])
                 val_mask = self._indices_to_mask(validation_indices, self.node_features.shape[0])
-                train_oversmoothing = compute_oversmoothing_for_mask(self.oversmoothing_evaluator, main_model_output, main_model_edges, train_mask)
-                validation_oversmoothing = compute_oversmoothing_for_mask(self.oversmoothing_evaluator, main_model_output, main_model_edges, val_mask)
+                main_model_embeddings = self.main_model.get_embeddings(self.node_features, main_model_edges, main_model_weights.detach())
+                train_oversmoothing = compute_oversmoothing_for_mask(self.oversmoothing_evaluator, main_model_embeddings, main_model_edges, train_mask)
+                validation_oversmoothing = compute_oversmoothing_for_mask(self.oversmoothing_evaluator, main_model_embeddings, main_model_edges, val_mask)
 
                 if train_oversmoothing is not None:
                     self.oversmoothing_metrics_history['train'].append(train_oversmoothing)
@@ -548,7 +562,7 @@ class NRGNN:
                     ).argmax(dim=1)
 
                 def _get_embeddings():
-                    return self.main_model.forward(
+                    return self.main_model.get_embeddings(
                         self.node_features, self.best_edge_indices, self.best_edge_weights
                     )
 

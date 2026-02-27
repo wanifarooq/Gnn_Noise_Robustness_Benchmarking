@@ -222,11 +222,13 @@ class UnionNET:
             # Compute oversmoothing metrics
             os_entry = None
             if current_epoch % self.oversmoothing_every == 0:
+                with torch.no_grad():
+                    embeddings = self.gnn_model.get_embeddings(self.graph_data)
                 train_oversmooth_metrics = compute_oversmoothing_for_mask(
-                    self.oversmoothing_evaluator, model_predictions, self.edge_connections, self.train_node_mask
+                    self.oversmoothing_evaluator, embeddings, self.edge_connections, self.train_node_mask
                 )
                 val_oversmooth_metrics = compute_oversmoothing_for_mask(
-                    self.oversmoothing_evaluator, model_predictions, self.edge_connections, self.val_node_mask
+                    self.oversmoothing_evaluator, embeddings, self.edge_connections, self.val_node_mask
                 )
                 for key, value in train_oversmooth_metrics.items():
                     per_epochs_oversmoothing[key].append(value)

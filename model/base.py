@@ -153,7 +153,12 @@ class BaseTrainer(ABC):
         ``train_oversmoothing`` and ``val_oversmoothing`` keys."""
 
     def evaluate(self) -> dict:
-        """Evaluate after training. Default: backbone_model(data) on test split."""
+        """Evaluate after training.
+
+        Uses backbone_model(data) for classification predictions (out_channels dim)
+        and backbone_model.get_embeddings(data) for oversmoothing metrics (hidden_channels dim).
+        Override in subclasses that use wrapper models or non-standard evaluation.
+        """
         d = self.init_data
         model = d['backbone_model']
         data = d['data_for_training']
@@ -165,7 +170,7 @@ class BaseTrainer(ABC):
                 return model(data).argmax(dim=1)
 
             def get_embeddings():
-                return model(data)
+                return model.get_embeddings(data)
 
             return evaluate_model(
                 get_predictions, get_embeddings, data.y,

@@ -200,10 +200,12 @@ class GNNGuardTrainer:
                 train_oversmoothing_metrics = None
                 val_oversmoothing_metrics = None
                 if epoch % self.oversmoothing_every == 0:
+                    embeddings = self.model.get_embeddings(
+                        self.node_features, self.normalized_adjacency, use_attention=self.use_attention)
                     train_oversmoothing_metrics = compute_oversmoothing_for_mask(
-                        self.oversmoothing_evaluator, train_output, edge_connectivity, train_node_mask)
+                        self.oversmoothing_evaluator, embeddings, edge_connectivity, train_node_mask)
                     val_oversmoothing_metrics = compute_oversmoothing_for_mask(
-                        self.oversmoothing_evaluator, val_output, edge_connectivity, val_node_mask)
+                        self.oversmoothing_evaluator, embeddings, edge_connectivity, val_node_mask)
                     for key, value in train_oversmoothing_metrics.items():
                         per_epochs_oversmoothing[key].append(value)
                     for key, value in val_oversmoothing_metrics.items():
@@ -293,7 +295,7 @@ class GNNGuardTrainer:
                 ).argmax(dim=1)
 
             def get_embeddings():
-                return self.model(
+                return self.model.get_embeddings(
                     self.node_features, self.normalized_adjacency, use_attention=self.use_attention
                 )
             edge_index = self.normalized_adjacency._indices()
@@ -349,11 +351,10 @@ class GNNGuardModel(nn.Module):
         x = x.to(self.device)
 
         if self.use_backbone:
-            
             data = Data(x=x, edge_index=adjacency_tensor._indices(), edge_weight=adjacency_tensor._values())
             out = self.backbone(data)
             return F.log_softmax(out, dim=1)
-        
+
         for layer_idx, gcn_layer in enumerate(self.gcn_layers[:-1]):
             if use_attention:
                 modified_adjacency = self._compute_attention_coefficients(x, adjacency_tensor, layer_idx)
@@ -362,11 +363,10 @@ class GNNGuardModel(nn.Module):
             else:
                 edge_indices = adjacency_tensor._indices()
                 edge_weights = adjacency_tensor._values()
-            
             x = gcn_layer(x, edge_indices, edge_weight=edge_weights)
             x = F.relu(x)
             x = F.dropout(x, self.dropout_rate, training=self.training)
-        
+
         final_gcn_layer = self.gcn_layers[-1]
         if use_attention:
             modified_adjacency = self._compute_attention_coefficients(x, adjacency_tensor, self.num_layers)
@@ -375,9 +375,38 @@ class GNNGuardModel(nn.Module):
         else:
             edge_indices = adjacency_tensor._indices()
             edge_weights = adjacency_tensor._values()
-        
+
         x = final_gcn_layer(x, edge_indices, edge_weight=edge_weights)
         return F.log_softmax(x, dim=1)
+
+    def get_embeddings(self, node_features, adjacency_tensor, use_attention=True):
+        """Return hidden representations before the final projection.
+
+        With backbone (standard path): returns hidden_channels dim.
+        Without backbone (legacy fallback): returns attention_dim when num_layers > 1.
+        """
+        x = node_features.to_dense() if node_features.is_sparse else node_features
+        x = x.to(self.device)
+
+        if self.use_backbone:
+            data = Data(x=x, edge_index=adjacency_tensor._indices(), edge_weight=adjacency_tensor._values())
+            return self.backbone.get_embeddings(data)
+
+        last_hidden_idx = len(self.gcn_layers) - 2
+        for layer_idx, gcn_layer in enumerate(self.gcn_layers[:-1]):
+            if use_attention:
+                modified_adjacency = self._compute_attention_coefficients(x, adjacency_tensor, layer_idx)
+                edge_indices = modified_adjacency._indices()
+                edge_weights = modified_adjacency._values()
+            else:
+                edge_indices = adjacency_tensor._indices()
+                edge_weights = adjacency_tensor._values()
+
+            x = gcn_layer(x, edge_indices, edge_weight=edge_weights)
+            if layer_idx < last_hidden_idx:
+                x = F.relu(x)
+                x = F.dropout(x, self.dropout_rate, training=self.training)
+        return x
 
     
     def _compute_attention_coefficients(self, node_features, adjacency_tensor, layer_index, 

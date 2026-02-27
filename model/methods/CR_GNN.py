@@ -180,8 +180,7 @@ class CRGNNModel:
             os_entry = None
             if epoch % self.oversmoothing_every == 0:
                 with torch.no_grad():
-                    embeddings = backbone(Data(x=graph_data.x, edge_index=graph_data.edge_index))
-                    embeddings = adapter(embeddings)
+                    embeddings = backbone.get_embeddings(Data(x=graph_data.x, edge_index=graph_data.edge_index))
 
                     train_oversmooth_metrics = compute_oversmoothing_for_mask(
                         self.oversmoothing_evaluator, embeddings, graph_data.edge_index, train_mask
@@ -374,8 +373,7 @@ class CRGNNMethodTrainer(BaseTrainer):
                 return class_head(h).exp().argmax(dim=1)
 
             def get_embeddings():
-                h = backbone(Data(x=graph_data.x, edge_index=graph_data.edge_index))
-                return adapter(h)
+                return backbone.get_embeddings(Data(x=graph_data.x, edge_index=graph_data.edge_index))
 
             return evaluate_model(
                 get_predictions, get_embeddings, clean_labels,

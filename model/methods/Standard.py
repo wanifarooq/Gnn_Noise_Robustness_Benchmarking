@@ -65,11 +65,13 @@ def train_with_standard_loss(
 
         os_entry = None
         if debug and (epoch + 1) % oversmoothing_every == 0:
+            with torch.no_grad():
+                embeddings = model.get_embeddings(data)
             train_oversmoothing = compute_oversmoothing_for_mask(
-                oversmoothing_evaluator, out, data.edge_index, data.train_mask
+                oversmoothing_evaluator, embeddings, data.edge_index, data.train_mask
             )
             val_oversmoothing = compute_oversmoothing_for_mask(
-                oversmoothing_evaluator, out, data.edge_index, data.val_mask
+                oversmoothing_evaluator, embeddings, data.edge_index, data.val_mask
             )
 
             for key, value in train_oversmoothing.items():

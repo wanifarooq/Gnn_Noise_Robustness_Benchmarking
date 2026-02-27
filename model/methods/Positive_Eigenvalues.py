@@ -104,7 +104,7 @@ class PositiveEigenvaluesTrainer:
 
                 self.model.eval()
                 with torch.no_grad():
-                    full_embeddings = self.model(self.data)
+                    full_embeddings = self.model.get_embeddings(self.data)
 
                 train_oversmoothing = compute_oversmoothing_for_mask(
                     self.oversmoothing_evaluator, full_embeddings, self.data.edge_index, self.data.train_mask

@@ -11,6 +11,15 @@ from torch.nn import (
 )
 from torch_geometric.nn import GINEConv, GPSConv
 
+
+def _get_edge_attr(data) -> torch.Tensor | None:
+    """Extract scalar edge weights from data and unsqueeze (E,) -> (E,1) to match edge_dim=1."""
+    edge_weight = getattr(data, 'edge_weight', None)
+    if edge_weight is None:
+        return None
+    return edge_weight.unsqueeze(-1) if edge_weight.dim() == 1 else edge_weight
+
+
 class MLP(nn.Module):
     def __init__(self, in_channels: int, hidden_channels: int, out_channels: int,
                  num_layers: int = 2, dropout: float = 0.5, use_bn: bool = False):
@@ -33,17 +42,33 @@ class MLP(nn.Module):
                 for _ in range(num_layers - 1):
                     self.batch_norms.append(nn.BatchNorm1d(hidden_channels))
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def _forward_body(self, x: torch.Tensor) -> torch.Tensor:
+        """Run all layers except the final projection. Returns hidden_channels dim."""
         for i, layer in enumerate(self.layers[:-1]):
             x = layer(x)
             if self.use_bn:
                 x = self.batch_norms[i](x)
             x = F.relu(x)
             x = F.dropout(x, p=self.dropout, training=self.training)
-        return self.layers[-1](x)
+        return x
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.layers[-1](self._forward_body(x))
+
+    def get_embeddings(self, x: torch.Tensor) -> torch.Tensor:
+        """Return hidden_channels-dim node representations."""
+        return self._forward_body(x)
 
 
 class GCN(nn.Module):
+    """Graph Convolutional Network.
+
+    get_embeddings() returns the raw hidden representation (no output_norm/act/dropout).
+    forward() applies the final projection and, when output_layer=True, output_norm/act/dropout.
+    Default (output_layer=False): last conv is the projection (hidden->out_channels).
+    output_layer=True: all convs stay at hidden_channels; output_linear is the projection.
+    input_layer=True: input_linear projects in_channels -> hidden_channels before convs.
+    """
     def __init__(self, in_channels: int, hidden_channels: int, out_channels: int,
                  n_layers: int = 2, dropout: float = 0.5,
                  with_bias: bool = True, self_loop: bool = True, norm_info: dict | None = None,
@@ -80,7 +105,13 @@ class GCN(nn.Module):
                 assert self.norm_type is not None
                 self.norms.append(self.norm_type(out_dim))
 
-    def forward(self, data):
+    def _forward_body(self, data):
+        """Run inter-layer convs with norm/act/dropout between them.
+
+        Always runs convs[:-1]. When output_layer=True, also runs convs[-1] (hidden->hidden).
+        Returns the raw hidden representation before any projection-specific transforms
+        (output_norm/act/dropout/output_linear or the final projection conv).
+        """
         x, edge_index = data.x, data.edge_index
         edge_weight = getattr(data, 'edge_weight', None)
 
@@ -89,22 +120,32 @@ class GCN(nn.Module):
             x = self.act(x)
             x = F.dropout(x, p=self.dropout, training=self.training)
 
-        for i, conv in enumerate(self.convs):
+        for i, conv in enumerate(self.convs[:-1]):
             x = conv(x, edge_index, edge_weight)
-            if i < self.n_layers - 1:
-                if self.is_norm:
-                    x = self.norms[i](x)
-                x = self.act(x)
-                x = F.dropout(x, p=self.dropout, training=self.training)
+            if self.is_norm:
+                x = self.norms[i](x)
+            x = self.act(x)
+            x = F.dropout(x, p=self.dropout, training=self.training)
 
+        if self.output_layer:
+            x = self.convs[-1](x, edge_index, edge_weight)
+
+        return x
+
+    def forward(self, data):
+        x = self._forward_body(data)
+        edge_weight = getattr(data, 'edge_weight', None)
         if self.output_layer:
             if self.is_norm:
                 x = self.output_norm(x)
             x = self.act(x)
             x = F.dropout(x, p=self.dropout, training=self.training)
-            x = self.output_linear(x)
+            return self.output_linear(x)
+        return self.convs[-1](x, data.edge_index, edge_weight)
 
-        return x
+    def get_embeddings(self, data):
+        """Return raw hidden representation before the final projection and its transforms."""
+        return self._forward_body(data)
 
     def initialize(self):
         for conv in self.convs:
@@ -119,6 +160,12 @@ class GCN(nn.Module):
 
 
 class GIN(nn.Module):
+    """Graph Isomorphism Network.
+
+    Each GINConv wraps an MLP. Last conv's MLP projects hidden_channels -> out_channels.
+    get_embeddings() runs convs[:-1], returning hidden_channels dim.
+    forward() runs all convs, returning out_channels dim.
+    """
     def __init__(self, in_channels: int, hidden_channels: int, out_channels: int,
                  n_layers: int = 3, mlp_layers: int = 2, dropout: float = 0.5, 
                  train_eps: bool = True):
@@ -133,14 +180,22 @@ class GIN(nn.Module):
             mlp = MLP(in_dim, hidden_channels, out_dim, mlp_layers, dropout)
             self.convs.append(GINConv(mlp, train_eps=train_eps))
 
-    def forward(self, data):
+    def _forward_body(self, data):
+        """Run convs[:-1] (last conv is the projection). Returns hidden_channels dim."""
         x, edge_index = data.x, data.edge_index
-        for i, conv in enumerate(self.convs[:-1]):
+        for conv in self.convs[:-1]:
             x = conv(x, edge_index)
             x = F.relu(x)
             x = F.dropout(x, p=self.dropout, training=self.training)
-        x = self.convs[-1](x, edge_index)
         return x
+
+    def forward(self, data):
+        x = self._forward_body(data)
+        return self.convs[-1](x, data.edge_index)
+
+    def get_embeddings(self, data):
+        """Return hidden_channels-dim node representations."""
+        return self._forward_body(data)
 
     def initialize(self):
         for conv in self.convs:
@@ -148,6 +203,13 @@ class GIN(nn.Module):
 
 
 class GAT(nn.Module):
+    """Graph Attention Network (v1).
+
+    Intermediate layers concatenate heads (dim = hidden_channels * heads).
+    Last conv uses 1 head projecting to out_channels.
+    get_embeddings() runs convs[:-1], returning hidden_channels * heads dim.
+    forward() runs all convs, returning out_channels dim.
+    """
     def __init__(self, in_channels: int, hidden_channels: int, out_channels: int,
                  n_layers: int = 3, heads: int = 4, dropout: float = 0.6, 
                  with_bias: bool = True, self_loop: bool = True, 
@@ -185,22 +247,24 @@ class GAT(nn.Module):
                 norm_dim = out_dim * layer_heads if concat else out_dim
                 self.norms.append(self.norm_type(norm_dim))
 
-    def forward(self, data):
+    def _forward_body(self, data):
+        """Run convs[:-1] (last conv is the projection). Returns hidden_channels * heads dim."""
         x, edge_index = data.x, data.edge_index
-        edge_weight = getattr(data, 'edge_weight', None)
-        # Unsqueeze scalar edge weights (E,) -> (E,1) to match edge_dim=1
-        if edge_weight is not None:
-            edge_attr = edge_weight.unsqueeze(-1) if edge_weight.dim() == 1 else edge_weight
-        else:
-            edge_attr = None
-        for i, conv in enumerate(self.convs):
+        edge_attr = _get_edge_attr(data)
+        for i, conv in enumerate(self.convs[:-1]):
             x = conv(x, edge_index, edge_attr=edge_attr)
-            if i < self.n_layers - 1:
-                if self.is_norm:
-                    x = self.norms[i](x)
-                x = self.act(x)
-                x = F.dropout(x, p=self.dropout, training=self.training)
+            if self.is_norm:
+                x = self.norms[i](x)
+            x = self.act(x)
+            x = F.dropout(x, p=self.dropout, training=self.training)
         return x
+
+    def forward(self, data):
+        return self.convs[-1](self._forward_body(data), data.edge_index, edge_attr=_get_edge_attr(data))
+
+    def get_embeddings(self, data):
+        """Return hidden representation before the final projection conv."""
+        return self._forward_body(data)
 
     def initialize(self):
         for conv in self.convs:
@@ -211,9 +275,16 @@ class GAT(nn.Module):
 
 
 class GATv2(nn.Module):
+    """Graph Attention Network v2 (head-normalised variant).
+
+    Intermediate layers: per-head dim = hidden_channels // heads, concat=True -> hidden_channels.
+    Last conv uses heads=1, concat=False projecting to out_channels.
+    get_embeddings() runs convs[:-1], returning hidden_channels dim.
+    forward() runs all convs, returning out_channels dim.
+    """
     def __init__(self, in_channels: int, hidden_channels: int, out_channels: int,
-                 n_layers: int = 3, heads: int = 4, dropout: float = 0.6, 
-                 with_bias: bool = True, self_loop: bool = True, 
+                 n_layers: int = 3, heads: int = 4, dropout: float = 0.6,
+                 with_bias: bool = True, self_loop: bool = True,
                  norm_info: dict | None = None, act: str = 'F.elu'):
         super().__init__()
 
@@ -258,22 +329,24 @@ class GATv2(nn.Module):
                 assert self.norm_type is not None
                 self.norms.append(self.norm_type(hidden_channels))
 
-    def forward(self, data):
+    def _forward_body(self, data):
+        """Run convs[:-1] (last conv is the projection). Returns hidden_channels dim."""
         x, edge_index = data.x, data.edge_index
-        edge_weight = getattr(data, 'edge_weight', None)
-        # Unsqueeze scalar edge weights (E,) -> (E,1) to match edge_dim=1
-        if edge_weight is not None:
-            edge_attr = edge_weight.unsqueeze(-1) if edge_weight.dim() == 1 else edge_weight
-        else:
-            edge_attr = None
-        for i, conv in enumerate(self.convs):
+        edge_attr = _get_edge_attr(data)
+        for i, conv in enumerate(self.convs[:-1]):
             x = conv(x, edge_index, edge_attr=edge_attr)
-            if i < self.n_layers - 1:
-                if self.is_norm:
-                    x = self.norms[i](x)
-                x = self.act(x)
-                x = F.dropout(x, p=self.dropout, training=self.training)
+            if self.is_norm:
+                x = self.norms[i](x)
+            x = self.act(x)
+            x = F.dropout(x, p=self.dropout, training=self.training)
         return x
+
+    def forward(self, data):
+        return self.convs[-1](self._forward_body(data), data.edge_index, edge_attr=_get_edge_attr(data))
+
+    def get_embeddings(self, data):
+        """Return hidden_channels-dim node representations."""
+        return self._forward_body(data)
 
     def initialize(self):
         for conv in self.convs:
@@ -283,6 +356,13 @@ class GATv2(nn.Module):
                 norm.reset_parameters()
 
 class GPS(nn.Module):
+    """Graph Transformer (GPS: General, Powerful, Scalable).
+
+    Projection scheme (A — required by residual connections): lin_in projects
+    in_channels → hidden_channels; all GPSConv layers operate at hidden_channels;
+    lin_out projects hidden_channels → out_channels.
+    get_embeddings() returns hidden_channels dim (before lin_out); forward() returns out_channels dim.
+    """
     def __init__(self, in_channels: int, hidden_channels: int, out_channels: int,
                  n_layers: int = 3, dropout: float = 0.5, heads: int = 4,
                  attn_type: str = 'multihead', use_pe: bool = False, pe_dim: int = 8,
@@ -339,7 +419,8 @@ class GPS(nn.Module):
                 assert self.norm_type is not None
                 self.norms.append(self.norm_type(hidden_channels))
 
-    def forward(self, data):
+    def _forward_body(self, data):
+        """Run lin_in + all GPS convs. Returns hidden_channels dim (before lin_out)."""
         x, edge_index, batch = data.x, data.edge_index, getattr(data, 'batch', None)
 
         if self.use_pe and hasattr(data, 'pe'):
@@ -368,7 +449,14 @@ class GPS(nn.Module):
                 x = self.act(x)
                 x = F.dropout(x, p=self.dropout, training=self.training)
 
-        return self.lin_out(x)
+        return x
+
+    def forward(self, data):
+        return self.lin_out(self._forward_body(data))
+
+    def get_embeddings(self, data):
+        """Return hidden_channels-dim node representations."""
+        return self._forward_body(data)
 
     def initialize(self):
         self.lin_in.reset_parameters()

@@ -131,7 +131,7 @@ class PiGnnTrainer:
                 'val_f1': val_f1
             })
 
-            hidden_representations = model.backbone_gnn(graph_data)
+            hidden_representations = model.backbone_gnn.get_embeddings(graph_data)
             train_oversmoothing_metrics = compute_oversmoothing_for_mask(
                 self.oversmoothing_evaluator, hidden_representations, graph_data.edge_index, graph_data.train_mask
             )

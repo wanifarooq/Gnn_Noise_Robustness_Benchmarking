@@ -284,6 +284,7 @@ class GraphCommunityDefenseTrainer:
             else:
                 logits = model_output
             
+            # TODO: no model has "last_hidden", we are using logits which are low-dim
             if hasattr(model, 'last_hidden'):
                 node_embeddings = model.last_hidden
             else:
@@ -292,6 +293,7 @@ class GraphCommunityDefenseTrainer:
             # Compute losses
             supervised_loss = cross_entropy_loss(logits[self.train_node_mask], node_labels[self.train_node_mask])
             
+            # TODO: Is this a duplicate? no model has "last_hidden", we are using logits which are low-dim
             if hasattr(model, 'last_hidden'):
                 node_embeddings = model.last_hidden
             else:
@@ -341,7 +343,7 @@ class GraphCommunityDefenseTrainer:
 
                 os_entry = None
                 if (epoch + 1) % oversmoothing_every == 0:
-                    emb = node_embeddings.detach()
+                    emb = model.get_embeddings(batch_data).detach()
 
                     train_metrics = compute_oversmoothing_for_mask(
                         self.oversmoothing_evaluator, emb, edge_index, self.train_node_mask
