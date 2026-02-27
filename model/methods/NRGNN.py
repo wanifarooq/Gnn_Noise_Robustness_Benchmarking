@@ -625,6 +625,7 @@ class NRGNNMethodTrainer(BaseTrainer):
         state = {
             'main_model': deepcopy(nrgnn.main_model.state_dict()),
             'node_predictor': deepcopy(nrgnn.node_predictor.state_dict()),
+            'edge_weight_estimator': deepcopy(nrgnn.edge_weight_estimator.state_dict()),
         }
         if hasattr(nrgnn, '_current_edge_indices') and nrgnn._current_edge_indices is not None:
             state['edge_indices'] = nrgnn._current_edge_indices.clone()
@@ -652,9 +653,14 @@ class NRGNNMethodTrainer(BaseTrainer):
         nrgnn = self._nrgnn
         nrgnn.main_model.load_state_dict(state['main_model'])
         nrgnn.node_predictor.load_state_dict(state['node_predictor'])
+        if 'edge_weight_estimator' in state:
+            nrgnn.edge_weight_estimator.load_state_dict(state['edge_weight_estimator'])
         # Set the edge attributes that test() uses
         nrgnn.best_edge_indices = state.get('edge_indices')
         nrgnn.best_edge_weights = state.get('edge_weights')
+        # Sync _current_* so a subsequent get_checkpoint_state() roundtrips correctly
+        nrgnn._current_edge_indices = state.get('edge_indices')
+        nrgnn._current_edge_weights = state.get('edge_weights')
 
     def evaluate(self):
         return self._nrgnn.test(self._test_idx)

@@ -818,6 +818,9 @@ class RTGNNMethodTrainer(BaseTrainer):
             'edges': state.get('edges'),
             'weights': state.get('weights'),
         }
+        # Sync _current_* so a subsequent get_checkpoint_state() roundtrips correctly
+        rtgnn._current_edges = state.get('edges')
+        rtgnn._current_weights = state.get('weights')
 
     def profile_flops(self):
         from util.profiling import profile_model_flops
