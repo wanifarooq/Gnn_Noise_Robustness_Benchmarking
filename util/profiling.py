@@ -110,3 +110,68 @@ def profile_model_flops(model, data, device, n_warmup=1, n_iters=1,
         )
 
         return {"total_flops": int(total_flops), "profiler_table": table}
+
+
+def profile_training_step_flops(models, device, step_fn):
+    """Profile FLOPs for one training step (forward + backward).
+
+    Parameters
+    ----------
+    models : nn.Module or list[nn.Module]
+        Model(s) involved — set to train mode before profiling,
+        zero_grad after warmup, restored to eval mode when done.
+    device : torch.device
+    step_fn : () -> Tensor
+        Runs the full forward pass and returns a scalar loss.
+        ``backward()`` is called by this function.
+    """
+    import torch.nn as nn
+
+    with _profiler_lock:
+        if isinstance(models, nn.Module):
+            models = [models]
+
+        for m in models:
+            m.train()
+            m.zero_grad(set_to_none=True)
+
+        # Warmup — one full step outside the profiler
+        loss = step_fn()
+        loss.backward()
+        for m in models:
+            m.zero_grad(set_to_none=True)
+        if device.type == "cuda":
+            torch.cuda.synchronize()
+
+        activities = [ProfilerActivity.CPU]
+        if device.type == "cuda":
+            activities.append(ProfilerActivity.CUDA)
+
+        with profile(
+            activities=activities,
+            record_shapes=True,
+            profile_memory=False,
+            with_stack=False,
+            with_flops=True,
+        ) as prof:
+            loss = step_fn()
+            loss.backward()
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+
+        for m in models:
+            m.zero_grad(set_to_none=True)
+            m.eval()
+
+        total_flops = 0
+        for e in prof.key_averages():
+            fl = getattr(e, "flops", None)
+            if fl:
+                total_flops += fl
+
+        table = prof.key_averages().table(
+            sort_by="self_cuda_time_total" if device.type == "cuda" else "self_cpu_time_total",
+            row_limit=15,
+        )
+
+        return {"total_flops": int(total_flops), "profiler_table": table}

@@ -749,6 +749,25 @@ class ERASEMethodTrainer(BaseTrainer):
         model = self._erase_trainer._trained_model
         return profile_model_flops(model, d['data_for_training'], d['device'])
 
+    def profile_training_step(self):
+        """Profile one training step for ERASE.
+
+        Simplified vs the real step — uses cross_entropy instead of the
+        MCR2 loss (which involves logdet/slogdet, membership matrices, and
+        label propagation that are not GNN-layer FLOPs).  Captures the
+        dominant model forward+backward cost.
+        """
+        from util.profiling import profile_training_step_flops
+        d = self.init_data
+        model = self._erase_trainer._trained_model
+        data = d['data_for_training']
+
+        def step_fn():
+            out = model(data)
+            return F.cross_entropy(out[data.train_mask], data.y[data.train_mask])
+
+        return profile_training_step_flops(model, d['device'], step_fn)
+
     def evaluate(self):
         d = self.init_data
         trainer = self._erase_trainer

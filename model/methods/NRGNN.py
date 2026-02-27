@@ -662,5 +662,59 @@ class NRGNNMethodTrainer(BaseTrainer):
         nrgnn._current_edge_indices = state.get('edge_indices')
         nrgnn._current_edge_weights = state.get('edge_weights')
 
+    def profile_flops(self):
+        from util.profiling import profile_model_flops
+        nrgnn = self._nrgnn
+        d = self.init_data
+
+        def fwd():
+            return nrgnn.main_model.forward(
+                nrgnn.node_features, nrgnn.best_edge_indices, nrgnn.best_edge_weights
+            )
+
+        return profile_model_flops(nrgnn.main_model, d['data_for_training'],
+                                   d['device'], forward_fn=fwd)
+
+    def profile_training_step(self):
+        """Profile one training step (forward + backward) for all 3 NRGNN models.
+
+        Simplified vs the real training step — omits potential/confident edge
+        bookkeeping (which is non-differentiable), but connects
+        edge_weight_estimator to the loss via the reconstruction term so that
+        its backward pass is profiled.
+        """
+        from util.profiling import profile_training_step_flops
+        nrgnn = self._nrgnn
+        d = self.init_data
+
+        edge_weights = torch.ones(nrgnn.original_edge_index.shape[1],
+                                  device=nrgnn.device, dtype=torch.float32)
+
+        def step_fn():
+            node_reps = nrgnn.edge_weight_estimator.forward(
+                nrgnn.node_features, nrgnn.original_edge_index, edge_weights
+            )
+            recon_loss = nrgnn.compute_reconstruction_loss(
+                nrgnn.original_edge_index, node_reps
+            )
+            predictor_logits = nrgnn.node_predictor.forward(
+                nrgnn.node_features, nrgnn.original_edge_index, edge_weights
+            )
+            main_out = nrgnn.main_model.forward(
+                nrgnn.node_features, nrgnn.original_edge_index, edge_weights
+            )
+            train_idx = nrgnn.train_indices
+            predictor_loss = F.cross_entropy(
+                predictor_logits[train_idx], nrgnn.node_labels[train_idx]
+            )
+            main_loss = F.cross_entropy(
+                main_out[train_idx], nrgnn.node_labels[train_idx]
+            )
+            return predictor_loss + main_loss + nrgnn.reconstruction_weight * recon_loss
+
+        models = [nrgnn.main_model, nrgnn.node_predictor,
+                  nrgnn.edge_weight_estimator]
+        return profile_training_step_flops(models, d['device'], step_fn)
+
     def evaluate(self):
         return self._nrgnn.test(self._test_idx)

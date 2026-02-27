@@ -403,6 +403,39 @@ class CRGNNMethodTrainer(BaseTrainer):
 
         return profile_model_flops(backbone, data, cr.device, forward_fn=fwd)
 
+    def profile_training_step(self):
+        from util.profiling import profile_training_step_flops
+        cr = self._cr
+        backbone = cr._backbone
+        adapter = cr._adapter
+        proj_head = cr._proj_head
+        class_head = cr._class_head
+        data = cr._graph_data
+        noisy_labels = data.y
+        train_mask = data.train_mask
+
+        def step_fn():
+            edge_idx1, _ = dropout_edge(data.edge_index, p=cr.pr, training=True)
+            edge_idx2, _ = dropout_edge(data.edge_index, p=cr.pr, training=True)
+            x1, _ = mask_feature(data.x, p=cr.pr)
+            x2, _ = mask_feature(data.x, p=cr.pr)
+
+            h1 = adapter(backbone(Data(x=x1, edge_index=edge_idx1)))
+            h2 = adapter(backbone(Data(x=x2, edge_index=edge_idx2)))
+
+            z1 = proj_head(h1)
+            z2 = proj_head(h2)
+            loss_con = contrastive_loss_original_style(z1, z2, cr.tau)
+
+            p1 = class_head(h1)
+            p2 = class_head(h2)
+            loss_sup = F.nll_loss(p1[train_mask], noisy_labels[train_mask])
+
+            return cr.alpha * loss_con + loss_sup
+
+        models = [backbone, adapter, proj_head, class_head]
+        return profile_training_step_flops(models, cr.device, step_fn)
+
     def evaluate(self):
         cr = self._cr
         backbone = cr._backbone

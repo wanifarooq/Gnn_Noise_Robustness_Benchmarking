@@ -834,6 +834,43 @@ class RTGNNMethodTrainer(BaseTrainer):
 
         return profile_model_flops(dual, data, d['device'], forward_fn=fwd)
 
+    def profile_training_step(self):
+        """Profile one training step for RTGNN (structure_estimator + dual_branch).
+
+        Simplified vs the real step — omits KNN edges, pseudo-labeling,
+        intra-view regularization, and co-teaching loss (which involve scipy
+        ops the profiler cannot track).  Captures the dominant neural-network
+        forward+backward cost.
+        """
+        from util.profiling import profile_training_step_flops
+        rtgnn = self._rtgnn
+        d = self.init_data
+
+        node_features = rtgnn.node_features.to(rtgnn.device)
+        node_labels = torch.as_tensor(rtgnn.node_labels, dtype=torch.long,
+                                      device=rtgnn.device)
+        edge_indices, _ = from_scipy_sparse_matrix(rtgnn.adjacency_matrix)
+        edge_indices = edge_indices.to(rtgnn.device)
+        train_indices = rtgnn.train_node_indices
+
+        def step_fn():
+            node_reps, recon_loss = rtgnn.structure_estimator(
+                node_features, edge_indices
+            )
+            base_weights = torch.ones(edge_indices.size(1), device=rtgnn.device)
+            adaptive_weights = rtgnn.structure_estimator.compute_adaptive_edge_weights(
+                edge_indices, node_reps, base_weights
+            )
+            out1, out2 = rtgnn.dual_branch_predictor(
+                node_features, edge_indices, adaptive_weights
+            )
+            loss = (F.cross_entropy(out1[train_indices], node_labels[train_indices])
+                    + F.cross_entropy(out2[train_indices], node_labels[train_indices]))
+            return loss
+
+        models = [rtgnn.dual_branch_predictor, rtgnn.structure_estimator]
+        return profile_training_step_flops(models, d['device'], step_fn)
+
     def evaluate(self):
         d = self.init_data
         clean_labels = d['data'].y_original.cpu().numpy()

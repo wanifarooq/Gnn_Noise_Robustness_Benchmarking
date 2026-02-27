@@ -8,6 +8,7 @@ from abc import ABC, abstractmethod
 from copy import deepcopy
 
 import torch
+import torch.nn.functional as F
 import numpy as np
 
 from model.evaluation import evaluate_model, ZERO_CLS
@@ -20,12 +21,6 @@ class BaseTrainer(ABC):
     Subclasses implement ``train()`` which trains and returns oversmoothing
     dicts.  The default ``run()`` orchestrates train → evaluate → result.
     """
-
-    #: (PROBABLY) Approximate ratio of training-step FLOPS to inference FLOPS.
-    #: Default: 3 (1× forward + ~2× backward per step).  Override in
-    #: subclasses whose training loop is heavier (extra losses, auxiliary
-    #: models, iterative steps, etc.).
-    TRAINING_FLOPS_MULTIPLIER: int = 3
 
     def __init__(self, init_data: dict, config: dict):
         self.init_data = init_data
@@ -120,16 +115,18 @@ class BaseTrainer(ABC):
             warnings.warn("No best checkpoint was saved; evaluating with the current model state.")
 
         stopped_at_epoch = train_out.get('stopped_at_epoch')
-        flops_result = self.profile_flops()
+        actual_epochs = (stopped_at_epoch + 1) if stopped_at_epoch is not None else self.init_data.get('epochs', 0)
+
+        inference_flops = self.profile_flops()
+        training_step_flops = self.profile_training_step()
 
         t0_eval = time.perf_counter()
         eval_result = self.evaluate()
         time_inference = time.perf_counter() - t0_eval
 
-        epochs = self.init_data.get('epochs', 0)
         self.init_data['compute_info'] = {
-            'flops_inference': flops_result['total_flops'],
-            'flops_training_total': flops_result['total_flops'] * self.TRAINING_FLOPS_MULTIPLIER * epochs,
+            'flops_inference': inference_flops['total_flops'],
+            'flops_training_total': training_step_flops['total_flops'] * actual_epochs,
             'time_training_total': round(time_train, 4),
             'time_inference': round(time_inference, 4),
         }
@@ -153,8 +150,14 @@ class BaseTrainer(ABC):
 
     @abstractmethod
     def train(self) -> dict:
-        """Train the model. Return dict with at least
-        ``train_oversmoothing`` and ``val_oversmoothing`` keys."""
+        """Train the model.
+
+        Must return a dict with at least ``train_oversmoothing``,
+        ``val_oversmoothing``, and ``stopped_at_epoch`` keys.
+        ``stopped_at_epoch`` is the **0-based index** of the last epoch
+        that ran (i.e. the loop variable from ``for epoch in range(…)``).
+        ``run()`` computes ``actual_epochs = stopped_at_epoch + 1``.
+        """
 
     def evaluate(self) -> dict:
         """Evaluate after training.
@@ -183,6 +186,27 @@ class BaseTrainer(ABC):
             )
 
     # ── flops ─────────────────────────────────────────────────────────────
+    #
+    # FLOPs are profiled *after* training by running one synthetic pass
+    # under ``torch.profiler``.  This is valid because FLOPs depend on
+    # tensor shapes (architecture + input size), not on weight values, so
+    # the count is the same whether the model is freshly initialised or
+    # fully trained.
+    #
+    # The per-step count is then multiplied by ``actual_epochs`` to
+    # estimate total training FLOPs.  Known limitations:
+    #
+    # * Methods whose graph structure changes during training (NRGNN adds
+    #   potential/confident edges, RTGNN filters via adaptive weights) will
+    #   have a different edge count per epoch.  The profiling step uses a
+    #   simplified, fixed-size graph, so the result is an approximation of
+    #   the dominant per-step cost.
+    #
+    # * Non-neural operations that happen during a real training step
+    #   (scipy sparse conversions, sklearn LogisticRegression in ERASE,
+    #   negative sampling) are invisible to ``torch.profiler`` and are
+    #   therefore excluded.  Subclass ``step_fn`` implementations focus on
+    #   the neural-network forward+backward path.
 
     def profile_flops(self) -> dict:
         """Profile FLOPS for one inference forward pass.
@@ -194,6 +218,23 @@ class BaseTrainer(ABC):
         d = self.init_data
         return profile_model_flops(d['backbone_model'], d['data_for_training'],
                                    d['device'])
+
+    def profile_training_step(self) -> dict:
+        """Profile FLOPs for one training step (forward + backward).
+
+        Override in subclasses whose training step involves more models
+        or a non-standard loss.
+        """
+        from util.profiling import profile_training_step_flops
+        d = self.init_data
+        model = d['backbone_model']
+        data = d['data_for_training']
+
+        def step_fn():
+            out = model(data)
+            return F.cross_entropy(out[data.train_mask], data.y[data.train_mask])
+
+        return profile_training_step_flops(model, d['device'], step_fn)
 
     # ── checkpoint ───────────────────────────────────────────────────────
 

@@ -538,5 +538,32 @@ class GNNGuardMethodTrainer(BaseTrainer):
         # Restoring gnnguard_model is sufficient — backbone state is included within it.
         self._trainer.model.load_state_dict(state['gnnguard_model'])
 
+    def profile_flops(self):
+        from util.profiling import profile_model_flops
+        d = self.init_data
+        trainer = self._trainer
+        model = trainer.model
+
+        def fwd():
+            return model(trainer.node_features, trainer.normalized_adjacency,
+                         use_attention=trainer.use_attention)
+
+        return profile_model_flops(model, d['data_for_training'], d['device'],
+                                   forward_fn=fwd)
+
+    def profile_training_step(self):
+        from util.profiling import profile_training_step_flops
+        d = self.init_data
+        trainer = self._trainer
+        model = trainer.model
+
+        def step_fn():
+            out = model(trainer.node_features, trainer.normalized_adjacency,
+                        use_attention=trainer.use_attention)
+            return F.nll_loss(out[trainer.train_indices],
+                              trainer.node_labels[trainer.train_indices])
+
+        return profile_training_step_flops(model, d['device'], step_fn)
+
     def evaluate(self):
         return self._trainer.evaluate_model()
