@@ -476,7 +476,7 @@ class RTGNN(nn.Module):
         
         for epoch in range(self.training_config.epochs):
             self.train()
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
             
             node_representations, reconstruction_loss = self.structure_estimator(node_features, edge_indices)
             

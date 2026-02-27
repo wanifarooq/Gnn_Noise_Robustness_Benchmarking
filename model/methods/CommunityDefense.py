@@ -273,7 +273,7 @@ class GraphCommunityDefenseTrainer:
         
         for epoch in range(training_epochs):
             model.train()
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
             
             batch_data = PyGData(x=node_features, edge_index=edge_index, y=node_labels)
             model_output = model(batch_data)

@@ -33,7 +33,7 @@ def train_with_standard_loss(
 
     for epoch in range(total_epochs):
         model.train()
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
         out = model(data)
 
         train_idx = data.train_mask.nonzero(as_tuple=True)[0]

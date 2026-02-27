@@ -165,7 +165,7 @@ class GNNGuardTrainer:
         for epoch in range(max_epochs):
 
             self.model.train()
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
             
             train_output = self.model(self.node_features, self.normalized_adjacency, 
                                     use_attention=self.use_attention)

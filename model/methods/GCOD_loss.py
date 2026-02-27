@@ -338,14 +338,14 @@ class GCODTrainer:
                 true_labels=true_labels
             )
             
-            self.model_optimizer.zero_grad()
+            self.model_optimizer.zero_grad(set_to_none=True)
             model_loss = loss_l1 + loss_l3
             model_loss.backward(retain_graph=True)
             
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
             self.model_optimizer.step()
 
-            self.uncertainty_optimizer.zero_grad()
+            self.uncertainty_optimizer.zero_grad(set_to_none=True)
             loss_l2.backward()
             
             torch.nn.utils.clip_grad_norm_([self.gcod_loss_fn.uncertainty_params], max_norm=1.0)

@@ -199,7 +199,7 @@ class UnionNET:
         
         for current_epoch in range(self.num_epochs):
             self.gnn_model.train()
-            self.optimizer.zero_grad()
+            self.optimizer.zero_grad(set_to_none=True)
             
             model_predictions = self.gnn_model(self.graph_data)
             training_loss = self._compute_unionnet_training_loss(model_predictions)

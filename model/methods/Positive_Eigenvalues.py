@@ -222,7 +222,7 @@ class PositiveEigenvaluesTrainer:
         
         for batch in train_loader:
             batch = batch.to(self.device)
-            self.optimizer.zero_grad()
+            self.optimizer.zero_grad(set_to_none=True)
             
             output_logits = self.model(batch)
             

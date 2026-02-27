@@ -530,7 +530,7 @@ class ERASETrainer:
                                      adjacency_matrix, semantic_labels_matrix, predicted_labels):
 
         model.train()
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
         
         node_features = model(graph_data)
         

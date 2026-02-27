@@ -170,7 +170,7 @@ class CRGNNModel:
             proj_head.train()
             class_head.train()
             
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
             
             loss, train_acc, train_f1 = self._train_step(backbone, adapter, proj_head, class_head,
                                                         graph_data.x, graph_data.edge_index,

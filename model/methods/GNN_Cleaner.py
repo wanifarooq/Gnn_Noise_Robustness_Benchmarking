@@ -207,7 +207,7 @@ class GNNCleanerTrainer:
             select_loss = F.cross_entropy(selected_embeddings, selected_labels)
             
             # One-step optimization
-            self.gnn_optimizer.zero_grad()
+            self.gnn_optimizer.zero_grad(set_to_none=True)
             select_loss.backward(retain_graph=True)
             self.gnn_optimizer.step()
             
@@ -247,7 +247,7 @@ class GNNCleanerTrainer:
                 avg_corrected_loss = corrected_loss / len(left_indices)
                 
                 # Update GNN
-                self.gnn_optimizer.zero_grad()
+                self.gnn_optimizer.zero_grad(set_to_none=True)
                 avg_corrected_loss.backward(retain_graph=True)
                 
                 temp_gnn_params = {}
@@ -270,7 +270,7 @@ class GNNCleanerTrainer:
                     
                     clean_loss = F.cross_entropy(clean_embeddings, clean_labels)
                     
-                    self.network_optimizer.zero_grad()
+                    self.network_optimizer.zero_grad(set_to_none=True)
                     clean_loss.backward()
                     self.network_optimizer.step()
                 

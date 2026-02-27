@@ -333,7 +333,7 @@ class NRGNN:
         self.node_predictor.train()
         self.edge_weight_estimator.train()
         
-        self.optimizer.zero_grad()
+        self.optimizer.zero_grad(set_to_none=True)
         
         # Get node representations and reconstruction loss
         edge_weights = torch.ones(self.original_edge_index.shape[1], device=self.device, dtype=torch.float32)

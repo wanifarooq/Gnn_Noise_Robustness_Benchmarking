@@ -97,7 +97,7 @@ class GraphCleanerNoiseDetector:
         for current_epoch in range(total_training_epochs):
 
             neural_network_model.train()
-            model_optimizer.zero_grad()
+            model_optimizer.zero_grad(set_to_none=True)
 
             model_output = neural_network_model(graph_data)
             training_loss = F.cross_entropy(model_output[graph_data.train_mask], graph_data.y_noisy[graph_data.train_mask])

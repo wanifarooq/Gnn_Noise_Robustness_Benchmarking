@@ -227,8 +227,8 @@ class PiGnnTrainer:
         for current_epoch in range(self.total_epochs):
             model.train()
             mutual_information_model.train()
-            main_optimizer.zero_grad()
-            mi_optimizer.zero_grad()
+            main_optimizer.zero_grad(set_to_none=True)
+            mi_optimizer.zero_grad(set_to_none=True)
 
             main_classification_output, main_link_prediction = model(graph_data)
             mi_classification_output, mi_link_prediction = mutual_information_model(graph_data)
