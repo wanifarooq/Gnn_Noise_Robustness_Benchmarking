@@ -1,8 +1,8 @@
 import torch
 import torch.nn.functional as F
 import numpy as np
-from torch_geometric.utils import to_dense_adj
 from scipy.linalg import svd
+from scipy.sparse import coo_matrix
 from scipy.sparse.linalg import eigsh
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix, classification_report
 
@@ -208,11 +208,19 @@ class OversmoothingMetrics:
             return float(min(X.shape))
 
     def _compute_message_passing_matrix_eigenvector(self, edge_index, num_nodes, edge_weight=None):
+        # Original: used to_dense_adj(edge_index, ...) to create a full
+        # N×N dense numpy array, then passed it to scipy.sparse.linalg.eigsh.
+        # This costs O(N²) memory — prohibitive for large graphs.
+        #
+        # Optimized: build a scipy COO sparse matrix directly from the
+        # edge_index tensor.  eigsh() is designed for sparse input, so
+        # this costs only O(E) memory (number of edges).
         try:
-            adj = to_dense_adj(edge_index, edge_attr=edge_weight, max_num_nodes=num_nodes)[0]
-            adj_np = adj.cpu().numpy()
-
-            adj_sym = (adj_np + adj_np.T) / 2
+            row = edge_index[0].cpu().numpy()
+            col = edge_index[1].cpu().numpy()
+            vals = edge_weight.cpu().numpy() if edge_weight is not None else np.ones(len(row))
+            adj_sparse = coo_matrix((vals, (row, col)), shape=(num_nodes, num_nodes)).tocsr()
+            adj_sym = (adj_sparse + adj_sparse.T) / 2
 
             try:
                 eigenvalues, eigenvectors = eigsh(adj_sym, k=1, which='LA', maxiter=1000)
@@ -283,9 +291,14 @@ class OversmoothingMetrics:
         # Normalization
         u = u / torch.norm(u)
 
-        P = torch.mm(u, u.t())
-
-        PX = torch.mm(P, X)
+        # Original: P = torch.mm(u, u.t()) then PX = torch.mm(P, X)
+        # This creates an N×N dense matrix P, costing O(N²) memory
+        # (e.g. 10 GB for N=50K nodes).
+        #
+        # Optimized: exploit P = u @ u^T being rank-1, so
+        # P @ X = u @ (u^T @ X).  Memory drops from O(N²) to O(N·d).
+        utX = torch.mm(u.t(), X)   # (1, d)
+        PX = torch.mm(u, utX)      # (N, d) — same result, no N×N matrix
 
         diff = X - PX
         energy = torch.norm(diff, p='fro')**2
