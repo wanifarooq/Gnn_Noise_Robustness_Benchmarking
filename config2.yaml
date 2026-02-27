@@ -1,5 +1,6 @@
 seed: 42
 device: cuda
+num_runs: 5
 
 dataset:
   name: £[dblp,amazon-computers,hm-categories,web-fraud,tolokers-2,roman-empire,questions]

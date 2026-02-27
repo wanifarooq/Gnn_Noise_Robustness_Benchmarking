@@ -144,6 +144,7 @@ class BaseTrainer(ABC):
             stopped_at_epoch=stopped_at_epoch,
             final_result=result,
         )
+        self.save_plots()
 
         return result
 
@@ -200,6 +201,30 @@ class BaseTrainer(ABC):
     def load_checkpoint_state(self, state: dict) -> None:
         """Restore model weights from a checkpoint state dict."""
         self.init_data['backbone_model'].load_state_dict(state['backbone'])
+
+    # ── plotting ──────────────────────────────────────────────────────────
+
+    def save_plots(self):
+        """Save training and oversmoothing plots to run_dir."""
+        run_dir = self.init_data.get('run_dir')
+        if not run_dir or not self.epoch_log:
+            return
+        try:
+            from util.plot import save_training_plots, save_oversmoothing_plots
+            label = self._plot_label()
+            save_training_plots(self.epoch_log, run_dir, label=label)
+            save_oversmoothing_plots(self.epoch_log, run_dir, label=label)
+        except Exception as e:
+            print(f"Warning: Could not save plots: {e}")
+
+    def _plot_label(self) -> str:
+        """Build descriptive label like 'standard_cora_uniform-0.20' for plot titles/filenames."""
+        cfg = self.init_data.get('_config', {})
+        method = self.init_data.get('method', 'unknown')
+        dataset = cfg.get('dataset', {}).get('name', 'unknown')
+        noise_type = cfg.get('noise', {}).get('type', 'clean')
+        noise_rate = cfg.get('noise', {}).get('rate', 0) or 0
+        return f"{method}_{dataset}_{noise_type}-{float(noise_rate):.2f}"
 
     # ── helpers ──────────────────────────────────────────────────────────
 

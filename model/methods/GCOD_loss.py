@@ -3,7 +3,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from copy import deepcopy
 from torch_geometric.loader import NeighborLoader
-import matplotlib.pyplot as plt
 from collections import defaultdict
 
 from model.evaluation import (OversmoothingMetrics, ClassificationMetrics,
@@ -11,7 +10,7 @@ from model.evaluation import (OversmoothingMetrics, ClassificationMetrics,
 from model.base import BaseTrainer
 from model.registry import register
 
-def evaluate_ce_only(model, data_loader, device='cuda', num_classes=None, mask_name='val'):
+def evaluate_ce_only(model, data_loader, device='cuda', mask_name='val'):
     model.eval()
     total_ce_loss = 0.0
     total_samples = 0
@@ -249,12 +248,6 @@ class GCODTrainer:
         self.epochs_without_improvement = 0
         
         self.training_accuracy = 0.1
-        
-        self.epoch_oversmoothing_metrics = {
-            'train': {'EDir': [], 'MAD': [], 'NumRank': []},
-            'val': {'EDir': [], 'MAD': [], 'NumRank': []}
-        }
-        self.epochs_recorded = []
     
     def _setup_data_loaders(self):
         train_indices = self.data.train_mask.nonzero(as_tuple=True)[0]
@@ -457,71 +450,6 @@ class GCODTrainer:
             print(f"Warning: Could not compute oversmoothing metrics: {e}")
             return {'train': {}, 'val': {}, 'test': {}}
         
-    def plot_oversmoothing_metrics(self):
-
-        if not self.epochs_recorded or len(self.epochs_recorded) == 0:
-            print("No oversmoothing metrics recorded to plot.")
-            return
-        
-        fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-        fig.suptitle('Oversmoothing Metrics Evolution', fontsize=16)
-        
-        metrics_names = ['EDir', 'MAD', 'NumRank']
-        colors = {'train': 'blue', 'val': 'red'}
-        
-        for idx, metric_name in enumerate(metrics_names):
-            ax = axes[idx]
-            
-            for split in ['train', 'val']:
-                if (split in self.epoch_oversmoothing_metrics and 
-                    len(self.epoch_oversmoothing_metrics[split][metric_name]) > 0):
-                    
-                    y_values = self.epoch_oversmoothing_metrics[split][metric_name]
-                    ax.plot(self.epochs_recorded[:len(y_values)], y_values, 
-                           color=colors[split], label=f'{split.capitalize()}', 
-                           linewidth=2, alpha=0.8)
-            
-            ax.set_xlabel('Epoch')
-            ax.set_ylabel(metric_name)
-            ax.set_title(f'{metric_name} Evolution')
-            ax.legend()
-            ax.grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        import os
-        os.makedirs('output', exist_ok=True)
-        plt.savefig('output/oversmoothing_metrics.png', dpi=300, bbox_inches='tight')
-        #plt.show()
-
-    def plot_training_metrics(self):
-
-        if not hasattr(self, 'train_metrics_history'):
-            print("No metrics recorded to plot.")
-            return
-        
-        epochs = range(1, len(self.train_metrics_history['train']['loss']) + 1)
-        
-        fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-        
-        metrics_names = ['loss', 'accuracy', 'f1']
-        for idx, metric in enumerate(metrics_names):
-            ax = axes[idx]
-            for split in ['train', 'val']:
-                y_values = self.train_metrics_history[split][metric]
-                ax.plot(epochs, y_values, label=f'{split.capitalize()}', linewidth=2)
-            
-            ax.set_xlabel('Epoch')
-            ax.set_ylabel(metric.capitalize())
-            ax.set_title(f'{metric.capitalize()} Evolution')
-            ax.legend()
-            ax.grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        import os
-        os.makedirs('output', exist_ok=True)
-        plt.savefig('output/training_metrics.png', dpi=300, bbox_inches='tight')
-        #plt.show()
-
     def train_full_model(self, log_epoch_fn=None):
         per_epochs_train_oversmoothing = defaultdict(list)
         per_epochs_val_oversmoothing = defaultdict(list)
@@ -538,27 +466,6 @@ class GCODTrainer:
             val_loss_ce = val_ce_metrics['ce_loss']
 
             oversmoothing_metrics = self.compute_oversmoothing_metrics()
-            
-            self.epochs_recorded.append(epoch)
-            for split in ['train', 'val']:
-                if split in oversmoothing_metrics:
-                    for metric_name in ['EDir', 'MAD', 'NumRank']:
-                        metric_value = oversmoothing_metrics[split].get(metric_name, 0.0)
-                        self.epoch_oversmoothing_metrics[split][metric_name].append(metric_value)
-
-            if not hasattr(self, 'train_metrics_history'):
-                self.train_metrics_history = {
-                    'train': {'loss': [], 'accuracy': [], 'f1': []},
-                    'val': {'loss': [], 'accuracy': [], 'f1': []}
-                }
-
-            self.train_metrics_history['train']['loss'].append(train_metrics['loss'])
-            self.train_metrics_history['train']['accuracy'].append(train_metrics['accuracy'])
-            self.train_metrics_history['train']['f1'].append(train_metrics['f1'])
-
-            self.train_metrics_history['val']['loss'].append(val_ce_metrics['ce_loss'])
-            self.train_metrics_history['val']['accuracy'].append(val_ce_metrics['accuracy'])
-            self.train_metrics_history['val']['f1'].append(val_ce_metrics['f1'])
 
             os_entry = None
             if self.debug and (epoch + 1) % self.oversmoothing_every == 0:
@@ -623,11 +530,6 @@ class GCODTrainer:
                 if self.debug:
                     print(f"Early stopping triggered at epoch {epoch}")
                 break
-        
-        if self.debug:
-            print("\nGenerating plots")
-            self.plot_training_metrics()
-            self.plot_oversmoothing_metrics()
         
         if self.best_model_state is not None:
             self.model.load_state_dict(self.best_model_state)
