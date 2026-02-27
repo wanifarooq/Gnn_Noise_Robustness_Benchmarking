@@ -584,7 +584,8 @@ class NRGNN:
 @register('nrgnn')
 class NRGNNMethodTrainer(BaseTrainer):
 
-    def train(self):
+    def _create_nrgnn(self):
+        """Build an NRGNN instance, prepare data, and extract split indices."""
         d = self.init_data
         nrgnn_config = {
             'lr': d['lr'],
@@ -595,7 +596,7 @@ class NRGNNMethodTrainer(BaseTrainer):
             'oversmoothing_every': d['oversmoothing_every'],
         }
 
-        self._nrgnn = NRGNN(nrgnn_config, d['device'], base_model=d['backbone_model'])
+        nrgnn = NRGNN(nrgnn_config, d['device'], base_model=d['backbone_model'])
 
         adj = to_scipy_sparse_matrix(
             d['data_for_training'].edge_index,
@@ -603,7 +604,13 @@ class NRGNNMethodTrainer(BaseTrainer):
         )
         train_idx = d['train_mask'].nonzero(as_tuple=True)[0].cpu().numpy()
         val_idx = d['val_mask'].nonzero(as_tuple=True)[0].cpu().numpy()
-        self._test_idx = d['test_mask'].nonzero(as_tuple=True)[0].cpu().numpy()
+        test_idx = d['test_mask'].nonzero(as_tuple=True)[0].cpu().numpy()
+
+        return nrgnn, adj, train_idx, val_idx, test_idx
+
+    def train(self):
+        d = self.init_data
+        self._nrgnn, adj, train_idx, val_idx, self._test_idx = self._create_nrgnn()
 
         return self._nrgnn.fit(
             d['data_for_training'].x.to(d['device']),
@@ -624,7 +631,24 @@ class NRGNNMethodTrainer(BaseTrainer):
             state['edge_weights'] = nrgnn._current_edge_weights.clone()
         return state
 
+    def _setup_for_eval(self, state):
+        """Create the NRGNN instance so load_checkpoint_state can access it."""
+        d = self.init_data
+        self._nrgnn, adj, train_idx, val_idx, self._test_idx = self._create_nrgnn()
+
+        self._nrgnn.prepare_training_data(
+            d['data_for_training'].x.to(d['device']),
+            adj,
+            d['data_for_training'].y.to(d['device']),
+            train_idx,
+        )
+        self._nrgnn.train_indices = train_idx
+        self._nrgnn.validation_indices = val_idx
+        self._nrgnn.initialize_model_components()
+
     def load_checkpoint_state(self, state):
+        if not hasattr(self, '_nrgnn'):
+            self._setup_for_eval(state)
         nrgnn = self._nrgnn
         nrgnn.main_model.load_state_dict(state['main_model'])
         nrgnn.node_predictor.load_state_dict(state['node_predictor'])

@@ -109,19 +109,19 @@ class BaseTrainer(ABC):
 
     def run(self) -> dict:
         """Train + evaluate. Return standardised result dict."""
-        # Restore best model state
+        t0 = time.perf_counter()
+        train_out = self.train()
+        time_train = time.perf_counter() - t0
+
+        # Restore best-epoch weights (populated by log_epoch during training)
         if self._best_checkpoint_state is not None:
             self.load_checkpoint_state(self._best_checkpoint_state)
         else:
             warnings.warn("No best checkpoint was saved; evaluating with the current model state.")
 
-        t0 = time.perf_counter()
-        train_out = self.train()
-        duration = time.perf_counter() - t0
-
         stopped_at_epoch = train_out.get('stopped_at_epoch')
         flops_result = self.profile_flops()
-        
+
         t0_eval = time.perf_counter()
         eval_result = self.evaluate()
         time_inference = time.perf_counter() - t0_eval
@@ -130,7 +130,7 @@ class BaseTrainer(ABC):
         self.init_data['compute_info'] = {
             'flops_inference': flops_result['total_flops'],
             'flops_training_total': flops_result['total_flops'] * self.TRAINING_FLOPS_MULTIPLIER * epochs,
-            'time_training_total': round(duration, 4),
+            'time_training_total': round(time_train, 4),
             'time_inference': round(time_inference, 4),
         }
         result = self._make_result(
@@ -143,7 +143,7 @@ class BaseTrainer(ABC):
         self.save_training_log(
             run_id=self.init_data.get('_run_id', 1),
             config=self.init_data.get('_config', {}),
-            duration=duration,
+            duration=time_train,
             stopped_at_epoch=stopped_at_epoch,
             final_result=result,
         )

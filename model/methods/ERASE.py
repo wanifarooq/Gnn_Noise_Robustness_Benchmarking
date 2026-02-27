@@ -672,7 +672,8 @@ def create_enhanced_gnn_model(model_creation_function, gnn_model_name, enhanceme
 
 @register('erase')
 class ERASEMethodTrainer(BaseTrainer):
-    def train(self):
+    def _create_erase_trainer(self):
+        """Build an ERASETrainer with the full config."""
         d = self.init_data
         data = d['data']
         erase_params = self.config['erase_params']
@@ -705,12 +706,16 @@ class ERASEMethodTrainer(BaseTrainer):
             'oversmoothing_every': d['oversmoothing_every'],
         }
 
-        self._erase_trainer = ERASETrainer(
+        return ERASETrainer(
             training_config=erase_config,
             computation_device=d['device'],
             num_node_classes=d['num_classes'],
             model_creation_function=d['get_model'],
         )
+
+    def train(self):
+        d = self.init_data
+        self._erase_trainer = self._create_erase_trainer()
         return self._erase_trainer.train_erase_model(
             d['data_for_training'], enable_debug_output=True,
             log_epoch_fn=self.log_epoch,
@@ -725,7 +730,14 @@ class ERASEMethodTrainer(BaseTrainer):
             state['final_predicted_labels'] = trainer._final_predicted_labels.clone()
         return state
 
+    def _setup_for_eval(self, state):
+        """Create the ERASETrainer so load_checkpoint_state can access it."""
+        self._erase_trainer = self._create_erase_trainer()
+        self._erase_trainer._trained_model = self._erase_trainer._create_enhanced_gnn_model()
+
     def load_checkpoint_state(self, state):
+        if not hasattr(self, '_erase_trainer'):
+            self._setup_for_eval(state)
         trainer = self._erase_trainer
         trainer._trained_model.load_state_dict(state['trained_model'])
         if 'final_predicted_labels' in state:

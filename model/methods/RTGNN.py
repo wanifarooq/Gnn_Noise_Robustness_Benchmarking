@@ -766,19 +766,21 @@ class RTGNN(nn.Module):
 @register('rtgnn')
 class RTGNNMethodTrainer(BaseTrainer):
 
-    def train(self):
+    def _create_rtgnn(self):
+        """Build an RTGNN instance (includes data preparation)."""
         d = self.init_data
-
         local_config = deepcopy(self.config)
         local_config.setdefault('training', {})['oversmoothing_every'] = d['oversmoothing_every']
         rtgnn_config = RTGNNTrainingConfig(local_config)
-        self._rtgnn = RTGNN(
+        return RTGNN(
             training_config=rtgnn_config,
             device=d['device'],
             gnn_backbone=self.config['model']['name'].lower(),
             data_for_training=d['data_for_training'],
         ).to(d['device'])
 
+    def train(self):
+        self._rtgnn = self._create_rtgnn()
         return self._rtgnn.train_model(log_epoch_fn=self.log_epoch)
 
     def get_checkpoint_state(self) -> dict:
@@ -792,7 +794,13 @@ class RTGNNMethodTrainer(BaseTrainer):
             state['weights'] = rtgnn._current_weights.clone()
         return state
 
+    def _setup_for_eval(self, state):
+        """Create the RTGNN instance so load_checkpoint_state can access it."""
+        self._rtgnn = self._create_rtgnn()
+
     def load_checkpoint_state(self, state):
+        if not hasattr(self, '_rtgnn'):
+            self._setup_for_eval(state)
         # Note: save/load are intentionally asymmetric.
         # get_checkpoint_state saves raw components (predictor, structure_estimator, edges, weights).
         # load_checkpoint_state must also reconstruct rtgnn.best_model_state, which is the

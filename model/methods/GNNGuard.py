@@ -477,11 +477,12 @@ class GNNGuardModel(nn.Module):
 
 @register('gnnguard')
 class GNNGuardMethodTrainer(BaseTrainer):
-    def train(self):
+    def _create_trainer(self):
+        """Build a GNNGuardTrainer and prepare its data."""
         d = self.init_data
         gnnguard_params = self.config.get('gnnguard_params', {})
 
-        self._trainer = GNNGuardTrainer(
+        trainer = GNNGuardTrainer(
             input_features=d['data'].num_features,
             hidden_channels=self.config['model'].get('hidden_channels', 64),
             num_classes=d['num_classes'],
@@ -497,7 +498,12 @@ class GNNGuardMethodTrainer(BaseTrainer):
             backbone=d['backbone_model'],
             oversmoothing_every=d['oversmoothing_every'],
         )
-        self._trainer.prepare_data()
+        trainer.prepare_data()
+        return trainer
+
+    def train(self):
+        d = self.init_data
+        self._trainer = self._create_trainer()
 
         return self._trainer.train_model(
             node_features=d['data_for_training'].x,
@@ -516,7 +522,19 @@ class GNNGuardMethodTrainer(BaseTrainer):
             'gnnguard_model': deepcopy(self._trainer.model.state_dict()),
         }
 
+    def _setup_for_eval(self, state):
+        """Create the GNNGuardTrainer so load_checkpoint_state can access it."""
+        d = self.init_data
+        self._trainer = self._create_trainer()
+        self._trainer.node_features = d['data_for_training'].x.to(d['device'])
+        self._trainer.node_labels = d['data_for_training'].y.to(d['device'])
+        self._trainer.normalized_adjacency = self._trainer._add_self_loops_to_sparse_tensor(
+            self._trainer._convert_sparse_matrix_to_torch_tensor(self._trainer.adjacency_matrix)
+        )
+
     def load_checkpoint_state(self, state):
+        if not hasattr(self, '_trainer'):
+            self._setup_for_eval(state)
         # Restoring gnnguard_model is sufficient — backbone state is included within it.
         self._trainer.model.load_state_dict(state['gnnguard_model'])
 
