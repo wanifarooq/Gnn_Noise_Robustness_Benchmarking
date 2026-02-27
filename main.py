@@ -1,4 +1,5 @@
 import argparse
+import gc
 import numpy as np
 import torch
 import yaml
@@ -131,6 +132,9 @@ def run_benchmarking(base_folder='results', config_path=DEFAULT_CONFIG,
 
             print(f"Run {run} completed - Test Acc: {float(run_result['test_cls']['accuracy']):.4f}, F1: {float(run_result['test_cls']['f1']):.4f}, "
                   f"Train: {float(run_result['compute_info']['time_training_total']):.2f}s, Eval: {float(run_result['compute_info']['time_inference']):.2f}s")
+            del run_result
+            if device_str == "cuda":
+                torch.cuda.empty_cache()
 
         # ── Print summary tables ──
         cls_headers = ['split', 'accuracy', 'f1', 'precision', 'recall']
@@ -164,6 +168,9 @@ def run_benchmarking(base_folder='results', config_path=DEFAULT_CONFIG,
             json.dump(all_metrics, f, indent=4, default=json_serializer)
 
         print(f"[SAVED] {result_json_path}")
+        gc.collect()
+        if device_str == "cuda":
+            torch.cuda.empty_cache()
 
 
 if __name__ == "__main__":

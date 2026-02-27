@@ -111,6 +111,7 @@ class BaseTrainer(ABC):
         # Restore best-epoch weights (populated by log_epoch during training)
         if self._best_checkpoint_state is not None:
             self.load_checkpoint_state(self._best_checkpoint_state)
+            self._best_checkpoint_state = None  # free the deepcopy
         else:
             warnings.warn("No best checkpoint was saved; evaluating with the current model state.")
 

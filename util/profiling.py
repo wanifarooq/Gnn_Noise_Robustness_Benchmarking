@@ -109,6 +109,10 @@ def profile_model_flops(model, data, device, n_warmup=1, n_iters=1,
             row_limit=15
         )
 
+        del prof
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+
         return {"total_flops": int(total_flops), "profiler_table": table}
 
 
@@ -173,5 +177,9 @@ def profile_training_step_flops(models, device, step_fn):
             sort_by="self_cuda_time_total" if device.type == "cuda" else "self_cpu_time_total",
             row_limit=15,
         )
+
+        del prof
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
 
         return {"total_flops": int(total_flops), "profiler_table": table}
