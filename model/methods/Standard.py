@@ -1,4 +1,3 @@
-import copy
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -30,7 +29,6 @@ def train_with_standard_loss(
     cls_evaluator = ClassificationMetrics(average='macro')
 
     best_val_loss = float('inf')
-    best_model_state = None
     epochs_no_improve = 0
 
     for epoch in range(total_epochs):
@@ -58,7 +56,6 @@ def train_with_standard_loss(
         is_best = val_loss < best_val_loss
         if is_best:
             best_val_loss = val_loss
-            best_model_state = copy.deepcopy(model.state_dict())
             epochs_no_improve = 0
         else:
             epochs_no_improve += 1
@@ -97,11 +94,7 @@ def train_with_standard_loss(
 
         if epochs_no_improve >= patience:
             print(f"Early stopping at epoch {epoch}")
-            model.load_state_dict(best_model_state)
             break
-
-    if best_model_state is not None:
-        model.load_state_dict(best_model_state)
 
     return {
         'train_oversmoothing': dict(per_epochs_oversmoothing),

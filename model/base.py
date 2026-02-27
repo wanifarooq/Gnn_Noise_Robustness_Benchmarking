@@ -3,6 +3,7 @@
 import json
 import os
 import time
+import warnings
 from abc import ABC, abstractmethod
 from copy import deepcopy
 
@@ -20,12 +21,6 @@ class BaseTrainer(ABC):
     dicts.  The default ``run()`` orchestrates train → evaluate → result.
     """
 
-    #: Override to ``False`` in subclasses whose ``evaluate()`` depends on
-    #: internal state created during ``train()`` (e.g. extra models, learned
-    #: edges).  When *False*, the eval-only checkpoint path is blocked with a
-    #: clear error rather than an opaque ``AttributeError``.
-    supports_eval_only: bool = True
-
     #: (PROBABLY) Approximate ratio of training-step FLOPS to inference FLOPS.
     #: Default: 3 (1× forward + ~2× backward per step).  Override in
     #: subclasses whose training loop is heavier (extra losses, auxiliary
@@ -38,6 +33,7 @@ class BaseTrainer(ABC):
         self.epoch_log: list = []
         self.best_epoch: int | None = None
         self.best_val_loss: float = float('inf')
+        self._best_checkpoint_state = None
 
     # ── epoch logging ───────────────────────────────────────────────────
 
@@ -57,18 +53,20 @@ class BaseTrainer(ABC):
         }
         self.epoch_log.append(entry)
 
-        if is_best:
-            self.best_epoch = epoch
-            self.best_val_loss = float(val_loss) if val_loss is not None else 0.0
-
         run_dir = self.init_data.get('run_dir')
         checkpoint_every = self.config.get('training', {}).get('checkpoint_every_epoch', True)
-        should_save = (checkpoint_every or is_best) and run_dir and self.supports_eval_only
-        if should_save:
-            vl = float(val_loss) if val_loss is not None else 0.0
-            fname = f"epoch_{epoch:03d}_valloss_{vl:.4f}.pt"
+        should_save_disk = (checkpoint_every or is_best) and run_dir
+
+        if is_best or should_save_disk:
             state = self.get_checkpoint_state()
-            torch.save(state, os.path.join(run_dir, fname))
+            if is_best:
+                self.best_epoch = epoch
+                self.best_val_loss = float(val_loss) if val_loss is not None else 0.0
+                self._best_checkpoint_state = state
+            if should_save_disk:
+                vl = float(val_loss) if val_loss is not None else 0.0
+                fname = f"epoch_{epoch:03d}_valloss_{vl:.4f}.pt"
+                torch.save(state, os.path.join(run_dir, fname))
 
     def save_training_log(self, run_id, config, duration, stopped_at_epoch,
                           final_result):
@@ -78,7 +76,7 @@ class BaseTrainer(ABC):
             return
 
         best_ckpt = None
-        if self.best_epoch is not None and self.supports_eval_only:
+        if self.best_epoch is not None:
             best_ckpt = f"epoch_{self.best_epoch:03d}_valloss_{self.best_val_loss:.4f}.pt"
 
         training_params = {
@@ -111,14 +109,19 @@ class BaseTrainer(ABC):
 
     def run(self) -> dict:
         """Train + evaluate. Return standardised result dict."""
+        # Restore best model state
+        if self._best_checkpoint_state is not None:
+            self.load_checkpoint_state(self._best_checkpoint_state)
+        else:
+            warnings.warn("No best checkpoint was saved; evaluating with the current model state.")
+
         t0 = time.perf_counter()
         train_out = self.train()
         duration = time.perf_counter() - t0
 
         stopped_at_epoch = train_out.get('stopped_at_epoch')
-
         flops_result = self.profile_flops()
-
+        
         t0_eval = time.perf_counter()
         eval_result = self.evaluate()
         time_inference = time.perf_counter() - t0_eval

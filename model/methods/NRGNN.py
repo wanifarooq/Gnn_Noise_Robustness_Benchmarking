@@ -53,12 +53,12 @@ class NRGNN:
         self.early_stopping_counter = 0
         
         # Model weights storage
-        self.best_main_weights = None
-        self.best_predictor_weights = None
         self.best_predictions = None
-        self.best_edge_weights = None
         self.best_predictor_edge_weights = None
+        self.best_edge_weights = None
         self.best_edge_indices = None
+        self._current_edge_indices = None
+        self._current_edge_weights = None
         
         self.original_edge_index = None
         self.potential_edge_index = None
@@ -468,11 +468,14 @@ class NRGNN:
 
                 logging = True
 
+            # Always store current epoch's edges for checkpoint capture
+            self._current_edge_indices = main_model_edges
+            self._current_edge_weights = main_model_weights.detach()
+
             if predictor_validation_accuracy > self.best_predictor_accuracy:
                 self.best_predictor_accuracy = predictor_validation_accuracy
                 self.best_predictor_edge_weights = predictor_weights.detach()
                 self.best_predictions = predictor_probabilities.detach()
-                self.best_predictor_weights = deepcopy(self.node_predictor.state_dict())
 
                 self.confident_edge_index, self.confident_node_indices = self.identify_confident_edges(self.best_predictions)
 
@@ -481,7 +484,6 @@ class NRGNN:
                 self.best_validation_loss = validation_loss
                 self.best_edge_weights = main_model_weights.detach()
                 self.best_edge_indices = main_model_edges
-                self.best_main_weights = deepcopy(self.main_model.state_dict())
                 self.early_stopping_counter = 0
             else:
                 self.early_stopping_counter += 1
@@ -500,14 +502,6 @@ class NRGNN:
                 raise StopIteration
         if logging:
             return train_metrics, val_metrics
-
-    def load_best_model_weights(self):
-
-        print("Loading best model according to validation performance")
-        if self.best_main_weights is not None:
-            self.main_model.load_state_dict(self.best_main_weights)
-        if self.best_predictor_weights is not None:
-            self.node_predictor.load_state_dict(self.best_predictor_weights)
 
     def fit(self, features, adjacency_matrix, labels, train_indices, validation_indices,
             log_epoch_fn=None):
@@ -538,7 +532,6 @@ class NRGNN:
         total_training_time = time.time() - start_time
         print(f"\nTraining completed in {total_training_time:.2f}s")
 
-        self.load_best_model_weights()
         return {
             'train_oversmoothing': dict(per_epochs_oversmoothing),
             'val_oversmoothing': dict(per_epochs_val_oversmoothing),
@@ -590,7 +583,6 @@ class NRGNN:
 
 @register('nrgnn')
 class NRGNNMethodTrainer(BaseTrainer):
-    supports_eval_only = False
 
     def train(self):
         d = self.init_data
@@ -620,6 +612,25 @@ class NRGNNMethodTrainer(BaseTrainer):
             train_idx, val_idx,
             log_epoch_fn=self.log_epoch,
         )
+
+    def get_checkpoint_state(self) -> dict:
+        nrgnn = self._nrgnn
+        state = {
+            'main_model': deepcopy(nrgnn.main_model.state_dict()),
+            'node_predictor': deepcopy(nrgnn.node_predictor.state_dict()),
+        }
+        if hasattr(nrgnn, '_current_edge_indices') and nrgnn._current_edge_indices is not None:
+            state['edge_indices'] = nrgnn._current_edge_indices.clone()
+            state['edge_weights'] = nrgnn._current_edge_weights.clone()
+        return state
+
+    def load_checkpoint_state(self, state):
+        nrgnn = self._nrgnn
+        nrgnn.main_model.load_state_dict(state['main_model'])
+        nrgnn.node_predictor.load_state_dict(state['node_predictor'])
+        # Set the edge attributes that test() uses
+        nrgnn.best_edge_indices = state.get('edge_indices')
+        nrgnn.best_edge_weights = state.get('edge_weights')
 
     def evaluate(self):
         return self._nrgnn.test(self._test_idx)

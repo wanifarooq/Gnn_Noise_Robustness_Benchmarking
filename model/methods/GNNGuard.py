@@ -161,7 +161,6 @@ class GNNGuardTrainer:
         # Early stopping
         best_validation_loss = float('inf')
         epochs_no_improve = 0
-        best_model_weights = deepcopy(self.model.state_dict())
         
         for epoch in range(max_epochs):
 
@@ -228,7 +227,6 @@ class GNNGuardTrainer:
             if is_best:
                 best_validation_loss = val_loss
                 self.model_output = val_output
-                best_model_weights = deepcopy(self.model.state_dict())
                 epochs_no_improve = 0
             else:
                 epochs_no_improve += 1
@@ -242,8 +240,6 @@ class GNNGuardTrainer:
                 if verbose:
                     print(f'Early stopping at epoch {epoch}, best_val_loss={best_validation_loss:.4f}')
                 break
-
-        self.model.load_state_dict(best_model_weights)
 
         return {
             'train_oversmoothing': dict(per_epochs_oversmoothing),
@@ -481,8 +477,6 @@ class GNNGuardModel(nn.Module):
 
 @register('gnnguard')
 class GNNGuardMethodTrainer(BaseTrainer):
-    supports_eval_only = False
-
     def train(self):
         d = self.init_data
         gnnguard_params = self.config.get('gnnguard_params', {})
@@ -513,6 +507,18 @@ class GNNGuardMethodTrainer(BaseTrainer):
             patience=d['patience'],
             log_epoch_fn=self.log_epoch,
         )
+
+    def get_checkpoint_state(self) -> dict:
+        return {
+            # Saved separately for inspection convenience, but backbone weights are already
+            # embedded in gnnguard_model (GNNGuardModel registers backbone as a submodule).
+            'backbone': deepcopy(self.init_data['backbone_model'].state_dict()),
+            'gnnguard_model': deepcopy(self._trainer.model.state_dict()),
+        }
+
+    def load_checkpoint_state(self, state):
+        # Restoring gnnguard_model is sufficient — backbone state is included within it.
+        self._trainer.model.load_state_dict(state['gnnguard_model'])
 
     def evaluate(self):
         return self._trainer.evaluate_model()

@@ -154,12 +154,6 @@ def run_experiment(config, run_id=1, *, checkpoint_path=None, eval_only=False,
     if eval_only:
         if checkpoint_path is None:
             raise ValueError("eval_only=True requires a checkpoint_path")
-        if not trainer.supports_eval_only:
-            raise NotImplementedError(
-                f"Method '{init_data['method']}' does not support eval_only "
-                f"(its evaluate() depends on state created during train()). "
-                f"Override get_checkpoint_state/load_checkpoint_state to enable it."
-            )
         # weights_only=False: checkpoint contains plain dicts (oversmoothing
         # metrics) in addition to tensor state_dicts.
         state = torch.load(checkpoint_path, map_location=init_data['device'],
@@ -186,7 +180,7 @@ def run_experiment(config, run_id=1, *, checkpoint_path=None, eval_only=False,
             os.makedirs(ckpt_dir, exist_ok=True)
         # Prefer the best-epoch checkpoint from run_dir if available
         best_ckpt_src = None
-        if run_dir and trainer.best_epoch is not None and trainer.supports_eval_only:
+        if run_dir and trainer.best_epoch is not None:
             fname = f"epoch_{trainer.best_epoch:03d}_valloss_{trainer.best_val_loss:.4f}.pt"
             candidate = os.path.join(run_dir, fname)
             if os.path.exists(candidate):

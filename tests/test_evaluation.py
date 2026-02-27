@@ -240,8 +240,14 @@ class DummyTrainer(BaseTrainer):
 
 def _make_dummy(init_data=None, config=None):
     """Create a DummyTrainer instance via the real constructor."""
+    defaults = {
+        'compute_info': dict(_ZERO_COMPUTE_INFO),
+        'backbone_model': nn.Linear(3, 2),
+    }
+    if init_data is not None:
+        defaults.update(init_data)
     return DummyTrainer(
-        init_data=init_data or {'compute_info': dict(_ZERO_COMPUTE_INFO)},
+        init_data=defaults,
         config=config or {},
     )
 
@@ -436,17 +442,6 @@ class TestCheckpoint:
         loaded = torch.load(ckpt_file, weights_only=False)
         dummy.load_checkpoint_state(loaded)
         assert torch.equal(model.weight.data, original_weight)
-
-    def test_supports_eval_only_default_true(self):
-        assert DummyTrainer.supports_eval_only is True
-
-    def test_supports_eval_only_override(self):
-        class UnsupportedTrainer(BaseTrainer):
-            supports_eval_only = False
-            def train(self):
-                pass
-
-        assert UnsupportedTrainer.supports_eval_only is False
 
     def test_get_checkpoint_state_is_snapshot(self, tmp_path):
         """get_checkpoint_state returns an independent copy of the weights."""

@@ -452,19 +452,22 @@ class ERASETrainer:
             per_epochs_oversmoothing = defaultdict(list)
             per_epochs_val_oversmoothing = defaultdict(list)
             best_validation_loss = float('inf')
-            best_model_state = copy.deepcopy(model.state_dict())
             patience_counter = 0
             max_epochs = self.training_config.get('total_epochs', 200)
             patience_limit = self.training_config.get('patience', 50)
 
+            # Assign early so get_checkpoint_state() can access the model during training
+            self._trained_model = model
+
             for current_epoch in range(max_epochs):
- 
+
                 epoch_training_results = self._execute_single_training_epoch(
                     model, graph_data, optimizer, loss_function, adjacency_matrix, 
                     semantic_labels_matrix, predicted_labels
                 )
                 epoch_loss, loss_components, predicted_labels = epoch_training_results
-                
+                self._final_predicted_labels = predicted_labels
+
                 train_accuracy, validation_accuracy, validation_loss = self._evaluate_training_and_validation_performance(
                     model, graph_data, predicted_labels
                 )
@@ -503,7 +506,6 @@ class ERASETrainer:
                 if is_best:
                     best_validation_loss = validation_loss
                     patience_counter = 0
-                    best_model_state = copy.deepcopy(model.state_dict())
                 else:
                     patience_counter += 1
 
@@ -512,7 +514,6 @@ class ERASETrainer:
                         print(f'Early stopping triggered at epoch {current_epoch}')
                     break
 
-            model.load_state_dict(best_model_state)
             self._trained_model = model
             self._final_predicted_labels = predicted_labels
 
@@ -671,8 +672,6 @@ def create_enhanced_gnn_model(model_creation_function, gnn_model_name, enhanceme
 
 @register('erase')
 class ERASEMethodTrainer(BaseTrainer):
-    supports_eval_only = False
-
     def train(self):
         d = self.init_data
         data = d['data']
@@ -716,6 +715,21 @@ class ERASEMethodTrainer(BaseTrainer):
             d['data_for_training'], enable_debug_output=True,
             log_epoch_fn=self.log_epoch,
         )
+
+    def get_checkpoint_state(self) -> dict:
+        trainer = self._erase_trainer
+        state = {
+            'trained_model': copy.deepcopy(trainer._trained_model.state_dict()),
+        }
+        if hasattr(trainer, '_final_predicted_labels') and trainer._final_predicted_labels is not None:
+            state['final_predicted_labels'] = trainer._final_predicted_labels.clone()
+        return state
+
+    def load_checkpoint_state(self, state):
+        trainer = self._erase_trainer
+        trainer._trained_model.load_state_dict(state['trained_model'])
+        if 'final_predicted_labels' in state:
+            trainer._final_predicted_labels = state['final_predicted_labels']
 
     def profile_flops(self):
         from util.profiling import profile_model_flops

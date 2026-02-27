@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from copy import deepcopy
 from torch_geometric.loader import NeighborLoader
 from collections import defaultdict
 
@@ -244,7 +243,6 @@ class GCODTrainer:
         
         # Early stopping
         self.best_val_loss = float('inf')
-        self.best_model_state = None
         self.epochs_without_improvement = 0
         
         self.training_accuracy = 0.1
@@ -521,7 +519,6 @@ class GCODTrainer:
                              oversmoothing=os_entry, is_best=is_best)
             if is_best:
                 self.best_val_loss = val_loss_ce
-                self.best_model_state = deepcopy(self.model.state_dict())
                 self.epochs_without_improvement = 0
             else:
                 self.epochs_without_improvement += 1
@@ -531,9 +528,6 @@ class GCODTrainer:
                     print(f"Early stopping triggered at epoch {epoch}")
                 break
         
-        if self.best_model_state is not None:
-            self.model.load_state_dict(self.best_model_state)
-
         return {
             'train_oversmoothing': dict(per_epochs_train_oversmoothing),
             'val_oversmoothing': dict(per_epochs_val_oversmoothing),

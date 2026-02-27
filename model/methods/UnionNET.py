@@ -1,5 +1,4 @@
 import time
-from copy import deepcopy
 import torch
 import torch.nn.functional as F
 from collections import defaultdict
@@ -56,7 +55,6 @@ class UnionNET:
         )
         self.best_validation_loss = float('inf')
         self.patience_counter = 0
-        self.best_model_weights = None
         self.training_results = {'train': -1, 'val': -1, 'test': -1}
 
         self.oversmoothing_evaluator = OversmoothingMetrics(device=self.device)
@@ -258,7 +256,6 @@ class UnionNET:
                 self.patience_counter = 0
                 self.training_results['train'] = train_accuracy
                 self.training_results['val'] = val_accuracy
-                self.best_model_weights = deepcopy(self.gnn_model.state_dict())
             else:
                 self.patience_counter += 1
 
@@ -272,9 +269,6 @@ class UnionNET:
                     print(f"Early stopping at epoch {current_epoch}")
                 break
         
-        if self.best_model_weights is not None:
-            self.gnn_model.load_state_dict(self.best_model_weights)
-
         total_training_time = time.time() - training_start_time
 
         if enable_debug:

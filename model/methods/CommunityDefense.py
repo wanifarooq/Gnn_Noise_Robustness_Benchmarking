@@ -268,7 +268,6 @@ class GraphCommunityDefenseTrainer:
         node_labels = self.graph_data.y.to(self.device, dtype=torch.long)
         
         best_validation_loss = float("inf")
-        best_model_state = None
         epochs_without_improvement = 0
         community_labels = self.community_assignments.copy()
         
@@ -379,7 +378,6 @@ class GraphCommunityDefenseTrainer:
                 is_best = validation_loss < best_validation_loss
                 if is_best:
                     best_validation_loss = validation_loss
-                    best_model_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
                     epochs_without_improvement = 0
                 else:
                     epochs_without_improvement += 1
@@ -393,9 +391,6 @@ class GraphCommunityDefenseTrainer:
                     if self.verbose and enable_debug:
                         print(f"Defense: Early stopping at epoch {epoch}")
                     break
-
-        if best_model_state is not None:
-            model.load_state_dict(best_model_state)
 
         training_duration = time.time() - training_start_time
         if enable_debug:

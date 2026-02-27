@@ -3,7 +3,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import scipy.sparse as sp
 import numpy as np
-from copy import deepcopy
 import time
 from collections import defaultdict
 
@@ -224,7 +223,6 @@ class PiGnnTrainer:
         best_validation_loss = float('inf')
         best_training_epoch = 0
         patience_counter = 0
-        best_model_weights = None
 
         for current_epoch in range(self.total_epochs):
             model.train()
@@ -307,16 +305,12 @@ class PiGnnTrainer:
                 best_validation_loss = current_metrics['val_loss']
                 best_training_epoch = current_epoch
                 patience_counter = 0
-                best_model_weights = deepcopy(model.state_dict())
             else:
                 patience_counter += 1
 
             if patience_counter >= self.early_stop_patience:
                 print(f"Early stopping at epoch {current_epoch}, best epoch {best_training_epoch}")
                 break
-
-        if best_model_weights is not None:
-            model.load_state_dict(best_model_weights)
 
         total_training_time = time.time() - training_start_time
         print(f"\nTraining completed in {total_training_time:.2f}s")

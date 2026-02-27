@@ -1,6 +1,5 @@
 import torch
 import torch.nn.functional as F
-from copy import deepcopy
 from torch_geometric.loader import NeighborLoader
 from collections import defaultdict
 
@@ -80,7 +79,6 @@ class PositiveEigenvaluesTrainer:
         train_loader, val_loader, test_loader = self.create_data_loaders(batch_size)
         
         best_validation_loss = float('inf')
-        best_model_weights = None
         epochs_without_improvement = 0
         
         for epoch in range(max_epochs):
@@ -93,7 +91,6 @@ class PositiveEigenvaluesTrainer:
             is_best = val_metrics['loss'] < best_validation_loss
             if is_best:
                 best_validation_loss = val_metrics['loss']
-                best_model_weights = deepcopy(self.model.state_dict())
                 epochs_without_improvement = 0
             else:
                 epochs_without_improvement += 1
@@ -169,7 +166,6 @@ class PositiveEigenvaluesTrainer:
 
             if epochs_without_improvement >= patience:
                 print(f"Early stopping at epoch {epoch}")
-                self.model.load_state_dict(best_model_weights)
                 break
         
         print("\nPositive Eigenvalues Training completed")

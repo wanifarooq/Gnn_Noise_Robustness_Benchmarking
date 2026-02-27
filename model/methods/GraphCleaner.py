@@ -86,10 +86,10 @@ class GraphCleanerNoiseDetector:
         prediction_history_list = []
         optimal_predictions = []
         optimal_model_state = None
-        
+
         graph_data = graph_data.to(self.device)
         neural_network_model = neural_network_model.to(self.device)
-        
+
         best_validation_loss = float('inf')
         optimal_model_state = None
         patience_counter = 0

@@ -108,9 +108,8 @@ class CRGNNModel:
         self.pr = config.get('pr', 0.3)
         self.oversmoothing_every = config.get('oversmoothing_every', 20)
 
-        self.best_val_loss = float('inf') # self.best_val_acc = 0.0
+        self.best_val_loss = float('inf')
         self.early_stop_counter = 0
-        self.best_weights = None
         
         self.oversmoothing_evaluator = OversmoothingMetrics(device=self.device)
         self.cls_evaluator = ClassificationMetrics(average='macro')
@@ -156,6 +155,14 @@ class CRGNNModel:
         
         clean_labels = getattr(graph_data, 'y_original', graph_data.y)
         noisy_labels = graph_data.y
+
+        # Assign early so get_checkpoint_state() can access during training
+        self._backbone = backbone
+        self._adapter = adapter
+        self._proj_head = proj_head
+        self._class_head = class_head
+        self._graph_data = graph_data
+        self._clean_labels = clean_labels
 
         for epoch in range(self.epochs):
             backbone.train()
@@ -209,25 +216,13 @@ class CRGNNModel:
                 log_epoch_fn(epoch, loss.item(), val_loss.item(), train_acc, val_acc,
                              train_f1=train_f1, val_f1=val_f1,
                              oversmoothing=os_entry, is_best=is_best)
-            if is_best: #if val_acc > self.best_val_acc:
-                self.best_val_loss = val_loss #self.best_val_acc = val_acc
+            if is_best:
+                self.best_val_loss = val_loss
                 self.early_stop_counter = 0
-                self.best_weights = {
-                    'backbone': deepcopy(backbone.state_dict()),
-                    'adapter': deepcopy(adapter.state_dict()),
-                    'proj_head': deepcopy(proj_head.state_dict()),
-                    'class_head': deepcopy(class_head.state_dict())
-                }
             else:
                 self.early_stop_counter += 1
                 if self.early_stop_counter >= self.patience:
                     break
-
-        if self.best_weights:
-            backbone.load_state_dict(self.best_weights['backbone'])
-            adapter.load_state_dict(self.best_weights['adapter'])
-            proj_head.load_state_dict(self.best_weights['proj_head'])
-            class_head.load_state_dict(self.best_weights['class_head'])
 
         self._backbone = backbone
         self._adapter = adapter
@@ -314,8 +309,6 @@ class CRGNNModel:
 
 @register('cr_gnn')
 class CRGNNMethodTrainer(BaseTrainer):
-    supports_eval_only = False
-
     def train(self):
         d = self.init_data
         cr_params = self.config.get('cr_gnn_params', {})
@@ -336,6 +329,61 @@ class CRGNNMethodTrainer(BaseTrainer):
             d['backbone_model'], d['get_model'],
             log_epoch_fn=self.log_epoch,
         )
+
+    def get_checkpoint_state(self) -> dict:
+        cr = self._cr
+        return {
+            'backbone': deepcopy(cr._backbone.state_dict()),
+            'adapter': deepcopy(cr._adapter.state_dict()),
+            'proj_head': deepcopy(cr._proj_head.state_dict()),
+            'class_head': deepcopy(cr._class_head.state_dict()),
+        }
+
+    def load_checkpoint_state(self, state):
+        if not hasattr(self, '_cr'):
+            self._setup_for_eval(state)
+        cr = self._cr
+        cr._backbone.load_state_dict(state['backbone'])
+        cr._adapter.load_state_dict(state['adapter'])
+        cr._proj_head.load_state_dict(state['proj_head'])
+        cr._class_head.load_state_dict(state['class_head'])
+
+    def _setup_for_eval(self, state):
+        """Initialize CRGNNModel components for eval-only (no training)."""
+        d = self.init_data
+        cr_params = self.config.get('cr_gnn_params', {})
+        combined_params = {
+            'hidden_channels': self.config['model'].get('hidden_channels', 64),
+            'lr': d['lr'],
+            'weight_decay': d['weight_decay'],
+            'epochs': d['epochs'],
+            'patience': d['patience'],
+            'oversmoothing_every': d['oversmoothing_every'],
+        }
+        combined_params.update(cr_params)
+        self._cr = CRGNNModel(device=d['device'], **combined_params)
+
+        device = torch.device(d['device'])
+        graph_data = d['data_for_training'].to(device)
+        backbone = d['backbone_model'].to(device)
+        num_classes = graph_data.y.max().item() + 1
+        hidden = self._cr.hidden_channels
+
+        with torch.no_grad():
+            sample_out = backbone(graph_data)
+        if sample_out.size(1) != hidden:
+            adapter = nn.Linear(sample_out.size(1), hidden).to(device)
+        else:
+            adapter = nn.Identity().to(device)
+        class_head = NodeClassificationHead(hidden, num_classes).to(device)
+        proj_head = ContrastiveProjectionHead(hidden, hidden).to(device)
+
+        self._cr._backbone = backbone
+        self._cr._adapter = adapter
+        self._cr._proj_head = proj_head
+        self._cr._class_head = class_head
+        self._cr._graph_data = graph_data
+        self._cr._clean_labels = getattr(graph_data, 'y_original', graph_data.y)
 
     def profile_flops(self):
         from util.profiling import profile_model_flops

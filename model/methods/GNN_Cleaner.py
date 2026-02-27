@@ -413,7 +413,6 @@ class GNNCleanerTrainer:
         training_start_time = time.time()
         
         best_validation_loss = float("inf")
-        best_model_checkpoint = None
         early_stopping_counter = 0
         
         oversmoothing_calculation_interval = self.oversmoothing_every
@@ -455,10 +454,6 @@ class GNNCleanerTrainer:
             is_best = current_metrics['val_loss'] < best_validation_loss
             if is_best:
                 best_validation_loss = current_metrics['val_loss']
-                best_model_checkpoint = {
-                    "gnn_model": self.gnn_model.state_dict(),
-                    "weighting_network": self.label_weighting_net.state_dict()
-                }
                 early_stopping_counter = 0
             else:
                 early_stopping_counter += 1
@@ -510,10 +505,6 @@ class GNNCleanerTrainer:
                     print(f"Early stopping triggered at epoch {training_epoch}")
                 break
         
-        if best_model_checkpoint is not None:
-            self.gnn_model.load_state_dict(best_model_checkpoint["gnn_model"])
-            self.label_weighting_net.load_state_dict(best_model_checkpoint["weighting_network"])
-
         total_training_time = time.time() - training_start_time
 
         if enable_debug_output:

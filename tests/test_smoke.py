@@ -323,7 +323,7 @@ def test_training_log_written(method, tmp_path):
     for field in ('epoch', 'train_loss', 'val_loss', 'train_acc', 'val_acc'):
         assert field in entry, f"Missing field '{field}' in epoch_log entry"
 
-    # Best checkpoint file should exist (standard has supports_eval_only=True)
+    # Best checkpoint file should exist
     assert os.path.exists(ckpt), "Best checkpoint not created"
 
     # Per-epoch checkpoint files in run_dir (at least one for best epoch)
@@ -331,18 +331,20 @@ def test_training_log_written(method, tmp_path):
     assert len(epoch_ckpts) >= 1, "No per-epoch checkpoints saved"
 
 
-def test_eval_only_blocked_for_unsupported_method(tmp_path):
-    """eval_only raises NotImplementedError for methods that don't support it."""
+def test_eval_only_works_for_cr_gnn(tmp_path):
+    """eval_only works for cr_gnn (all methods now support eval-only)."""
     config = _make_config('cr_gnn')
     ckpt = str(tmp_path / "cr_gnn.pt")
 
     # Normal run — saves checkpoint
-    run_experiment(config, run_id=1, checkpoint_path=ckpt)
+    result_train = run_experiment(config, run_id=1, checkpoint_path=ckpt)
     assert os.path.exists(ckpt)
 
-    # eval_only should raise for cr_gnn (supports_eval_only = False)
-    with pytest.raises(NotImplementedError, match="does not support eval_only"):
-        run_experiment(config, run_id=1, checkpoint_path=ckpt, eval_only=True)
+    # eval_only should work for cr_gnn
+    result_eval = run_experiment(config, run_id=1, checkpoint_path=ckpt, eval_only=True)
+    for key in ('test_cls', 'train_cls', 'val_cls', 'test_oversmoothing'):
+        assert key in result_eval, f"Missing key '{key}' in eval-only result"
+    assert result_eval['compute_info']['time_training_total'] == 0.0
 
 
 # ── get_embeddings shape tests ─────────────────────────────────────────────

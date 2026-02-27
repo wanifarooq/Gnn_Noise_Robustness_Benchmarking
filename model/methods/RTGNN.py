@@ -501,6 +501,10 @@ class RTGNN(nn.Module):
             final_edge_indices = combined_edge_indices[:, valid_edge_mask]
             final_edge_weights = adaptive_edge_weights[valid_edge_mask]
 
+            # Always store current epoch's edges for checkpoint capture
+            self._current_edges = final_edge_indices
+            self._current_weights = final_edge_weights
+
             first_branch_output, second_branch_output = self.dual_branch_predictor(
                 node_features, final_edge_indices, final_edge_weights
             )
@@ -574,14 +578,9 @@ class RTGNN(nn.Module):
             # Early stopping
             current_val_loss = performance_metrics['val_loss'].item() #current_val_accuracy = performance_metrics['val_acc']
             is_best = current_val_loss < best_validation_loss
-            if is_best: #if current_val_accuracy > best_validation_accuracy:
-                best_validation_loss = current_val_loss # best_validation_accuracy = current_val_accuracy
+            if is_best:
+                best_validation_loss = current_val_loss
                 patience_counter = 0
-                self.best_model_state = {
-                    'model': deepcopy(self.state_dict()),
-                    'edges': final_edge_indices.clone(),
-                    'weights': final_edge_weights.clone()
-                }
             else:
                 patience_counter += 1
 
@@ -597,14 +596,13 @@ class RTGNN(nn.Module):
                 print(f"Early stopping at epoch {epoch} (no improvement for {early_stop_patience} epochs)")
                 break
 
-        if self.best_model_state is not None:
-            self.load_state_dict(self.best_model_state['model'])
-            
         total_training_time = time.time() - training_start_time
-        
+
         if test_indices is not None:
+            best_edges = self.best_model_state['edges'] if self.best_model_state else final_edge_indices
+            best_weights = self.best_model_state['weights'] if self.best_model_state else final_edge_weights
             final_performance_metrics, final_train_oversmoothing, final_val_oversmoothing, final_test_oversmoothing = self.evaluate_model_performance(
-                node_features, self.best_model_state['edges'], self.best_model_state['weights'], 
+                node_features, best_edges, best_weights,
                 node_labels, train_indices, val_indices, test_indices
             )
             
@@ -767,7 +765,6 @@ class RTGNN(nn.Module):
 
 @register('rtgnn')
 class RTGNNMethodTrainer(BaseTrainer):
-    supports_eval_only = False
 
     def train(self):
         d = self.init_data
@@ -783,6 +780,36 @@ class RTGNNMethodTrainer(BaseTrainer):
         ).to(d['device'])
 
         return self._rtgnn.train_model(log_epoch_fn=self.log_epoch)
+
+    def get_checkpoint_state(self) -> dict:
+        rtgnn = self._rtgnn
+        state = {
+            'dual_branch_predictor': deepcopy(rtgnn.dual_branch_predictor.state_dict()),
+            'structure_estimator': deepcopy(rtgnn.structure_estimator.state_dict()),
+        }
+        if hasattr(rtgnn, '_current_edges') and rtgnn._current_edges is not None:
+            state['edges'] = rtgnn._current_edges.clone()
+            state['weights'] = rtgnn._current_weights.clone()
+        return state
+
+    def load_checkpoint_state(self, state):
+        # Note: save/load are intentionally asymmetric.
+        # get_checkpoint_state saves raw components (predictor, structure_estimator, edges, weights).
+        # load_checkpoint_state must also reconstruct rtgnn.best_model_state, which is the
+        # internal structure that evaluate_final_performance() reads — it is never populated
+        # during normal training, only via this path.
+        # structure_estimator is restored for resume-training completeness but is not needed
+        # for evaluation (evaluate_final_performance uses the predictor directly + stored edges).
+        # The 'model' key in best_model_state is not read by evaluate_final_performance();
+        # it only serves as a non-None sentinel to signal that the model has been trained.
+        rtgnn = self._rtgnn
+        rtgnn.dual_branch_predictor.load_state_dict(state['dual_branch_predictor'])
+        rtgnn.structure_estimator.load_state_dict(state['structure_estimator'])
+        rtgnn.best_model_state = {
+            'model': state['dual_branch_predictor'],
+            'edges': state.get('edges'),
+            'weights': state.get('weights'),
+        }
 
     def profile_flops(self):
         from util.profiling import profile_model_flops
