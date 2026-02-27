@@ -11,7 +11,7 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 
-from model.evaluation import evaluate_model, ZERO_CLS
+from model.evaluation import evaluate_model, ZERO_CLS, compute_train_noise_split_cls
 from sweep_utils import json_serializer
 
 
@@ -299,10 +299,30 @@ class BaseTrainer(ABC):
             ``_reduce_oversmoothing``.  Set to *False* for models (e.g. GCOD)
             that already return reduced values.
         """
+        predictions = result_dict.pop('_predictions', None)
+
+        # Noise-split train metrics (derived from y_noisy vs y_original)
+        noise_split = {}
+        d = self.init_data
+        data_obj = d.get('data')
+        if (predictions is not None
+                and data_obj is not None
+                and hasattr(data_obj, 'y_original')
+                and hasattr(data_obj, 'y_noisy')):
+            train_mask = d.get('train_mask', getattr(d.get('data_for_training'), 'train_mask', None))
+            if train_mask is not None:
+                noise_split = compute_train_noise_split_cls(
+                    predictions, data_obj.y_noisy, data_obj.y_original, train_mask)
+
         return {
             'test_cls': result_dict.get('test_cls', dict(ZERO_CLS)),
             'train_cls': result_dict.get('train_cls', dict(ZERO_CLS)),
             'val_cls': result_dict.get('val_cls', dict(ZERO_CLS)),
+            **{k: noise_split.get(k, dict(ZERO_CLS)) for k in (
+                'train_only_clean_cls',
+                'train_only_mislabelled_factual_cls',
+                'train_only_mislabelled_corrected_cls',
+            )},
             'test_oversmoothing': result_dict.get('test_oversmoothing', {}),
             'train_oversmoothing': (
                 self._reduce_oversmoothing(train_oversmoothing)

@@ -394,6 +394,38 @@ DEFAULT_OVERSMOOTHING = {k: 0.0 for k in OVERSMOOTHING_KEYS}
 ZERO_CLS = {'accuracy': 0.0, 'f1': 0.0, 'precision': 0.0, 'recall': 0.0}
 
 
+def compute_train_noise_split_cls(predictions, noisy_labels, clean_labels, train_mask):
+    """Classification metrics on clean vs mislabelled training subsets.
+
+    Mislabelled nodes are detected dynamically: noisy_labels != clean_labels on train_mask.
+
+    Returns dict with keys:
+        train_only_clean_cls, train_only_mislabelled_factual_cls,
+        train_only_mislabelled_corrected_cls
+    """
+    cls_evaluator = ClassificationMetrics(average='macro')
+
+    train_indices = train_mask.nonzero(as_tuple=True)[0]
+    is_mislabelled = noisy_labels[train_mask] != clean_labels[train_mask]
+    clean_idx = train_indices[~is_mislabelled]
+    mislabelled_idx = train_indices[is_mislabelled]
+
+    result = {}
+    result['train_only_clean_cls'] = (
+        cls_evaluator.compute_all_metrics(predictions[clean_idx], clean_labels[clean_idx])
+        if len(clean_idx) > 0 else dict(ZERO_CLS)
+    )
+    result['train_only_mislabelled_factual_cls'] = (
+        cls_evaluator.compute_all_metrics(predictions[mislabelled_idx], noisy_labels[mislabelled_idx])
+        if len(mislabelled_idx) > 0 else dict(ZERO_CLS)
+    )
+    result['train_only_mislabelled_corrected_cls'] = (
+        cls_evaluator.compute_all_metrics(predictions[mislabelled_idx], clean_labels[mislabelled_idx])
+        if len(mislabelled_idx) > 0 else dict(ZERO_CLS)
+    )
+    return result
+
+
 def compute_oversmoothing_for_mask(oversmoothing_evaluator, embeddings, edge_index, mask):
     """Compute oversmoothing metrics for a node subset defined by a boolean mask.
     """
@@ -474,7 +506,7 @@ def evaluate_model(get_predictions, get_embeddings, labels, train_mask, val_mask
             return dict(DEFAULT_OVERSMOOTHING)
         return {k: d.get(k, 0.0) for k in OVERSMOOTHING_KEYS}
 
-    return {
+    result = {
         'test_cls': test_cls_metrics,
         'train_cls': train_cls_metrics,
         'val_cls': val_cls_metrics,
@@ -482,6 +514,8 @@ def evaluate_model(get_predictions, get_embeddings, labels, train_mask, val_mask
         'train_oversmoothing_final': normalize_metrics(train_oversmoothing),
         'val_oversmoothing_final': normalize_metrics(val_oversmoothing),
     }
+    result['_predictions'] = predictions  # consumed by _make_result, not serialised
+    return result
 
 
 def compute_training_metrics(predictions, labels, train_mask, val_mask,

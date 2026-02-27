@@ -9,10 +9,12 @@ from codecarbon import EmissionsTracker
 
 from util.experiment import run_experiment
 from util.cli import print_table, fmt_mean_std
-from model.evaluation import OVERSMOOTHING_KEYS
+from model.evaluation import OVERSMOOTHING_KEYS, ZERO_CLS
 from sweep_utils import expand_yaml_sweeps, get_result_filename, should_run_experiment, json_serializer
 
 DEFAULT_CONFIG = "config.yaml"
+NOISE_SPLIT_KEYS = ('train_only_clean', 'train_only_mislabelled_factual', 'train_only_mislabelled_corrected')
+CLS_SPLITS = ('test', 'train', 'val') + NOISE_SPLIT_KEYS
 
 
 
@@ -71,7 +73,7 @@ def run_benchmarking(base_folder='results', config_path=DEFAULT_CONFIG,
 
         classification_runs = {
             split: {k: [] for k in ('accuracy', 'f1', 'precision', 'recall')}
-            for split in ('test', 'train', 'val')
+            for split in CLS_SPLITS
         }
         oversmoothing_runs = {
             split: {k: [] for k in OVERSMOOTHING_KEYS}
@@ -112,8 +114,8 @@ def run_benchmarking(base_folder='results', config_path=DEFAULT_CONFIG,
             if run_codecarbon:
                 tracker.stop()
             # Accumulate per-run results
-            for split in ('test', 'train', 'val'):
-                src = run_result[f'{split}_cls']
+            for split in CLS_SPLITS:
+                src = run_result.get(f'{split}_cls', dict(ZERO_CLS))
                 for mkey in classification_runs[split]:
                     classification_runs[split][mkey].append(float(src[mkey]))
 
@@ -143,6 +145,14 @@ def run_benchmarking(base_folder='results', config_path=DEFAULT_CONFIG,
             cls_rows.append([split] + [fmt_mean_std(classification_runs[split][m]) for m in ('accuracy', 'f1', 'precision', 'recall')])
         print("\nClassification Metrics:")
         print_table(cls_headers, cls_rows)
+
+        if any(any(v != 0.0 for v in classification_runs[s]['accuracy']) for s in NOISE_SPLIT_KEYS):
+            cn_rows = []
+            for split in NOISE_SPLIT_KEYS:
+                cn_rows.append([split] + [fmt_mean_std(classification_runs[split][m])
+                                for m in ('accuracy', 'f1', 'precision', 'recall')])
+            print("\nClassification Metrics (Train noise splits):")
+            print_table(cls_headers, cn_rows)
 
         os_headers = ['split'] + list(OVERSMOOTHING_KEYS)
         os_rows = []
