@@ -262,7 +262,8 @@ class UnionNET:
             if log_epoch_fn is not None:
                 log_epoch_fn(current_epoch, training_loss, validation_loss, train_accuracy, val_accuracy,
                              train_f1=train_f1_score, val_f1=val_f1_score,
-                             oversmoothing=os_entry, is_best=is_best)
+                             oversmoothing=os_entry, is_best=is_best,
+                             train_predictions=model_predictions.argmax(dim=1))
 
             if self.early_stop_patience and self.patience_counter >= self.early_stop_patience:
                 if enable_debug:

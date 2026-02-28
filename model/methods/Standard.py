@@ -90,7 +90,8 @@ def train_with_standard_loss(
         if log_epoch_fn is not None:
             log_epoch_fn(epoch, loss_train, val_loss, train_acc, val_acc,
                          train_f1=train_f1, val_f1=val_f1,
-                         oversmoothing=os_entry, is_best=is_best)
+                         oversmoothing=os_entry, is_best=is_best,
+                         train_predictions=pred)
 
         if epochs_no_improve >= patience:
             print(f"Early stopping at epoch {epoch}")

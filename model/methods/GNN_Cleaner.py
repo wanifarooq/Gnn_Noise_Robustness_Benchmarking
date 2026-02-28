@@ -495,10 +495,14 @@ class GNNCleanerTrainer:
                         f"Newly Selected: {newly_selected_count}")
 
             if log_epoch_fn is not None:
+                self.gnn_model.eval()
+                with torch.no_grad():
+                    pred = self.gnn_model(self.data).argmax(dim=1)
                 log_epoch_fn(training_epoch, epoch_training_loss, current_metrics['val_loss'],
                              current_metrics['train_acc'], current_metrics['val_acc'],
                              train_f1=current_metrics['train_f1'], val_f1=current_metrics['val_f1'],
-                             oversmoothing=os_entry, is_best=is_best)
+                             oversmoothing=os_entry, is_best=is_best,
+                             train_predictions=pred)
 
             if early_stopping_counter >= self.early_stopping_patience:
                 if enable_debug_output:

@@ -297,10 +297,14 @@ class PiGnnTrainer:
             # Early stopping
             is_best = current_metrics['val_loss'] < best_validation_loss
             if log_epoch_fn is not None:
+                with torch.no_grad():
+                    classification_output, _ = model(graph_data)
+                    pred = classification_output.argmax(dim=1)
                 log_epoch_fn(current_epoch, current_metrics['train_loss'], current_metrics['val_loss'],
                              current_metrics['train_acc'], current_metrics['val_acc'],
                              train_f1=current_metrics['train_f1'], val_f1=current_metrics['val_f1'],
-                             oversmoothing=os_entry, is_best=is_best)
+                             oversmoothing=os_entry, is_best=is_best,
+                             train_predictions=pred)
             if is_best:
                 best_validation_loss = current_metrics['val_loss']
                 best_training_epoch = current_epoch

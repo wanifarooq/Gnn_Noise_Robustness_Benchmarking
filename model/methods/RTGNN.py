@@ -585,12 +585,17 @@ class RTGNN(nn.Module):
                 patience_counter += 1
 
             if log_epoch_fn is not None:
+                with torch.no_grad():
+                    fb, sb = self.dual_branch_predictor(
+                        node_features, final_edge_indices, final_edge_weights)
+                    pred = ((fb + sb) / 2).argmax(dim=1)
                 log_epoch_fn(epoch, float(performance_metrics['train_loss']),
                              float(performance_metrics['val_loss']),
                              performance_metrics['train_acc'], performance_metrics['val_acc'],
                              train_f1=performance_metrics['train_f1'],
                              val_f1=performance_metrics['val_f1'],
-                             oversmoothing=os_entry, is_best=is_best)
+                             oversmoothing=os_entry, is_best=is_best,
+                             train_predictions=pred)
 
             if patience_counter >= early_stop_patience:
                 print(f"Early stopping at epoch {epoch} (no improvement for {early_stop_patience} epochs)")

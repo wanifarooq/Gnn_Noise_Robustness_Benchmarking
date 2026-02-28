@@ -500,9 +500,13 @@ class ERASETrainer:
                 os_entry = ({'train': dict(train_oversmoothing), 'val': dict(validation_oversmoothing)}
                             if should_compute_oversmoothing else None)
                 if log_epoch_fn is not None:
+                    model.eval()
+                    with torch.no_grad():
+                        pred = model(graph_data).argmax(dim=1)
                     log_epoch_fn(current_epoch, epoch_loss, validation_loss, train_accuracy, validation_accuracy,
                                  train_f1=train_f1, val_f1=validation_f1,
-                                 oversmoothing=os_entry, is_best=is_best)
+                                 oversmoothing=os_entry, is_best=is_best,
+                                 train_predictions=pred)
                 if is_best:
                     best_validation_loss = validation_loss
                     patience_counter = 0

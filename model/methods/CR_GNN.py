@@ -213,9 +213,14 @@ class CRGNNModel:
             # Early stopping
             is_best = val_loss < self.best_val_loss
             if log_epoch_fn is not None:
+                with torch.no_grad():
+                    h = backbone(Data(x=graph_data.x, edge_index=graph_data.edge_index))
+                    h = adapter(h)
+                    pred = class_head(h).exp().argmax(dim=1)
                 log_epoch_fn(epoch, loss.item(), val_loss.item(), train_acc, val_acc,
                              train_f1=train_f1, val_f1=val_f1,
-                             oversmoothing=os_entry, is_best=is_best)
+                             oversmoothing=os_entry, is_best=is_best,
+                             train_predictions=pred)
             if is_best:
                 self.best_val_loss = val_loss
                 self.early_stop_counter = 0

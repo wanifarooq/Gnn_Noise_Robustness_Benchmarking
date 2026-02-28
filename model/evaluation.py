@@ -394,6 +394,15 @@ DEFAULT_OVERSMOOTHING = {k: 0.0 for k in OVERSMOOTHING_KEYS}
 ZERO_CLS = {'accuracy': 0.0, 'f1': 0.0, 'precision': 0.0, 'recall': 0.0}
 
 
+def get_noise_split_indices(noisy_labels, clean_labels, train_mask):
+    """Return (clean_idx, mislabelled_idx) global index tensors, or None if no noise."""
+    train_indices = train_mask.nonzero(as_tuple=True)[0]
+    is_mislabelled = noisy_labels[train_mask] != clean_labels[train_mask]
+    if not is_mislabelled.any():
+        return None
+    return train_indices[~is_mislabelled], train_indices[is_mislabelled]
+
+
 def compute_train_noise_split_cls(predictions, noisy_labels, clean_labels, train_mask):
     """Classification metrics on clean vs mislabelled training subsets.
 
@@ -403,12 +412,13 @@ def compute_train_noise_split_cls(predictions, noisy_labels, clean_labels, train
         train_only_clean_cls, train_only_mislabelled_factual_cls,
         train_only_mislabelled_corrected_cls
     """
+    split = get_noise_split_indices(noisy_labels, clean_labels, train_mask)
+    if split is None:
+        return {k: dict(ZERO_CLS) for k in (
+            'train_only_clean_cls', 'train_only_mislabelled_factual_cls',
+            'train_only_mislabelled_corrected_cls')}
+    clean_idx, mislabelled_idx = split
     cls_evaluator = ClassificationMetrics(average='macro')
-
-    train_indices = train_mask.nonzero(as_tuple=True)[0]
-    is_mislabelled = noisy_labels[train_mask] != clean_labels[train_mask]
-    clean_idx = train_indices[~is_mislabelled]
-    mislabelled_idx = train_indices[is_mislabelled]
 
     result = {}
     result['train_only_clean_cls'] = (

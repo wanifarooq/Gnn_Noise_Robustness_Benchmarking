@@ -11,7 +11,8 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 
-from model.evaluation import evaluate_model, ZERO_CLS, compute_train_noise_split_cls
+from model.evaluation import (evaluate_model, ZERO_CLS, compute_train_noise_split_cls,
+                              get_noise_split_indices, ClassificationMetrics)
 from sweep_utils import json_serializer
 
 
@@ -32,9 +33,30 @@ class BaseTrainer(ABC):
 
     # ── epoch logging ───────────────────────────────────────────────────
 
+    def _get_noise_split_masks(self):
+        """Lazy-compute and cache clean/mislabelled index tensors + label refs."""
+        if hasattr(self, '_cached_noise_masks'):
+            return self._cached_noise_masks
+        d = self.init_data
+        data_obj, train_mask = d.get('data'), d.get('train_mask')
+        if (data_obj is None or train_mask is None
+                or not hasattr(data_obj, 'y_original')
+                or not hasattr(data_obj, 'y_noisy')):
+            self._cached_noise_masks = None
+            return None
+        split = get_noise_split_indices(data_obj.y_noisy, data_obj.y_original, train_mask)
+        if split is None:
+            self._cached_noise_masks = None
+            return None
+        self._cached_noise_masks = {
+            'clean_idx': split[0], 'mislabelled_idx': split[1],
+            'noisy_labels': data_obj.y_noisy, 'clean_labels': data_obj.y_original,
+        }
+        return self._cached_noise_masks
+
     def log_epoch(self, epoch, train_loss, val_loss, train_acc, val_acc,
                   *, train_f1=None, val_f1=None, oversmoothing=None,
-                  is_best=False):
+                  is_best=False, train_predictions=None):
         """Record one epoch's metrics and optionally save a checkpoint."""
         entry = {
             'epoch': epoch,
@@ -44,8 +66,26 @@ class BaseTrainer(ABC):
             'val_acc': float(val_acc) if val_acc is not None else None,
             'train_f1': float(train_f1) if train_f1 is not None else None,
             'val_f1': float(val_f1) if val_f1 is not None else None,
+            'train_acc_clean_only': None,
+            'train_f1_clean_only': None,
+            'train_acc_only_mislabelled_factual': None,
+            'train_f1_only_mislabelled_factual': None,
+            'train_acc_only_mislabelled_corrected': None,
+            'train_f1_only_mislabelled_corrected': None,
             'oversmoothing': oversmoothing,
         }
+        masks = self._get_noise_split_masks()
+        if train_predictions is not None and masks is not None:
+            cls = ClassificationMetrics(average='macro')
+            ci, mi = masks['clean_idx'], masks['mislabelled_idx']
+            ny, cy = masks['noisy_labels'], masks['clean_labels']
+            entry['train_acc_clean_only'] = cls.compute_accuracy(train_predictions[ci], cy[ci])
+            entry['train_f1_clean_only'] = cls.compute_f1(train_predictions[ci], cy[ci])
+            if len(mi) > 0:
+                entry['train_acc_only_mislabelled_factual'] = cls.compute_accuracy(train_predictions[mi], ny[mi])
+                entry['train_f1_only_mislabelled_factual'] = cls.compute_f1(train_predictions[mi], ny[mi])
+                entry['train_acc_only_mislabelled_corrected'] = cls.compute_accuracy(train_predictions[mi], cy[mi])
+                entry['train_f1_only_mislabelled_corrected'] = cls.compute_f1(train_predictions[mi], cy[mi])
         self.epoch_log.append(entry)
 
         run_dir = self.init_data.get('run_dir')

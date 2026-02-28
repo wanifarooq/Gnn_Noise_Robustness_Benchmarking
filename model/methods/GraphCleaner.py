@@ -162,7 +162,8 @@ class GraphCleanerNoiseDetector:
                     log_epoch_fn(current_epoch, current_metrics['train_loss'], current_metrics['val_loss'],
                                  current_metrics['train_acc'], current_metrics['val_acc'],
                                  train_f1=current_metrics['train_f1'], val_f1=current_metrics['val_f1'],
-                                 oversmoothing=os_entry, is_best=is_best)
+                                 oversmoothing=os_entry, is_best=is_best,
+                                 train_predictions=model_output.argmax(dim=1))
 
                 if patience_counter >= self.early_stopping_patience:
                     print(f"Early stopping triggered at epoch {current_epoch+1}")

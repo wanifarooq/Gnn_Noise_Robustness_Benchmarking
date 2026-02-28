@@ -175,12 +175,12 @@ class GNNGuardTrainer:
             
             self.model.eval()
             with torch.no_grad():
-                val_output = self.model(self.node_features, self.normalized_adjacency, 
-                                      use_attention=self.use_attention)
-                val_loss = F.nll_loss(val_output[val_indices], labels[val_indices])
-                
+                eval_output = self.model(self.node_features, self.normalized_adjacency,
+                                       use_attention=self.use_attention)
+                val_loss = F.nll_loss(eval_output[val_indices], labels[val_indices])
+
                 train_predictions = train_output[train_indices].max(1)[1].cpu().numpy()
-                val_predictions = val_output[val_indices].max(1)[1].cpu().numpy()
+                val_predictions = eval_output[val_indices].max(1)[1].cpu().numpy()
                 train_true_labels = labels[train_indices].cpu().numpy()
                 val_true_labels = labels[val_indices].cpu().numpy()
                 
@@ -226,7 +226,7 @@ class GNNGuardTrainer:
             is_best = val_loss < best_validation_loss
             if is_best:
                 best_validation_loss = val_loss
-                self.model_output = val_output
+                self.model_output = eval_output
                 epochs_no_improve = 0
             else:
                 epochs_no_improve += 1
@@ -234,7 +234,8 @@ class GNNGuardTrainer:
             if log_epoch_fn is not None:
                 log_epoch_fn(epoch, train_loss, val_loss, train_accuracy, val_accuracy,
                              train_f1=train_f1_score, val_f1=val_f1_score,
-                             oversmoothing=os_entry, is_best=is_best)
+                             oversmoothing=os_entry, is_best=is_best,
+                             train_predictions=eval_output.argmax(dim=1))
 
             if epochs_no_improve >= patience:
                 if verbose:

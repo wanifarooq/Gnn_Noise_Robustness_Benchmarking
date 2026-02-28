@@ -513,10 +513,14 @@ class GCODTrainer:
             # Early stopping
             is_best = val_loss_ce < self.best_val_loss
             if log_epoch_fn is not None:
+                self.model.eval()
+                with torch.no_grad():
+                    pred = self.model(self.data).argmax(dim=1)
                 log_epoch_fn(epoch, train_metrics['loss'], val_loss_ce,
                              train_metrics['accuracy'], val_ce_metrics['accuracy'],
                              train_f1=train_metrics['f1'], val_f1=val_ce_metrics['f1'],
-                             oversmoothing=os_entry, is_best=is_best)
+                             oversmoothing=os_entry, is_best=is_best,
+                             train_predictions=pred)
             if is_best:
                 self.best_val_loss = val_loss_ce
                 self.epochs_without_improvement = 0

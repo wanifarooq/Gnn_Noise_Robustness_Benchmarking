@@ -311,18 +311,18 @@ class GraphCommunityDefenseTrainer:
             
             model.eval()
             with torch.no_grad():
-                validation_output = model(batch_data)
-                validation_logits = validation_output[0] if (
-                    isinstance(validation_output, tuple) and len(validation_output) == 2
-                ) else validation_output
+                eval_output = model(batch_data)
+                eval_logits = eval_output[0] if (
+                    isinstance(eval_output, tuple) and len(eval_output) == 2
+                ) else eval_output
 
                 validation_loss = cross_entropy_loss(
-                    validation_logits[self.val_node_mask], node_labels[self.val_node_mask]
+                    eval_logits[self.val_node_mask], node_labels[self.val_node_mask]
                 ).item()
 
                 train_pred = logits[self.train_node_mask].argmax(dim=-1).cpu().numpy()
                 train_true = node_labels[self.train_node_mask].cpu().numpy()
-                val_pred = validation_logits[self.val_node_mask].argmax(dim=-1).cpu().numpy()
+                val_pred = eval_logits[self.val_node_mask].argmax(dim=-1).cpu().numpy()
                 val_true = node_labels[self.val_node_mask].cpu().numpy()
 
                 train_acc = self.cls_evaluator.compute_accuracy(train_pred, train_true)
@@ -383,9 +383,11 @@ class GraphCommunityDefenseTrainer:
                     epochs_without_improvement += 1
 
                 if log_epoch_fn is not None:
+                    # Use eval-mode logits (post-update, no dropout) for noise-split metrics
                     log_epoch_fn(epoch, train_loss, validation_loss, train_acc, val_acc,
                                  train_f1=train_f1, val_f1=val_f1,
-                                 oversmoothing=os_entry, is_best=is_best)
+                                 oversmoothing=os_entry, is_best=is_best,
+                                 train_predictions=eval_logits.argmax(dim=-1))
 
                 if epochs_without_improvement >= early_stopping_patience:
                     if self.verbose and enable_debug:

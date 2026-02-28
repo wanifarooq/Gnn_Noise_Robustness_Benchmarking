@@ -493,7 +493,8 @@ class NRGNN:
                              float(train_accuracy), float(validation_accuracy),
                              train_f1=train_f1 if logging else None,
                              val_f1=validation_f1 if logging else None,
-                             oversmoothing=os_entry, is_best=is_best)
+                             oversmoothing=os_entry, is_best=is_best,
+                             train_predictions=main_model_output.argmax(dim=1))
 
             # Early stopping
             if self.early_stopping_counter >= self.patience:

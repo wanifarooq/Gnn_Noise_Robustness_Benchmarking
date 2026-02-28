@@ -159,10 +159,14 @@ class PositiveEigenvaluesTrainer:
                     f"Train F1: {train_metrics['f1']:.4f}, Val F1: {val_metrics['f1']:.4f}")
 
             if log_epoch_fn is not None:
+                self.model.eval()
+                with torch.no_grad():
+                    pred = self.model(self.data).argmax(dim=1)
                 log_epoch_fn(epoch, train_metrics['loss'], val_metrics['loss'],
                              train_metrics['accuracy'], val_metrics['accuracy'],
                              train_f1=train_metrics['f1'], val_f1=val_metrics.get('f1'),
-                             oversmoothing=os_entry, is_best=is_best)
+                             oversmoothing=os_entry, is_best=is_best,
+                             train_predictions=pred)
 
             if epochs_without_improvement >= patience:
                 print(f"Early stopping at epoch {epoch}")
