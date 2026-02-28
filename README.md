@@ -53,7 +53,7 @@ This analysis investigates the role of the backbone architecture and its influen
 <i>Results on the Cora dataset with Uniform noise (noise ratio 0.6).</i>
 
 ### Oversmoothing metrics
-The following plots illustrate the behavior of classic metrics as well as the oversmoothing metrics **MAD**, **$E^{dir}$**, and **Numrank** of the GCOD framework during training and validation.  
+The following plots illustrate the behavior of classic metrics as well as the oversmoothing metrics **MAD**, **$E^{dir}$**, and **Numrank** during training and validation. These are computed on hidden-layer embeddings (not output logits) and are generated automatically for all methods.
 These oversmoothing metrics are included in the ablation study to provide insights into the model's behavior beyond standard evaluation measures.
 
 <p align="center">
@@ -105,6 +105,8 @@ These oversmoothing metrics are included in the ablation study to provide insigh
 - **weight_decay**: L2 regularization weight to avoid overfitting.
 - **epochs**: Maximum number of training epochs.
 - **patience**: Number of epochs without improvement before early stopping.
+- **oversmoothing_every**: Compute oversmoothing metrics every N epochs (default: 20). Set to 1 for per-epoch tracking.
+- **checkpoint_every_epoch**: Whether to save a `.pt` checkpoint every epoch (default: true). Set to false to only keep the best-epoch checkpoint.
 
 ## Framework-Specific Parameters
 
@@ -198,9 +200,9 @@ These oversmoothing metrics are included in the ablation study to provide insigh
 ## How to run the code
 
 This repository allows you to run experiments in three different modes:
-1. **Single experiment run** – execute a single experiment.
-2. **Automatic benchmarking of 5 runs** – evaluate performance across multiple runs.
-3. **Multithreading options of single run** – test multiple methods in parallel using the same seed.
+1. **Single experiment run** -- execute a single experiment via `run_experiment()`.
+2. **Automatic benchmarking** -- multi-run sweeps with mean/std, incremental execution, and checkpointing.
+3. **Multithreading single run** -- test multiple methods in parallel using the same seed.
 
 Before running any experiment:
 
@@ -215,64 +217,43 @@ pip install -r requirements.txt
 ### Single experiment run
 
 ```python
-# Necessary imports
 import yaml
-from util.experiment import initialize_experiment
-from model.GCOD_loss import GCODTrainer
+from util.experiment import run_experiment
 
 # Load the configuration file
 with open("config.yaml", "r") as f:
     config = yaml.safe_load(f)
 
-# Initialize parameters for the experiment
-init_data = initialize_experiment(config, run_id=1)
+# Run a single experiment (any method -- set in config.yaml under training.method)
+result = run_experiment(config, run_id=1)
 
-device = init_data['device']
-data_for_training = init_data['data_for_training']
-backbone_model = init_data['backbone_model']
-global_noisy_indices = init_data['global_noisy_indices']
-lr = init_data['lr']
-weight_decay = init_data['weight_decay']
-epochs = init_data['epochs']
-patience = init_data['patience']
-
-# Set specific parameters for GCOD
-gcod_params = config.get('gcod_params', {})
-batch_size = int(gcod_params.get('batch_size', 32))
-uncertainty_lr = float(gcod_params.get('uncertainty_lr', 1.0))
-
-# Create the GCOD trainer
-trainer = GCODTrainer(
-    model=backbone_model,
-    data=data_for_training,
-    noisy_indices=global_noisy_indices,
-    device=device,
-    learning_rate=lr,
-    weight_decay=weight_decay,
-    uncertainty_lr=uncertainty_lr,
-    total_epochs=epochs,
-    patience=patience,
-    batch_size=batch_size,
-    debug=True
-)
-
-# Run the training
-result = trainer.train_full_model()
-
-# Print the results
+# Print classification results
 print("Single run results:")
 print(f"Accuracy: {result['test_cls']['accuracy']:.4f}")
 print(f"F1 Score: {result['test_cls']['f1']:.4f}")
 print(f"Precision: {result['test_cls']['precision']:.4f}")
 print(f"Recall: {result['test_cls']['recall']:.4f}")
-oversmoothing_results = result['test_oversmoothing']
+
+# Print oversmoothing metrics (computed on hidden embeddings)
+os_results = result['test_oversmoothing']
 print("Oversmoothing metrics:")
-print(f"NumRank: {oversmoothing_results['NumRank']:.4f}")
-print(f"Erank: {oversmoothing_results['Erank']:.4f}")
-print(f"EDir: {oversmoothing_results['EDir']:.4f}")
-print(f"EDir_trad: {oversmoothing_results['EDir_traditional']:.4e}")
-print(f"EProj: {oversmoothing_results['EProj']:.4f}")
-print(f"MAD: {oversmoothing_results['MAD']:.4f}")
+for key in ('NumRank', 'Erank', 'EDir', 'EDir_traditional', 'EProj', 'MAD'):
+    print(f"  {key}: {os_results[key]:.4f}")
+
+# Print compute cost
+ci = result['compute_info']
+print(f"Training: {ci['time_training_total']:.2f}s, {ci['flops_training_total']:.0f} FLOPs")
+print(f"Inference: {ci['time_inference']:.2f}s, {ci['flops_inference']:.0f} FLOPs")
+```
+
+To save a checkpoint and later re-evaluate without retraining:
+
+```python
+# Train and save checkpoint
+result = run_experiment(config, run_id=1, checkpoint_path="best.pt", run_dir="run_1")
+
+# Later: evaluate from checkpoint (no training)
+result = run_experiment(config, run_id=1, checkpoint_path="best.pt", eval_only=True)
 ```
 
 ### Automatic benchmarking
@@ -287,20 +268,20 @@ The number of runs per experiment is controlled by `num_runs` in `config.yaml` (
 python main.py -c config.yaml --num-runs 3
 ```
 
-**Incremental runs** — increasing `num_runs` only executes the new runs. Existing results are loaded from each `run_N/training_log.json`, so completed work is never repeated.
+**Incremental runs** -- increasing `num_runs` only executes the new runs. Existing results are loaded from each `run_N/training_log.json`, so completed work is never repeated.
 
-**Skip behavior** — when all requested runs are already complete and `experiment.json` exists, the experiment is skipped entirely.
+**Skip behavior** -- when all requested runs are already complete and `experiment.json` exists, the experiment is skipped entirely.
 
-**Force re-run** — pass `--force` on the CLI (or set `force: true` in `config.yaml`) to discard previous results and re-execute every run from scratch.
+**Force re-run** -- pass `--force` on the CLI (or set `force: true` in `config.yaml`) to discard previous results and re-execute every run from scratch.
 
-**Eval-only mode** — `--eval-only` always re-evaluates every run from saved checkpoints. It does not write `training_log.json`, so eval-only results are not detected by incremental runs.
+**Eval-only mode** -- `--eval-only` always re-evaluates every run from saved checkpoints. It does not write `training_log.json`, so eval-only results are not detected by incremental runs.
 
 **Example workflow:**
 ```bash
 # Start with 2 runs
 python main.py -c config.yaml --num-runs 2
 
-# Later, bump to 5 — only runs 3-5 execute
+# Later, bump to 5 -- only runs 3-5 execute
 python main.py -c config.yaml --num-runs 5
 
 # Running again with 5 skips immediately (all complete)
@@ -327,49 +308,95 @@ python main_multithreading.py --help
 
 ## How to add frameworks
 
-The models are implemented in the `model` directory, with each model in its corresponding file. The main file (`main.py`) imports the `run_experiment` function from `utilities.py`, which in turn imports the models specified in `config.yaml` and sets up everything necessary for benchmarking.
+Methods use a self-registration pattern. To add a new robustness method:
 
-It is possible to add new frameworks simply by adding their code as a new file in the `model` directory and updating the `run_experiment` utility function (if you want to use the automatic main script or the multithreading main script) to also include the new frameworks.
+1. Create a file in `model/methods/` (e.g., `model/methods/MyMethod.py`)
+2. Subclass `BaseTrainer` and implement the `train()` method (the per-epoch training loop)
+3. Decorate the class with `@register('my_method')`
+
+```python
+from model.base import BaseTrainer
+from model.registry import register
+
+@register('my_method')
+class MyMethodTrainer(BaseTrainer):
+    def train(self):
+        d = self.init_data
+        model, data = d['backbone_model'], d['data_for_training']
+        optimizer = torch.optim.Adam(model.parameters(), lr=d['lr'])
+
+        for epoch in range(d['epochs']):
+            model.train()
+            optimizer.zero_grad(set_to_none=True)
+            out = model(data)
+            loss = F.cross_entropy(out[data.train_mask], data.y[data.train_mask])
+            loss.backward()
+            optimizer.step()
+
+            # Compute validation loss for early stopping
+            model.eval()
+            with torch.no_grad():
+                val_out = model(data)
+                val_loss = F.cross_entropy(val_out[data.val_mask], data.y[data.val_mask])
+
+            # log_epoch handles checkpointing, early stopping, noise-split metrics
+            self.log_epoch(epoch, float(loss), float(val_loss),
+                           train_acc=..., val_acc=...,
+                           is_best=(float(val_loss) < self.best_val_loss),
+                           train_predictions=out.argmax(dim=1))
+
+        return {'train_oversmoothing': {}, 'val_oversmoothing': {},
+                'stopped_at_epoch': epoch}
+```
+
+No other wiring is needed -- the registry auto-discovers all files in `model/methods/`. Set `training.method: my_method` in `config.yaml` and run.
 
 ## Structure
 ```
 .
-├── config.yaml
-├── images
-│   ├── Accuracy.png
-│   ├── Asymmetric.png
-│   ├── CiteSeer_and_Pubmed.png
-│   ├── diagram.png
-│   ├── Different_Backbone.png
-│   ├── Different_noise_type.png
-│   ├── E_dir.png
-│   ├── F1.png
-│   ├── Loss.png
-│   ├── Mad.png
-│   ├── NumRank.png
-│   └── Symmetric.png
-├── LICENSE
-├── main_multithreading.py
-├── main.py
-├── model
-│   ├── CommunityDefense.py
-│   ├── CR_GNN.py
-│   ├── ERASE.py
-│   ├── evaluation.py
-│   ├── GCOD_loss.py
-│   ├── GNN_Cleaner.py
-│   ├── GNNGuard.py
-│   ├── GNNs.py
-│   ├── GraphCleaner.py
-│   ├── NRGNN.py
-│   ├── PI_GNN.py
-│   ├── Positive_Eigenvalues.py
-│   ├── RTGNN.py
-│   ├── Standard.py
-│   └── UnionNET.py
-├── README.md
-├── requirements.txt
-└── utilities.py
++-- config.yaml                  # experiment configuration (sweeps, hyperparams)
++-- main.py                      # production sweep runner (multi-run, incremental)
++-- main_multithreading.py       # parallel single-run comparison
++-- sweep_utils.py               # YAML sweep expansion, config hashing, run detection
+|
++-- model/
+|   +-- base.py                  # BaseTrainer ABC (train/eval/checkpoint/logging/plotting)
+|   +-- registry.py              # @register decorator + auto-discovery
+|   +-- gnns.py                  # GCN, GIN, GAT, GATv2, GPS backbones
+|   +-- evaluation.py            # ClassificationMetrics, OversmoothingMetrics
+|   +-- methods/                 # 13 robustness method trainers
+|       +-- Standard.py
+|       +-- GCOD_loss.py
+|       +-- NRGNN.py
+|       +-- RTGNN.py
+|       +-- CR_GNN.py
+|       +-- PI_GNN.py
+|       +-- ERASE.py
+|       +-- GNNGuard.py
+|       +-- GraphCleaner.py
+|       +-- UnionNET.py
+|       +-- GNN_Cleaner.py
+|       +-- Positive_Eigenvalues.py
+|       +-- CommunityDefense.py
+|
++-- util/
+|   +-- experiment.py            # initialize_experiment(), run_experiment()
+|   +-- data.py                  # dataset loading, splits, preprocessing
+|   +-- noise.py                 # noise injection (10 types)
+|   +-- profiling.py             # FLOPs profiling (inference + training)
+|   +-- plot.py                  # training curves, oversmoothing, noise-split plots
+|   +-- seed.py                  # deterministic seeding
+|   +-- cli.py                   # CLI helpers and formatting
+|
++-- tests/
+|   +-- test_smoke.py            # smoke tests for all 13 methods
+|   +-- test_evaluation.py       # unit tests for metrics
+|   +-- test_checkpoint_consistency.py  # checkpoint round-trip tests
+|
++-- results/                     # generated experiment outputs (per-run logs, checkpoints, plots)
++-- images/                      # figures for README
++-- requirements.txt
++-- LICENSE
 ```
 
 ## Author

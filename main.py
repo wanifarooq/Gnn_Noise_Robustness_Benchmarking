@@ -93,6 +93,9 @@ def run_benchmarking(base_folder='results', config_path=DEFAULT_CONFIG,
         # ── Incremental run detection ──
         # Scan existing run_N/training_log.json to find already-completed runs.
         # When force=True, ignore previous results and re-execute everything.
+        # When eval_only=True, detection is also skipped because eval-only passes
+        # run_dir=None, so no training_log.json is written — previous eval-only
+        # results are never visible to detection and all runs always re-evaluate.
         if force or run_eval_only:
             completed = {}
             if force:
