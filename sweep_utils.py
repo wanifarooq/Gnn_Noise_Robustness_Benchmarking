@@ -189,19 +189,32 @@ def get_result_filename(config: dict) -> str:
     return f"{short_hash}_{dataset}_{method}_{seed}_noise-{noise_type}-{noise_rate_str}"
 
 
-def should_run_experiment(result_json_path: str, cfg: dict) -> bool:
-    """
-    Skip the experiment if results already exist, unless cfg['force'] is True.
-    """
-    force = bool(cfg.get("force", False))
+def detect_completed_runs(experiment_dir: str, n_runs: int) -> Dict[int, Dict[str, Any]]:
+    """Scan run_1/ … run_{n_runs}/ for completed training logs.
 
-    if os.path.exists(result_json_path):
-        if force:
-            print(f"[FORCE] Results already exist, overwriting: {result_json_path}")
-            return True
-        else:
-            print(f"[SKIP] Results already exist: {result_json_path}")
-            print("       Set `force: true` in config.yaml to overwrite.")
-            return False
+    Each run directory is expected to contain a ``training_log.json`` written by
+    ``BaseTrainer.save_training_log``.  A run is considered *complete* when the
+    file exists, is valid JSON, and its ``final_result`` contains a ``test_cls``
+    key (guards against corrupt or partially-written files).
 
-    return True
+    Args:
+        experiment_dir: Path to the experiment folder (e.g. ``results/<hash>``).
+        n_runs: Total number of runs requested – only ``run_1`` through
+            ``run_{n_runs}`` are inspected.
+
+    Returns:
+        ``{run_id: final_result}`` for every complete run found on disk.
+        Missing, corrupt, or incomplete files are silently skipped.
+    """
+    completed: Dict[int, Dict[str, Any]] = {}
+    for run_id in range(1, n_runs + 1):
+        log_path = os.path.join(experiment_dir, f"run_{run_id}", "training_log.json")
+        try:
+            with open(log_path, "r", encoding="utf-8") as f:
+                log = json.load(f)
+            final = log.get("final_result")
+            if isinstance(final, dict) and "test_cls" in final:
+                completed[run_id] = final
+        except (OSError, json.JSONDecodeError, TypeError, KeyError, ValueError):
+            continue
+    return completed

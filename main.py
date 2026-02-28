@@ -10,12 +10,37 @@ from codecarbon import EmissionsTracker
 from util.experiment import run_experiment
 from util.cli import print_table, fmt_mean_std
 from model.evaluation import OVERSMOOTHING_KEYS, ZERO_CLS
-from sweep_utils import expand_yaml_sweeps, get_result_filename, should_run_experiment, json_serializer
+from sweep_utils import expand_yaml_sweeps, get_result_filename, detect_completed_runs, json_serializer
 
 DEFAULT_CONFIG = "config.yaml"
 NOISE_SPLIT_KEYS = ('train_only_clean', 'train_only_mislabelled_factual', 'train_only_mislabelled_corrected')
 CLS_SPLITS = ('test', 'train', 'val') + NOISE_SPLIT_KEYS
 
+
+def _accumulate_run_result(run_result, classification_runs, oversmoothing_runs, compute_runs):
+    """Shared accumulation path for both disk-loaded and live run results.
+
+    Appends the per-split classification, oversmoothing, and compute metrics
+    from a single run into the corresponding accumulator dicts.
+    """
+    for split in CLS_SPLITS:
+        src = run_result.get(f'{split}_cls', dict(ZERO_CLS))
+        for mkey in classification_runs[split]:
+            classification_runs[split][mkey].append(float(src[mkey]))
+
+    for split, key_prefix in (('test', 'test_oversmoothing'), ('train', 'train_oversmoothing'), ('val', 'val_oversmoothing')):
+        src = run_result.get(key_prefix, {})
+        for okey in OVERSMOOTHING_KEYS:
+            raw = src.get(okey, float('nan'))
+            if isinstance(raw, torch.Tensor) and raw.dim() == 0:
+                raw = raw.item()
+            elif isinstance(raw, (list, np.ndarray, torch.Tensor)):
+                raw = float(np.mean([float(x) for x in raw]))
+            oversmoothing_runs[split][okey].append(float(raw))
+
+    compute_info = run_result.get('compute_info', {})
+    for ckey in compute_runs:
+        compute_runs[ckey].append(float(compute_info.get(ckey, float('nan'))))
 
 
 def parse_args():
@@ -28,11 +53,14 @@ def parse_args():
                         help='Disable saving model checkpoints after training')
     parser.add_argument('--num-runs', type=int, default=None,
                         help='Number of runs per config (default: from config or 5)')
+    parser.add_argument('--force', action='store_true',
+                        help='Re-run all experiments from scratch, ignoring completed runs')
     return parser.parse_args()
 
 
 def run_benchmarking(base_folder='results', config_path=DEFAULT_CONFIG,
-                     eval_only=False, no_checkpoint=False, num_runs=None):
+                     eval_only=False, no_checkpoint=False, num_runs=None,
+                     force=False):
     run_codecarbon = False
     print("\n" + "-"*50)
     print("Multi-run experiment with parameter sweep")
@@ -54,13 +82,40 @@ def run_benchmarking(base_folder='results', config_path=DEFAULT_CONFIG,
         experiment_dir = os.path.join(base_folder, file_name)
         result_json_path = os.path.join(experiment_dir, 'experiment.json')
 
-        # Skip if already computed (unless force: true or eval-only)
-        if not eval_only and not should_run_experiment(result_json_path, sweep_config):
-            continue
-
         os.makedirs(experiment_dir, exist_ok=True)
 
-        # Device selection (more explicit)
+        # CLI flags override per-config values
+        save_checkpoint = (not no_checkpoint) and sweep_config.get('save_checkpoint', True)
+        run_eval_only = eval_only or sweep_config.get('eval_only', False)
+        n_runs = num_runs if num_runs is not None else sweep_config.get('num_runs', 5)
+        force = force or bool(sweep_config.get("force", False))
+
+        # ── Incremental run detection ──
+        # Scan existing run_N/training_log.json to find already-completed runs.
+        # When force=True, ignore previous results and re-execute everything.
+        if force or run_eval_only:
+            completed = {}
+            if force:
+                print(f"[FORCE] Re-running all {n_runs} runs: {experiment_dir}")
+            elif run_eval_only:
+                print(f"[EVAL-ONLY] Re-evaluating all {n_runs} runs: {experiment_dir}")
+        else:
+            completed = detect_completed_runs(experiment_dir, n_runs)
+
+        runs_needed = [r for r in range(1, n_runs + 1) if r not in completed]
+
+        # Skip if every requested run is already complete
+        if not runs_needed and os.path.exists(result_json_path):
+            print(f"[SKIP] All {n_runs} runs complete: {result_json_path}")
+            continue
+
+        if completed and runs_needed:
+            print(f"[RESUME] {len(completed)}/{n_runs} runs complete, running {len(runs_needed)} more")
+        elif not runs_needed:
+            # All runs done but experiment.json missing — rebuild it below
+            print(f"[REBUILD] All {n_runs} runs complete, rebuilding experiment.json")
+
+        # Device selection
         requested_device = sweep_config.get("device", "cpu")
         if requested_device == "cuda":
             device_str = "cuda" if torch.cuda.is_available() else "cpu"
@@ -82,13 +137,13 @@ def run_benchmarking(base_folder='results', config_path=DEFAULT_CONFIG,
         compute_runs = {k: [] for k in ('flops_inference', 'flops_training_total',
                                          'time_training_total', 'time_inference')}
 
-        # CLI flags override per-config values
-        save_checkpoint = (not no_checkpoint) and sweep_config.get('save_checkpoint', True)
-        run_eval_only = eval_only or sweep_config.get('eval_only', False)
+        # Pre-populate accumulators from completed runs (in run_id order)
+        for rid in sorted(completed):
+            _accumulate_run_result(completed[rid], classification_runs, oversmoothing_runs, compute_runs)
 
-        n_runs = num_runs or sweep_config.get('num_runs', 5)
+        # Execute only the missing runs
         codecarbon_file_name = "emissions.csv"
-        for run in range(1, n_runs + 1):
+        for run in runs_needed:
             try:
                 tracker = EmissionsTracker(output_dir=experiment_dir,
                                           output_file=codecarbon_file_name,
@@ -97,7 +152,7 @@ def run_benchmarking(base_folder='results', config_path=DEFAULT_CONFIG,
                 tracker.start()
                 run_codecarbon = True
             except Exception as e:
-                if run == 1:
+                if run == runs_needed[0]:
                     print(f"[WARNING] Could not start EmissionsTracker: {e}")
                     print("[WARNING] Carbon emissions data will be missing from results.")
                     print("[WARNING] On macOS, codecarbon requires sudo access to read hardware power metrics.")
@@ -113,24 +168,8 @@ def run_benchmarking(base_folder='results', config_path=DEFAULT_CONFIG,
             )
             if run_codecarbon:
                 tracker.stop()
-            # Accumulate per-run results
-            for split in CLS_SPLITS:
-                src = run_result.get(f'{split}_cls', dict(ZERO_CLS))
-                for mkey in classification_runs[split]:
-                    classification_runs[split][mkey].append(float(src[mkey]))
 
-            for split, key_prefix in (('test', 'test_oversmoothing'), ('train', 'train_oversmoothing'), ('val', 'val_oversmoothing')):
-                src = run_result.get(key_prefix, {})
-                for okey in OVERSMOOTHING_KEYS:
-                    raw = src.get(okey, float('nan'))
-                    if isinstance(raw, torch.Tensor) and raw.dim() == 0:
-                        raw = raw.item()
-                    elif isinstance(raw, (list, np.ndarray, torch.Tensor)):
-                        raw = float(np.mean([float(x) for x in raw]))
-                    oversmoothing_runs[split][okey].append(float(raw))
-
-            for ckey in compute_runs:
-                compute_runs[ckey].append(float(run_result['compute_info'][ckey]))
+            _accumulate_run_result(run_result, classification_runs, oversmoothing_runs, compute_runs)
 
             print(f"Run {run} completed - Test Acc: {float(run_result['test_cls']['accuracy']):.4f}, F1: {float(run_result['test_cls']['f1']):.4f}, "
                   f"Train: {float(run_result['compute_info']['time_training_total']):.2f}s, Eval: {float(run_result['compute_info']['time_inference']):.2f}s")
@@ -188,4 +227,5 @@ if __name__ == "__main__":
     run_benchmarking(config_path=args.config,
                      eval_only=args.eval_only,
                      no_checkpoint=args.no_checkpoint,
-                     num_runs=args.num_runs)
+                     num_runs=args.num_runs,
+                     force=args.force)

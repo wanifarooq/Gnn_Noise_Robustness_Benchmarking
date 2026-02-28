@@ -275,11 +275,36 @@ print(f"EProj: {oversmoothing_results['EProj']:.4f}")
 print(f"MAD: {oversmoothing_results['MAD']:.4f}")
 ```
 
-### Automatic benchmarking of 5 runs
+### Automatic benchmarking
 
 Run the main script:
 ```bash
-python main.py
+python main.py -c config.yaml
+```
+
+The number of runs per experiment is controlled by `num_runs` in `config.yaml` (default: 5) or overridden via CLI:
+```bash
+python main.py -c config.yaml --num-runs 3
+```
+
+**Incremental runs** — increasing `num_runs` only executes the new runs. Existing results are loaded from each `run_N/training_log.json`, so completed work is never repeated.
+
+**Skip behavior** — when all requested runs are already complete and `experiment.json` exists, the experiment is skipped entirely.
+
+**Force re-run** — pass `--force` on the CLI (or set `force: true` in `config.yaml`) to discard previous results and re-execute every run from scratch.
+
+**Eval-only mode** — `--eval-only` always re-evaluates every run from saved checkpoints. It does not write `training_log.json`, so eval-only results are not detected by incremental runs.
+
+**Example workflow:**
+```bash
+# Start with 2 runs
+python main.py -c config.yaml --num-runs 2
+
+# Later, bump to 5 — only runs 3-5 execute
+python main.py -c config.yaml --num-runs 5
+
+# Running again with 5 skips immediately (all complete)
+python main.py -c config.yaml --num-runs 5
 ```
 
 ### Multithreading options for single run (Thread pooling)
