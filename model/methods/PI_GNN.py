@@ -138,7 +138,7 @@ class PiGnnTrainer:
                 self.oversmoothing_evaluator, hidden_representations, graph_data.edge_index, graph_data.val_mask
             )
             
-            return performance_metrics, train_oversmoothing_metrics, val_oversmoothing_metrics
+            return performance_metrics, train_oversmoothing_metrics, val_oversmoothing_metrics, predicted_labels
 
 
     def train_model(self, model, graph_data, config=None, model_factory_function=None,
@@ -277,7 +277,7 @@ class PiGnnTrainer:
             main_optimizer.step()
 
             # Evaluate current performance
-            current_metrics, train_oversmoothing, val_oversmoothing = self._evaluate_model_performance(model, graph_data)
+            current_metrics, train_oversmoothing, val_oversmoothing, eval_pred = self._evaluate_model_performance(model, graph_data)
 
             if train_oversmoothing is not None:
                 self.training_history['train'].append(train_oversmoothing)
@@ -297,14 +297,11 @@ class PiGnnTrainer:
             # Early stopping
             is_best = current_metrics['val_loss'] < best_validation_loss
             if log_epoch_fn is not None:
-                with torch.no_grad():
-                    classification_output, _ = model(graph_data)
-                    pred = classification_output.argmax(dim=1)
                 log_epoch_fn(current_epoch, current_metrics['train_loss'], current_metrics['val_loss'],
                              current_metrics['train_acc'], current_metrics['val_acc'],
                              train_f1=current_metrics['train_f1'], val_f1=current_metrics['val_f1'],
                              oversmoothing=os_entry, is_best=is_best,
-                             train_predictions=pred)
+                             train_predictions=eval_pred)
             if is_best:
                 best_validation_loss = current_metrics['val_loss']
                 best_training_epoch = current_epoch

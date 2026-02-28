@@ -41,13 +41,15 @@ def train_with_standard_loss(
         loss_train.backward()
         optimizer.step()
 
+        # Fresh eval-mode forward pass: `out` is stale (train-mode, pre-step).
         model.eval()
         with torch.no_grad():
+            eval_out = model(data)
             val_idx = data.val_mask.nonzero(as_tuple=True)[0]
 
-            val_loss = criterion(out[val_idx], data.y[val_idx])
+            val_loss = criterion(eval_out[val_idx], data.y[val_idx])
 
-            pred = out.argmax(dim=1)
+            pred = eval_out.argmax(dim=1)
             train_acc = (pred[train_idx] == data.y[train_idx]).sum().item() / len(train_idx)
             val_acc = (pred[val_idx] == data.y[val_idx]).sum().item() / len(val_idx)
             train_f1 = cls_evaluator.compute_f1(pred[train_idx], data.y[train_idx])

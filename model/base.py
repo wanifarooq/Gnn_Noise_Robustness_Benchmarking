@@ -50,7 +50,7 @@ class BaseTrainer(ABC):
             return None
         self._cached_noise_masks = {
             'clean_idx': split[0], 'mislabelled_idx': split[1],
-            'noisy_labels': data_obj.y_noisy, 'clean_labels': data_obj.y_original,
+            'noisy_labels': data_obj.y_noisy.clone(), 'clean_labels': data_obj.y_original.clone(),
         }
         return self._cached_noise_masks
 
@@ -81,11 +81,10 @@ class BaseTrainer(ABC):
             ny, cy = masks['noisy_labels'], masks['clean_labels']
             entry['train_acc_clean_only'] = cls.compute_accuracy(train_predictions[ci], cy[ci])
             entry['train_f1_clean_only'] = cls.compute_f1(train_predictions[ci], cy[ci])
-            if len(mi) > 0:
-                entry['train_acc_only_mislabelled_factual'] = cls.compute_accuracy(train_predictions[mi], ny[mi])
-                entry['train_f1_only_mislabelled_factual'] = cls.compute_f1(train_predictions[mi], ny[mi])
-                entry['train_acc_only_mislabelled_corrected'] = cls.compute_accuracy(train_predictions[mi], cy[mi])
-                entry['train_f1_only_mislabelled_corrected'] = cls.compute_f1(train_predictions[mi], cy[mi])
+            entry['train_acc_only_mislabelled_factual'] = cls.compute_accuracy(train_predictions[mi], ny[mi])
+            entry['train_f1_only_mislabelled_factual'] = cls.compute_f1(train_predictions[mi], ny[mi])
+            entry['train_acc_only_mislabelled_corrected'] = cls.compute_accuracy(train_predictions[mi], cy[mi])
+            entry['train_f1_only_mislabelled_corrected'] = cls.compute_f1(train_predictions[mi], cy[mi])
         self.epoch_log.append(entry)
 
         run_dir = self.init_data.get('run_dir')

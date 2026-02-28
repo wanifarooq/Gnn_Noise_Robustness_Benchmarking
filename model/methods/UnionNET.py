@@ -206,14 +206,19 @@ class UnionNET:
             training_loss.backward()
             self.optimizer.step()
             
+            # Fresh eval-mode forward pass: model_predictions is stale (train-mode, pre-step).
+            self.gnn_model.eval()
+            with torch.no_grad():
+                eval_output = self.gnn_model(self.graph_data)
+
             train_true_labels = self.noisy_node_labels[self.train_node_mask].cpu().numpy()
-            train_pred_labels = model_predictions[self.train_node_mask].detach().cpu().numpy().argmax(1)
+            train_pred_labels = eval_output[self.train_node_mask].detach().cpu().numpy().argmax(1)
             train_accuracy = self.cls_evaluator.compute_accuracy(train_pred_labels, train_true_labels)
             train_f1_score = self.cls_evaluator.compute_f1(train_pred_labels, train_true_labels)
-            
-            _, validation_loss, _ = self._forward_pass('val')
+
+            validation_loss = F.cross_entropy(eval_output[self.val_node_mask], self.noisy_node_labels[self.val_node_mask])
             val_true_labels = self.noisy_node_labels[self.val_node_mask].cpu().numpy()
-            val_pred_labels = model_predictions[self.val_node_mask].detach().cpu().numpy().argmax(1)
+            val_pred_labels = eval_output[self.val_node_mask].detach().cpu().numpy().argmax(1)
             val_accuracy = self.cls_evaluator.compute_accuracy(val_pred_labels, val_true_labels)
             val_f1_score = self.cls_evaluator.compute_f1(val_pred_labels, val_true_labels)
             
@@ -263,7 +268,7 @@ class UnionNET:
                 log_epoch_fn(current_epoch, training_loss, validation_loss, train_accuracy, val_accuracy,
                              train_f1=train_f1_score, val_f1=val_f1_score,
                              oversmoothing=os_entry, is_best=is_best,
-                             train_predictions=model_predictions.argmax(dim=1))
+                             train_predictions=eval_output.argmax(dim=1))
 
             if self.early_stop_patience and self.patience_counter >= self.early_stop_patience:
                 if enable_debug:
