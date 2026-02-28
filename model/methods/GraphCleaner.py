@@ -111,7 +111,7 @@ class GraphCleanerNoiseDetector:
                 current_metrics = self._calculate_training_metrics(graph_data, neural_network_model, model_output)
 
                 os_entry = None
-                if (current_epoch + 1) % self.oversmoothing_every == 0:
+                if current_epoch % self.oversmoothing_every == 0 or current_epoch == total_training_epochs - 1:
                     embeddings = neural_network_model.get_embeddings(graph_data)
                     train_oversmoothing_metrics = compute_oversmoothing_for_mask(
                         self.oversmoothing_calculator, embeddings, graph_data.edge_index, graph_data.train_mask)

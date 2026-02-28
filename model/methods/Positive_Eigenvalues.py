@@ -97,8 +97,7 @@ class PositiveEigenvaluesTrainer:
 
             # Oversmoothing computation
             os_entry = None
-            if (epoch + 1) % self.oversmoothing_every == 0:
-
+            if epoch % self.oversmoothing_every == 0 or epoch == max_epochs - 1:
                 self.model.eval()
                 with torch.no_grad():
                     full_embeddings = self.model.get_embeddings(self.data)
@@ -106,13 +105,11 @@ class PositiveEigenvaluesTrainer:
                 train_oversmoothing = compute_oversmoothing_for_mask(
                     self.oversmoothing_evaluator, full_embeddings, self.data.edge_index, self.data.train_mask
                 )
-
                 val_oversmoothing = compute_oversmoothing_for_mask(
                     self.oversmoothing_evaluator, full_embeddings, self.data.edge_index, self.data.val_mask
                 )
 
                 os_entry = {'train': dict(train_oversmoothing), 'val': dict(val_oversmoothing)}
-
                 metrics = {
                     'train_loss': train_metrics['loss'],
                     'val_loss': val_metrics['loss'],
@@ -125,7 +122,6 @@ class PositiveEigenvaluesTrainer:
                 print(f"Epoch {epoch:03d} | Train Loss: {metrics['train_loss']:.4f}, Val Loss: {metrics['val_loss']:.4f} | "
                     f"Train Acc: {metrics['train_acc']:.4f}, Val Acc: {metrics['val_acc']:.4f} | "
                     f"Train F1: {metrics['train_f1']:.4f}, Val F1: {metrics['val_f1']:.4f}")
-
 
                 for key, value in train_oversmoothing.items():
                     per_epochs_oversmoothing[key].append(value)

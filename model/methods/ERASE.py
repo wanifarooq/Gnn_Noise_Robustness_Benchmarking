@@ -376,7 +376,7 @@ class ERASETrainer:
         self.cls_evaluator = ClassificationMetrics(average='macro')
         self.oversmoothing_every = training_config.get('oversmoothing_every', 20)
 
-    def train_erase_model(self, graph_data, enable_debug_output=False, log_epoch_fn=None):
+    def train_erase_model(self, graph_data, log_epoch_fn=None):
         # Create enhanced model
         
         enhanced_model = self._create_enhanced_gnn_model()
@@ -408,7 +408,7 @@ class ERASETrainer:
         
         training_results = self._execute_training_loop(
             enhanced_model, graph_data, model_optimizer, mcr2_loss_function,
-            adjacency_matrix, semantic_labels_matrix, initial_predicted_labels, enable_debug_output,
+            adjacency_matrix, semantic_labels_matrix, initial_predicted_labels,
             log_epoch_fn=log_epoch_fn
         )
         
@@ -447,7 +447,7 @@ class ERASETrainer:
         return enhanced_model.to(self.computation_device)
 
     def _execute_training_loop(self, model, graph_data, optimizer, loss_function,
-                                  adjacency_matrix, semantic_labels_matrix, predicted_labels, debug_mode,
+                                  adjacency_matrix, semantic_labels_matrix, predicted_labels,
                                   log_epoch_fn=None):
             per_epochs_oversmoothing = defaultdict(list)
             per_epochs_val_oversmoothing = defaultdict(list)
@@ -473,7 +473,7 @@ class ERASETrainer:
                 )
                 train_f1, validation_f1 = self._compute_f1_scores_for_splits(model, graph_data, predicted_labels)
 
-                should_compute_oversmoothing = (current_epoch + 1) % self.oversmoothing_every == 0
+                should_compute_oversmoothing = current_epoch % self.oversmoothing_every == 0 or current_epoch == max_epochs - 1
                 if should_compute_oversmoothing:
                     model.eval()
                     with torch.no_grad():
@@ -490,10 +490,9 @@ class ERASETrainer:
                     train_oversmoothing = {}
                     validation_oversmoothing = {}
                 
-                if debug_mode:
-                    self._print_epoch_debug_information(current_epoch, train_accuracy, validation_accuracy,
-                                                      train_f1, validation_f1, train_oversmoothing, validation_oversmoothing,
-                                                      should_print_oversmoothing=should_compute_oversmoothing)
+                self._print_epoch_debug_information(current_epoch, train_accuracy, validation_accuracy,
+                                                  train_f1, validation_f1, train_oversmoothing, validation_oversmoothing,
+                                                  should_print_oversmoothing=should_compute_oversmoothing)
 
                 # Early stopping
                 is_best = validation_loss < best_validation_loss
@@ -514,15 +513,13 @@ class ERASETrainer:
                     patience_counter += 1
 
                 if patience_counter >= patience_limit:
-                    if debug_mode:
-                        print(f'Early stopping triggered at epoch {current_epoch}')
+                    print(f'Early stopping triggered at epoch {current_epoch}')
                     break
 
             self._trained_model = model
             self._final_predicted_labels = predicted_labels
 
-            if debug_mode:
-                print("\nERASE Training completed!")
+            print("\nERASE Training completed!")
 
             return {
                 'train_oversmoothing': dict(per_epochs_oversmoothing),
@@ -721,7 +718,7 @@ class ERASEMethodTrainer(BaseTrainer):
         d = self.init_data
         self._erase_trainer = self._create_erase_trainer()
         return self._erase_trainer.train_erase_model(
-            d['data_for_training'], enable_debug_output=True,
+            d['data_for_training'],
             log_epoch_fn=self.log_epoch,
         )
 

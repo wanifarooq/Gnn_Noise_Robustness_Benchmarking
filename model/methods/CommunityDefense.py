@@ -341,7 +341,7 @@ class GraphCommunityDefenseTrainer:
                 )
 
                 os_entry = None
-                if (epoch + 1) % oversmoothing_every == 0:
+                if epoch % oversmoothing_every == 0 or epoch == training_epochs - 1:
                     emb = model.get_embeddings(batch_data).detach()
 
                     train_metrics = compute_oversmoothing_for_mask(

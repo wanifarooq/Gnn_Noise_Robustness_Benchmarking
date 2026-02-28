@@ -194,14 +194,13 @@ class GCODTrainer:
     
     def __init__(self, model, data, noisy_indices=None, device='cuda', 
                  learning_rate=0.01, weight_decay=5e-4, uncertainty_lr=0.01,
-                 total_epochs=500, patience=100, batch_size=32, debug=True,
+                 total_epochs=500, patience=100, batch_size=32,
                  oversmoothing_every=20):
-        
+
         self.model = model.to(device)
         self.data = data.to(device)
         self.noisy_indices = noisy_indices if noisy_indices is not None else []
         self.device = device
-        self.debug = debug
 
         self.learning_rate = learning_rate
         self.weight_decay = weight_decay
@@ -451,10 +450,9 @@ class GCODTrainer:
     def train_full_model(self, log_epoch_fn=None):
         per_epochs_train_oversmoothing = defaultdict(list)
         per_epochs_val_oversmoothing = defaultdict(list)
-        if self.debug:
-            print(f"Starting GCOD training for {self.total_epochs} epochs")
-            print(f"Training samples: {self.data.train_mask.sum().item()}")
-            print(f"Noisy samples: {len(self.noisy_indices)}")
+        print(f"Starting GCOD training for {self.total_epochs} epochs")
+        print(f"Training samples: {self.data.train_mask.sum().item()}")
+        print(f"Noisy samples: {len(self.noisy_indices)}")
         
         for epoch in range(self.total_epochs):
             train_loss, l1_loss, l2_loss, l3_loss = self.train_single_epoch(epoch)
@@ -466,7 +464,16 @@ class GCODTrainer:
             oversmoothing_metrics = self.compute_oversmoothing_metrics()
 
             os_entry = None
-            if self.debug and (epoch + 1) % self.oversmoothing_every == 0:
+            if epoch % self.oversmoothing_every == 0 or epoch == self.total_epochs - 1:
+                train_os = oversmoothing_metrics.get('train', {})
+                val_os = oversmoothing_metrics.get('val', {})
+                for key, value in train_os.items():
+                    per_epochs_train_oversmoothing[key].append(value)
+                for key, value in val_os.items():
+                    per_epochs_val_oversmoothing[key].append(value)
+
+                os_entry = {'train': dict(train_os), 'val': dict(val_os)}
+
                 with torch.no_grad():
                     u_mean = self.gcod_loss_fn.uncertainty_params.mean().item()
                     u_std = self.gcod_loss_fn.uncertainty_params.std().item()
@@ -481,34 +488,12 @@ class GCODTrainer:
                 print(f"Uncertainty Stats - Mean: {u_mean:.4f}, Std: {u_std:.4f}, "
                     f"Min: {u_min:.4f}, Max: {u_max:.4f}")
 
-                train_os = oversmoothing_metrics.get('train', {})
-                val_os = oversmoothing_metrics.get('val', {})
-                for key, value in train_os.items():
-                    per_epochs_train_oversmoothing[key].append(value)
-                for key, value in val_os.items():
-                    per_epochs_val_oversmoothing[key].append(value)
-
-                train_edir = train_os.get('EDir', 0.0)
-                train_edir_traditional = train_os.get('EDir_traditional', 0.0)
-                train_eproj = train_os.get('EProj', 0.0)
-                train_mad = train_os.get('MAD', 0.0)
-                train_num_rank = train_os.get('NumRank', 0.0)
-                train_effective_rank = train_os.get('Erank', 0.0)
-
-                val_edir = val_os.get('EDir', 0.0)
-                val_edir_traditional = val_os.get('EDir_traditional', 0.0)
-                val_eproj = val_os.get('EProj', 0.0)
-                val_mad = val_os.get('MAD', 0.0)
-                val_num_rank = val_os.get('NumRank', 0.0)
-                val_effective_rank = val_os.get('Erank', 0.0)
-
-                print(f"Train DE: {train_edir:.4f}, Val DE: {val_edir:.4f} | "
-                    f"Train DE_trad: {train_edir_traditional:.4f}, Val DE_trad: {val_edir_traditional:.4f} | "
-                    f"Train EProj: {train_eproj:.4f}, Val EProj: {val_eproj:.4f} | "
-                    f"Train MAD: {train_mad:.4f}, Val MAD: {val_mad:.4f} | "
-                    f"Train NumRank: {train_num_rank:.4f}, Val NumRank: {val_num_rank:.4f} | "
-                    f"Train Erank: {train_effective_rank:.4f}, Val Erank: {val_effective_rank:.4f}")
-                os_entry = {'train': dict(train_os), 'val': dict(val_os)}
+                print(f"Train DE: {train_os.get('EDir', 0.0):.4f}, Val DE: {val_os.get('EDir', 0.0):.4f} | "
+                    f"Train DE_trad: {train_os.get('EDir_traditional', 0.0):.4f}, Val DE_trad: {val_os.get('EDir_traditional', 0.0):.4f} | "
+                    f"Train EProj: {train_os.get('EProj', 0.0):.4f}, Val EProj: {val_os.get('EProj', 0.0):.4f} | "
+                    f"Train MAD: {train_os.get('MAD', 0.0):.4f}, Val MAD: {val_os.get('MAD', 0.0):.4f} | "
+                    f"Train NumRank: {train_os.get('NumRank', 0.0):.4f}, Val NumRank: {val_os.get('NumRank', 0.0):.4f} | "
+                    f"Train Erank: {train_os.get('Erank', 0.0):.4f}, Val Erank: {val_os.get('Erank', 0.0):.4f}")
 
             # Early stopping
             is_best = val_loss_ce < self.best_val_loss
@@ -528,8 +513,7 @@ class GCODTrainer:
                 self.epochs_without_improvement += 1
 
             if self.epochs_without_improvement >= self.patience:
-                if self.debug:
-                    print(f"Early stopping triggered at epoch {epoch}")
+                print(f"Early stopping triggered at epoch {epoch}")
                 break
         
         return {
@@ -558,7 +542,6 @@ class GCODMethodTrainer(BaseTrainer):
             total_epochs=d['epochs'],
             patience=d['patience'],
             batch_size=int(gcod_params.get('batch_size', 32)),
-            debug=True,
             oversmoothing_every=d['oversmoothing_every'],
         )
         return trainer.train_full_model(log_epoch_fn=self.log_epoch)

@@ -224,7 +224,7 @@ class UnionNET:
             
             # Compute oversmoothing metrics
             os_entry = None
-            if current_epoch % self.oversmoothing_every == 0:
+            if current_epoch % self.oversmoothing_every == 0 or current_epoch == self.num_epochs - 1:
                 with torch.no_grad():
                     embeddings = self.gnn_model.get_embeddings(self.graph_data)
                 train_oversmooth_metrics = compute_oversmoothing_for_mask(

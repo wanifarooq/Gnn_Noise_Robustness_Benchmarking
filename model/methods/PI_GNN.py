@@ -286,7 +286,7 @@ class PiGnnTrainer:
 
             # logging
             os_entry = None
-            if current_epoch % self.oversmoothing_every == 0:
+            if current_epoch % self.oversmoothing_every == 0 or current_epoch == self.total_epochs - 1:
                 logged_train_os, logged_val_os = self._log_training_progress(current_epoch, current_metrics, train_oversmoothing, val_oversmoothing)
                 for key, value in logged_train_os.items():
                     per_epochs_oversmoothing[key].append(value)

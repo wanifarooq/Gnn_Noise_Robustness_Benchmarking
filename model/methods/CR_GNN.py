@@ -185,7 +185,7 @@ class CRGNNModel:
                                                                 noisy_labels, val_mask)
             
             os_entry = None
-            if epoch % self.oversmoothing_every == 0:
+            if epoch % self.oversmoothing_every == 0 or epoch == self.epochs - 1:
                 with torch.no_grad():
                     embeddings = backbone.get_embeddings(Data(x=graph_data.x, edge_index=graph_data.edge_index))
 

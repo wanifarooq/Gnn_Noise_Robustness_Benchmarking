@@ -531,8 +531,8 @@ class RTGNN(nn.Module):
             total_training_loss.backward()
             optimizer.step()
 
-            compute_oversmoothing = (epoch + 1) % self.training_config.oversmoothing_every == 0 or epoch == 0
-            if compute_oversmoothing:
+            os_entry = None
+            if epoch % self.training_config.oversmoothing_every == 0 or epoch == self.training_config.epochs - 1:
                 performance_metrics, train_oversmoothing, val_oversmoothing = self.evaluate_model_performance(
                     node_features, final_edge_indices, final_edge_weights, node_labels, train_indices, val_indices
                 )
@@ -564,17 +564,13 @@ class RTGNN(nn.Module):
                       f"Train MAD: {train_mad:.4f}, Val MAD: {val_mad:.4f} | "
                       f"Train NumRank: {train_num_rank:.4f}, Val NumRank: {val_num_rank:.4f} | "
                       f"Train Erank: {train_eff_rank:.4f}, Val Erank: {val_eff_rank:.4f}")
+                os_entry = {'train': dict(train_oversmoothing), 'val': dict(val_oversmoothing)}
             else:
                 performance_metrics, _, _ = self.evaluate_model_performance(
                     node_features, final_edge_indices, final_edge_weights, node_labels, train_indices, val_indices
                 )
                 print(f"Epoch {epoch:03d} | Train Acc: {performance_metrics['train_acc']:.4f}, Val Acc: {performance_metrics['val_acc']:.4f} | "
                       f"Train F1: {performance_metrics['train_f1']:.4f}, Val F1: {performance_metrics['val_f1']:.4f}")
-
-            # Build oversmoothing entry for callback
-            os_entry = None
-            if compute_oversmoothing:
-                os_entry = {'train': dict(train_oversmoothing), 'val': dict(val_oversmoothing)}
 
             # Early stopping
             current_val_loss = performance_metrics['val_loss'].item() #current_val_accuracy = performance_metrics['val_acc']

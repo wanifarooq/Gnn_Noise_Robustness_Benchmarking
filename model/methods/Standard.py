@@ -14,7 +14,6 @@ def train_with_standard_loss(
     lr=0.01,
     weight_decay=5e-4,
     patience=20,
-    debug=True,
     oversmoothing_every=20,
     log_epoch_fn=None,
 ):
@@ -63,7 +62,7 @@ def train_with_standard_loss(
             epochs_no_improve += 1
 
         os_entry = None
-        if debug and (epoch + 1) % oversmoothing_every == 0:
+        if epoch % oversmoothing_every == 0 or epoch == total_epochs - 1:
             with torch.no_grad():
                 embeddings = model.get_embeddings(data)
             train_oversmoothing = compute_oversmoothing_for_mask(

@@ -198,7 +198,7 @@ class GNNGuardTrainer:
                 edge_connectivity = self.normalized_adjacency._indices()
                 train_oversmoothing_metrics = None
                 val_oversmoothing_metrics = None
-                if epoch % self.oversmoothing_every == 0:
+                if epoch % self.oversmoothing_every == 0 or epoch == max_epochs - 1:
                     embeddings = self.model.get_embeddings(
                         self.node_features, self.normalized_adjacency, use_attention=self.use_attention)
                     train_oversmoothing_metrics = compute_oversmoothing_for_mask(
@@ -219,7 +219,7 @@ class GNNGuardTrainer:
 
             # Build oversmoothing entry for callback
             os_entry = None
-            if epoch % self.oversmoothing_every == 0:
+            if epoch % self.oversmoothing_every == 0 or epoch == max_epochs - 1:
                 os_entry = {'train': dict(train_oversmoothing_metrics), 'val': dict(val_oversmoothing_metrics)}
 
             # Early stopping tracking
@@ -254,7 +254,7 @@ class GNNGuardTrainer:
         print(f"Epoch {epoch+1:03d} | Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f} | "
               f"Train Acc: {train_acc:.4f}, Val Acc: {val_acc:.4f} | "
               f"Train F1: {train_f1:.4f}, Val F1: {val_f1:.4f}")
-        if epoch % self.oversmoothing_every == 0:
+        if train_oversmoothing is not None:
             train_edir = train_oversmoothing['EDir'] if train_oversmoothing else 0.0
             train_edir_trad = train_oversmoothing['EDir_traditional'] if train_oversmoothing else 0.0
             train_eproj = train_oversmoothing['EProj'] if train_oversmoothing else 0.0

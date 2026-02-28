@@ -38,7 +38,6 @@ class NRGNN:
         self.consistency_weight = nrgnn_params.get('beta', 1.0)
         self.edge_threshold = nrgnn_params.get('t_small', 0.1)
         self.negative_samples_ratio = nrgnn_params.get('n_n', 50)
-        self.debug_mode = nrgnn_params.get('debug', True)
         self.oversmoothing_every = config.get('oversmoothing_every', 20)
 
         # Model components
@@ -408,7 +407,8 @@ class NRGNN:
                       predictor_edges, predictor_weights,
                       main_model_edges, main_model_weights,
                       total_loss, start_time, log_epoch_fn=None):
-        logging = False
+        train_metrics = {}
+        val_metrics = {}
         self.main_model.eval()
         self.node_predictor.eval()
         self.edge_weight_estimator.eval()
@@ -428,15 +428,11 @@ class NRGNN:
             validation_accuracy = self.compute_accuracy(main_model_output[validation_indices], self.node_labels[validation_indices])
             predictor_validation_accuracy = self.compute_accuracy(predictor_probabilities[validation_indices], self.node_labels[validation_indices])
 
-            train_f1 = None
-            validation_f1 = None
+            train_f1 = self.cls_evaluator.compute_f1(main_model_output[train_indices].argmax(dim=1), self.node_labels[train_indices])
+            validation_f1 = self.cls_evaluator.compute_f1(main_model_output[validation_indices].argmax(dim=1), self.node_labels[validation_indices])
+
             os_entry = None
-
-            if self.debug_mode and epoch % self.oversmoothing_every == 0:
-
-                train_f1 = self.cls_evaluator.compute_f1(main_model_output[train_indices].argmax(dim=1), self.node_labels[train_indices])
-                validation_f1 = self.cls_evaluator.compute_f1(main_model_output[validation_indices].argmax(dim=1), self.node_labels[validation_indices])
-
+            if epoch % self.oversmoothing_every == 0 or epoch == self.max_epochs - 1:
                 # Compute oversmoothing metrics
                 train_mask = self._indices_to_mask(train_indices, self.node_features.shape[0])
                 val_mask = self._indices_to_mask(validation_indices, self.node_features.shape[0])
@@ -466,8 +462,6 @@ class NRGNN:
                 print(f"  Pred Val Acc: {predictor_validation_accuracy:.4f} | Add Nodes: {len(self.confident_node_indices)} | "
                         f"Time: {time.time() - start_time:.2f}s")
 
-                logging = True
-
             # Always store current epoch's edges for checkpoint capture
             self._current_edge_indices = main_model_edges
             self._current_edge_weights = main_model_weights.detach()
@@ -491,18 +485,16 @@ class NRGNN:
             if log_epoch_fn is not None:
                 log_epoch_fn(epoch, train_loss, validation_loss,
                              float(train_accuracy), float(validation_accuracy),
-                             train_f1=train_f1 if logging else None,
-                             val_f1=validation_f1 if logging else None,
+                             train_f1=train_f1,
+                             val_f1=validation_f1,
                              oversmoothing=os_entry, is_best=is_best,
                              train_predictions=main_model_output.argmax(dim=1))
 
             # Early stopping
             if self.early_stopping_counter >= self.patience:
-                if self.debug_mode:
-                    print(f"Early stopping at epoch {epoch+1}, best val loss: {self.best_validation_loss:.4f}")
+                print(f"Early stopping at epoch {epoch+1}, best val loss: {self.best_validation_loss:.4f}")
                 raise StopIteration
-        if logging:
-            return train_metrics, val_metrics
+        return train_metrics, val_metrics
 
     def fit(self, features, adjacency_matrix, labels, train_indices, validation_indices,
             log_epoch_fn=None):
@@ -527,8 +519,7 @@ class NRGNN:
                     for key, value in val_metrics.items():
                         per_epochs_val_oversmoothing[key].append(value)
         except StopIteration:
-            if self.debug_mode:
-                print(f"Early stopping at epoch {epoch+1}")
+            print(f"Early stopping at epoch {epoch+1}")
 
         total_training_time = time.time() - start_time
         print(f"\nTraining completed in {total_training_time:.2f}s")
