@@ -493,7 +493,7 @@ class NRGNN:
             # Early stopping
             if self.early_stopping_counter >= self.patience:
                 print(f"Early stopping at epoch {epoch+1}, best val loss: {self.best_validation_loss:.4f}")
-                raise StopIteration
+                self._should_stop = True
         return train_metrics, val_metrics
 
     def fit(self, features, adjacency_matrix, labels, train_indices, validation_indices,
@@ -508,18 +508,18 @@ class NRGNN:
         per_epochs_val_oversmoothing = defaultdict(list)
 
         start_time = time.time()
-        try:
-            for epoch in range(self.max_epochs):
-                results = self.train_single_epoch(epoch, train_indices, validation_indices,
-                                                  log_epoch_fn=log_epoch_fn)
-                if results is not None:
-                    train_metrics, val_metrics = results
-                    for key, value in train_metrics.items():
-                        per_epochs_oversmoothing[key].append(value)
-                    for key, value in val_metrics.items():
-                        per_epochs_val_oversmoothing[key].append(value)
-        except StopIteration:
-            print(f"Early stopping at epoch {epoch+1}")
+        self._should_stop = False
+        for epoch in range(self.max_epochs):
+            results = self.train_single_epoch(epoch, train_indices, validation_indices,
+                                              log_epoch_fn=log_epoch_fn)
+            if results is not None:
+                train_metrics, val_metrics = results
+                for key, value in train_metrics.items():
+                    per_epochs_oversmoothing[key].append(value)
+                for key, value in val_metrics.items():
+                    per_epochs_val_oversmoothing[key].append(value)
+            if self._should_stop:
+                break
 
         total_training_time = time.time() - start_time
         print(f"\nTraining completed in {total_training_time:.2f}s")
