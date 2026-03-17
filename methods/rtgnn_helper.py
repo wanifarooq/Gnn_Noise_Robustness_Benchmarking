@@ -172,12 +172,20 @@ class RTGNNHelper(MethodHelper):
 
     # ── Predictions / Embeddings ───────────────────────────────────────────
 
+    def _is_train_graph(self, state, data):
+        """Check if data is the same graph used during setup (train subgraph)."""
+        return data.num_nodes == state['node_features'].size(0)
+
     def get_predictions(self, state, data):
         rtgnn = state['rtgnn']
-        node_features = state['node_features']
 
         rtgnn.eval()
         with torch.no_grad():
+            if not self._is_train_graph(state, data):
+                # Inductive: different subgraph — use backbone with its own edges
+                backbone = rtgnn.dual_branch_predictor.first_branch
+                return backbone(data).argmax(dim=1)
+            node_features = state['node_features']
             out1, out2 = rtgnn.dual_branch_predictor(
                 node_features, rtgnn._current_edges, rtgnn._current_weights,
             )
@@ -185,10 +193,13 @@ class RTGNNHelper(MethodHelper):
 
     def get_embeddings(self, state, data):
         rtgnn = state['rtgnn']
-        node_features = state['node_features']
 
         rtgnn.eval()
         with torch.no_grad():
+            if not self._is_train_graph(state, data):
+                backbone = rtgnn.dual_branch_predictor.first_branch
+                return backbone.get_embeddings(data)
+            node_features = state['node_features']
             return rtgnn.dual_branch_predictor.get_embeddings(
                 node_features, rtgnn._current_edges, rtgnn._current_weights,
             )

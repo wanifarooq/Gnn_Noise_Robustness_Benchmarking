@@ -144,24 +144,35 @@ class GNNGuardHelper(MethodHelper):
 
     # ── Predictions / embeddings ───────────────────────────────────────────
 
+    def _is_train_graph(self, state, data):
+        """Check if data is the same graph used during setup (train subgraph)."""
+        return data.num_nodes == state['node_features'].size(0)
+
     def get_predictions(self, state, data):
         model = state['gnnguard_model']
-        features = state['node_features']
-        adj = state['normalized_adjacency']
-        use_attn = state['use_attention']
-
         model.eval()
         with torch.no_grad():
+            if not self._is_train_graph(state, data):
+                # Inductive: different subgraph — use backbone with its own edges
+                backbone = state['backbone']
+                backbone.eval()
+                return backbone(data).argmax(dim=1)
+            features = state['node_features']
+            adj = state['normalized_adjacency']
+            use_attn = state['use_attention']
             return model(features, adj, use_attention=use_attn).argmax(dim=1)
 
     def get_embeddings(self, state, data):
         model = state['gnnguard_model']
-        features = state['node_features']
-        adj = state['normalized_adjacency']
-        use_attn = state['use_attention']
-
         model.eval()
         with torch.no_grad():
+            if not self._is_train_graph(state, data):
+                backbone = state['backbone']
+                backbone.eval()
+                return backbone.get_embeddings(data)
+            features = state['node_features']
+            adj = state['normalized_adjacency']
+            use_attn = state['use_attention']
             return model.get_embeddings(features, adj, use_attention=use_attn)
 
     # ── Checkpointing ─────────────────────────────────────────────────────

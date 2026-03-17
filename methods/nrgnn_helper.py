@@ -219,10 +219,20 @@ class NRGNNHelper(MethodHelper):
             weights = torch.ones(edges.shape[1], device=device)
         return edges, weights
 
+    def _is_train_graph(self, state, data):
+        """Check if data is the same graph used during setup (train subgraph)."""
+        return data.num_nodes == state['nrgnn'].node_features.size(0)
+
     def get_predictions(self, state, data):
         nrgnn = state['nrgnn']
         nrgnn.main_model.eval()
         with torch.no_grad():
+            if not self._is_train_graph(state, data):
+                # Inductive: different subgraph — use backbone with its own edges
+                return nrgnn.main_model.forward(
+                    data.x.to(state['device']),
+                    data.edge_index.to(state['device']),
+                ).argmax(dim=1)
             edges, weights = self._get_edges_and_weights(nrgnn, state['device'])
             return nrgnn.main_model.forward(
                 nrgnn.node_features, edges, weights,
@@ -232,6 +242,11 @@ class NRGNNHelper(MethodHelper):
         nrgnn = state['nrgnn']
         nrgnn.main_model.eval()
         with torch.no_grad():
+            if not self._is_train_graph(state, data):
+                return nrgnn.main_model.get_embeddings(
+                    data.x.to(state['device']),
+                    data.edge_index.to(state['device']),
+                )
             edges, weights = self._get_edges_and_weights(nrgnn, state['device'])
             return nrgnn.main_model.get_embeddings(
                 nrgnn.node_features, edges, weights,

@@ -188,16 +188,27 @@ class ERASEHelper(MethodHelper):
 
     # ── Predictions (linear probe) ─────────────────────────────────────────
 
+    def _is_train_graph(self, state, data):
+        """Check if data is the same graph used during setup (train subgraph)."""
+        return data.num_nodes == state['predicted_labels'].size(0)
+
     def get_predictions(self, state, data):
         """Fit LogisticRegression on L2-normalised train features, predict all nodes."""
         model = state['model']
-        predicted_labels = state['predicted_labels']
         seed = state.get('seed', 42)
 
         model.eval()
         with torch.no_grad():
             features = model(data)
 
+        if not self._is_train_graph(state, data):
+            # Inductive: different subgraph — use backbone with standard forward
+            backbone = model.base_gnn_model if hasattr(model, 'base_gnn_model') else model
+            backbone.eval()
+            with torch.no_grad():
+                return backbone(data).argmax(dim=1)
+
+        predicted_labels = state['predicted_labels']
         features_np = normalize(features.detach().cpu().numpy(), norm='l2')
 
         train_mask_np = data.train_mask.cpu().numpy()

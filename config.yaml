@@ -27,7 +27,7 @@ training:
   method: £[standard, positive_eigenvalues, gcod, nrgnn, pi_gnn, cr_gnn, community_defense, rtgnn, graphcleaner, unionnet, gnn_cleaner, erase, gnnguard]
   lr: 0.001
   weight_decay: 5e-4
-  epochs: 2           # keep low for local runs
+  epochs: 5          # keep low for local runs
   patience: 10
   oversmoothing_every: 1  # must be <= epochs to avoid NaN metrics
   mode: inductive   # transductive or inductive

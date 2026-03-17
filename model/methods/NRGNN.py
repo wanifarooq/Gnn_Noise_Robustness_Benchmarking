@@ -418,8 +418,18 @@ class NRGNNMethodTrainer(BaseTrainer):
         d = self.init_data
 
         def fwd():
+            edges = getattr(nrgnn, '_current_edge_indices', None)
+            if edges is None:
+                edges = nrgnn.best_edge_indices
+            if edges is None:
+                edges = nrgnn.original_edge_index
+            weights = getattr(nrgnn, '_current_edge_weights', None)
+            if weights is None:
+                weights = nrgnn.best_edge_weights
+            if weights is None:
+                weights = torch.ones(edges.shape[1], device=nrgnn.device)
             return nrgnn.main_model.forward(
-                nrgnn.node_features, nrgnn.best_edge_indices, nrgnn.best_edge_weights
+                nrgnn.node_features, edges, weights
             )
 
         return profile_model_flops(nrgnn.main_model, d['data_for_training'],
