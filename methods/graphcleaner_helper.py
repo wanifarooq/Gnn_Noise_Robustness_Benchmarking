@@ -59,6 +59,11 @@ class GraphCleanerHelper(MethodHelper):
         device = state['device']
         backbone = state['backbone']
 
+        # Noise detection needs both train and val nodes (for val_loss early
+        # stopping and noise transition matrix estimation).  In inductive mode
+        # `data` is only the train subgraph, so use the full graph instead.
+        detection_data = init_data.get('data_for_training', data)
+
         # Ensure oversmoothing_every is available in training config
         # (mirrors GraphCleanerMethodTrainer.train)
         config.setdefault('training', {})['oversmoothing_every'] = (
@@ -72,7 +77,7 @@ class GraphCleanerHelper(MethodHelper):
         )
 
         clean_train_mask, _cleaned_data = detector.clean_training_data(
-            graph_data=data,
+            graph_data=detection_data,
             neural_network_model=backbone,
             num_classes=init_data['num_classes'],
         )
@@ -81,7 +86,18 @@ class GraphCleanerHelper(MethodHelper):
         # The backbone has been trained during detection; the main training
         # loop will continue training it on the cleaned data (matching the
         # original GraphCleanerMethodTrainer behaviour).
-        data.train_mask = clean_train_mask
+        # In inductive mode, propagate the cleaned mask to the train subgraph.
+        if data is not detection_data:
+            # Map full-graph clean_train_mask back to train subgraph
+            # The train subgraph's train_mask is all True (all nodes are train)
+            # clean_train_mask is on the full graph — extract train-node entries
+            full_train_mask = detection_data.train_mask
+            # clean_train_mask[i] is True if node i is clean AND was a train node
+            # For the subgraph, node indices correspond to the original train nodes
+            clean_of_train = clean_train_mask[full_train_mask]
+            data.train_mask = clean_of_train
+        else:
+            data.train_mask = clean_train_mask
 
         # Reinitialise the optimizer so that momentum / adaptive state from
         # the detection phase does not leak into the clean training phase.
