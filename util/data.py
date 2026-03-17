@@ -262,12 +262,13 @@ def load_dataset(name, root="./data"):
         )
 
 
-def prepare_data_for_method(data, train_mask, val_mask, test_mask, noisy_train_labels, method_name):
-    """Prepare a data clone where val/test keep original labels and train gets noisy labels."""
+def prepare_data_for_method(data, train_mask, val_mask, test_mask, noisy_train_labels, noisy_val_labels, method_name):
+    """Prepare a data clone where test keeps original labels, train and val get noisy labels."""
     data_for_method = data.clone()
 
     data_for_method.y = data.y_original.clone()
     data_for_method.y[train_mask] = noisy_train_labels
+    data_for_method.y[val_mask] = noisy_val_labels
 
     return data_for_method
 
@@ -281,7 +282,8 @@ def verify_label_distribution(data, train_mask, val_mask, test_mask, run_id, met
         train_corrupted = (data.y[train_mask] != data.y_original[train_mask]).sum()
         print(f"Training labels corrupted: {train_corrupted}/{train_mask.sum()} nodes")
 
-        val_clean = (data.y[val_mask] == data.y_original[val_mask]).all()
+        val_corrupted = (data.y[val_mask] != data.y_original[val_mask]).sum()
+        print(f"Validation labels corrupted: {val_corrupted}/{val_mask.sum()} nodes")
+
         test_clean = (data.y[test_mask] == data.y_original[test_mask]).all()
-        print(f"Val labels clean: {val_clean}")
         print(f"Test labels clean: {test_clean}")

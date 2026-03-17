@@ -13,7 +13,10 @@ from model.evaluation import OVERSMOOTHING_KEYS, ZERO_CLS
 from sweep_utils import expand_yaml_sweeps, get_result_filename, detect_completed_runs, json_serializer
 
 DEFAULT_CONFIG = "config.yaml"
-NOISE_SPLIT_KEYS = ('train_only_clean', 'train_only_mislabelled_factual', 'train_only_mislabelled_corrected')
+NOISE_SPLIT_KEYS = (
+    'train_only_clean', 'train_only_mislabelled_factual', 'train_only_mislabelled_corrected',
+    'val_only_clean', 'val_only_mislabelled_factual', 'val_only_mislabelled_corrected',
+)
 CLS_SPLITS = ('test', 'train', 'val') + NOISE_SPLIT_KEYS
 
 

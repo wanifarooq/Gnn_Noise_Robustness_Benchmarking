@@ -3,39 +3,18 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from torch_geometric.utils import to_dense_adj
-from sklearn.preprocessing import normalize
-from sklearn.linear_model import LogisticRegression
-from typing import Tuple, Dict, Any
-import copy
+from typing import Tuple
 from scipy.sparse import csr_matrix
-from collections import defaultdict
 
-from model.evaluation import (OversmoothingMetrics, ClassificationMetrics,
-                              compute_oversmoothing_for_mask, evaluate_model)
+from model.evaluation import evaluate_model
 from model.base import BaseTrainer
 from model.registry import register
 
 
-def normalize_adj_row(adj_matrix):
-
-    if isinstance(adj_matrix, torch.Tensor):
-        adj_matrix = adj_matrix.cpu().numpy()
-    
-    if not isinstance(adj_matrix, csr_matrix):
-        adj_matrix = csr_matrix(adj_matrix)
-    
-    row_sums = np.array(adj_matrix.sum(1)).flatten()
-    row_sums[row_sums == 0] = 1
-    row_inv = 1.0 / row_sums
-    row_inv_diag = csr_matrix((row_inv, (np.arange(len(row_inv)), np.arange(len(row_inv)))), 
-                              shape=(len(row_inv), len(row_inv)))
-    return row_inv_diag @ adj_matrix
-
-
 class MaximalCodingRateReductionLoss(nn.Module):
     #Maximal Coding Rate Reduction loss
-    
-    def __init__(self, compression_weight: float = 1.0, discrimination_weight: float = 1.0, 
+
+    def __init__(self, compression_weight: float = 1.0, discrimination_weight: float = 1.0,
                  eps: float = 0.01):
         super().__init__()
         self.compression_weight = compression_weight
@@ -51,7 +30,7 @@ class MaximalCodingRateReductionLoss(nn.Module):
             identity_matrix +
             self.discrimination_weight * scalar * feature_matrix @ feature_matrix.T
         )
-        
+
         return log_determinant / 2.
 
     def compute_discrimination_loss_theoretical(self, feature_matrix: torch.Tensor) -> torch.Tensor:
@@ -62,7 +41,7 @@ class MaximalCodingRateReductionLoss(nn.Module):
         log_determinant = torch.logdet(identity_matrix + scalar * feature_matrix @ feature_matrix.T)
         return log_determinant / 2.
 
-    def compute_compression_loss_empirical_multiclass(self, feature_matrix: torch.Tensor, 
+    def compute_compression_loss_empirical_multiclass(self, feature_matrix: torch.Tensor,
                                                      predicted_labels: torch.Tensor) -> torch.Tensor:
         #Compute compression loss for multiple classes
         num_features, num_samples = feature_matrix.shape
@@ -83,10 +62,10 @@ class MaximalCodingRateReductionLoss(nn.Module):
                 feature_covariance = F.pad(feature_covariance, padding)
             log_det = torch.logdet(identity_matrix + scalar * feature_covariance)
             compression_loss += log_det * class_trace / num_samples
-            
+
         return compression_loss / 2.
 
-    def compute_compression_loss_empirical(self, feature_matrix: torch.Tensor, 
+    def compute_compression_loss_empirical(self, feature_matrix: torch.Tensor,
                                          membership_matrices: torch.Tensor) -> torch.Tensor:
         #Compute empirical compression loss with membership matrices
         num_features, num_samples = feature_matrix.shape
@@ -99,10 +78,10 @@ class MaximalCodingRateReductionLoss(nn.Module):
             scalar = num_features / (membership_trace * self.eps)
             log_det = torch.logdet(identity_matrix + scalar * feature_matrix @ membership_matrices[class_idx] @ feature_matrix.T)
             compression_loss += log_det * membership_trace / num_samples
-            
+
         return compression_loss / 2.
 
-    def compute_compression_loss_theoretical(self, feature_matrix: torch.Tensor, 
+    def compute_compression_loss_theoretical(self, feature_matrix: torch.Tensor,
                                            membership_matrices: torch.Tensor) -> torch.Tensor:
         # Compute theoretical compression loss with membership matrices
         num_features, num_samples = feature_matrix.shape
@@ -116,10 +95,10 @@ class MaximalCodingRateReductionLoss(nn.Module):
             compression_loss += membership_trace / (2 * num_samples) * log_det
         return compression_loss
 
-    def forward(self, node_features: torch.Tensor, graph_data, adjacency_matrix: torch.Tensor, 
-                semantic_labels: torch.Tensor, label_prop_alpha: float, cosine_weight_beta: float, 
+    def forward(self, node_features: torch.Tensor, graph_data, adjacency_matrix: torch.Tensor,
+                semantic_labels: torch.Tensor, label_prop_alpha: float, cosine_weight_beta: float,
                 propagation_steps: int, train_node_mask: torch.Tensor):
-        
+
         num_classes = graph_data.y.max().item() + 1
         train_features = node_features[train_node_mask]
         feature_matrix = node_features.T
@@ -160,13 +139,13 @@ class MaximalCodingRateReductionLoss(nn.Module):
         max_indices = np.argmax(targets_onehot, axis=1)
         membership_matrices[max_indices, np.arange(num_samples), np.arange(num_samples)] = 1
         return membership_matrices
-    
+
     def _update_semantic_labels_with_cosine_similarity(self, train_features: torch.Tensor, semantic_labels: torch.Tensor,
-                                                      all_features: torch.Tensor, train_node_mask: torch.Tensor, 
+                                                      all_features: torch.Tensor, train_node_mask: torch.Tensor,
                                                       cosine_weight: float, num_classes: int) -> torch.Tensor:
 
         train_labels = semantic_labels[train_node_mask].argmax(dim=1)
-        
+
         centroids_list = []
         for class_idx in range(num_classes):
             class_mask = (train_labels == class_idx)
@@ -176,145 +155,126 @@ class MaximalCodingRateReductionLoss(nn.Module):
                 centroids_list.append(torch.zeros(train_features.shape[1], device=train_features.device))
 
         class_centroids = torch.stack(centroids_list)
-        
+
         normalized_features = F.normalize(all_features, p=2, dim=1)
         normalized_centroids = F.normalize(class_centroids, p=2, dim=1)
         cosine_similarities = torch.abs(normalized_features @ normalized_centroids.T)
-        
+
         updated_semantic_labels = cosine_weight * semantic_labels + (1 - cosine_weight) * cosine_similarities
-        
+
         return F.softmax(updated_semantic_labels, dim=1)
 
 class AdjacencyMatrixProcessor:
 
     @staticmethod
+    def _normalize_adj_row(adj_matrix):
+        if isinstance(adj_matrix, torch.Tensor):
+            adj_matrix = adj_matrix.cpu().numpy()
+
+        if not isinstance(adj_matrix, csr_matrix):
+            adj_matrix = csr_matrix(adj_matrix)
+
+        row_sums = np.array(adj_matrix.sum(1)).flatten()
+        row_sums[row_sums == 0] = 1
+        row_inv = 1.0 / row_sums
+        row_inv_diag = csr_matrix((row_inv, (np.arange(len(row_inv)), np.arange(len(row_inv)))),
+                                  shape=(len(row_inv), len(row_inv)))
+        return row_inv_diag @ adj_matrix
+
+    @staticmethod
     def normalize_adjacency_by_rows(adjacency_matrix: torch.Tensor) -> torch.Tensor:
 
         adj_numpy = adjacency_matrix.cpu().numpy()
-        normalized_adj = normalize_adj_row(adj_numpy)
+        normalized_adj = AdjacencyMatrixProcessor._normalize_adj_row(adj_numpy)
         return torch.from_numpy(normalized_adj.todense()).to(adjacency_matrix.device).float()
 
     @staticmethod
-    def preprocess_semantic_labels_with_propagation(graph_data, corrupted_node_labels: torch.Tensor, 
-                                                   label_prop_alpha: float, propagation_steps: int, 
+    def preprocess_semantic_labels_with_propagation(graph_data, corrupted_node_labels: torch.Tensor,
+                                                   label_prop_alpha: float, propagation_steps: int,
                                                    device: str) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 
         num_classes = graph_data.y.max().item() + 1
         num_nodes = graph_data.x.shape[0]
-        
+
         semantic_labels_matrix = torch.zeros(num_nodes, num_classes, device=device)
         corrupted_onehot = F.one_hot(corrupted_node_labels, num_classes).float().to(device)
         semantic_labels_matrix[graph_data.train_mask] = corrupted_onehot[graph_data.train_mask]
-        
+
         full_adjacency = to_dense_adj(graph_data.edge_index)[0].cpu()
         full_adjacency = full_adjacency.to(device)
-        
+
         train_only_adjacency = full_adjacency.detach().clone()
-        
+
         int_train_mask = graph_data.train_mask.cpu().numpy().astype(int).reshape(-1, 1)
         M = np.matmul(int_train_mask, int_train_mask.T).astype(bool)
         M_tensor = torch.from_numpy(M).to(device)
-        
+
         train_only_adjacency = train_only_adjacency * M_tensor.float()
-        
+
         train_only_adjacency_normalized = AdjacencyMatrixProcessor.normalize_adjacency_by_rows(train_only_adjacency)
         full_adjacency_normalized = AdjacencyMatrixProcessor.normalize_adjacency_by_rows(full_adjacency)
-        
+
         for _ in range(propagation_steps):
-            semantic_labels_matrix = ((1 - label_prop_alpha) * 
-                                    torch.matmul(train_only_adjacency_normalized, semantic_labels_matrix) + 
+            semantic_labels_matrix = ((1 - label_prop_alpha) *
+                                    torch.matmul(train_only_adjacency_normalized, semantic_labels_matrix) +
                                     label_prop_alpha * semantic_labels_matrix)
-        
+
         initial_predicted_labels = semantic_labels_matrix.argmax(dim=1)
-        
+
         return initial_predicted_labels, semantic_labels_matrix, full_adjacency_normalized
 
 
-class LinearProbeEvaluator:
-    @staticmethod
-    def evaluate_with_linear_probe(learned_features: torch.Tensor, graph_data, 
-                                predicted_labels_all_nodes: torch.Tensor, 
-                                clean_node_labels: torch.Tensor,
-                                random_state: int = 42) -> Tuple[float, float, float]:
-
-        features_normalized = normalize(learned_features.detach().cpu().numpy(), norm='l2')
-        clean_labels_np = clean_node_labels.cpu().numpy()
-        
-        train_features = features_normalized[graph_data.train_mask.cpu().numpy()]
-        val_features = features_normalized[graph_data.val_mask.cpu().numpy()]
-        test_features = features_normalized[graph_data.test_mask.cpu().numpy()]
-        
-        train_noisy_labels_np = predicted_labels_all_nodes[graph_data.train_mask].cpu().numpy()
-        
-        clf = LogisticRegression(
-            solver='lbfgs', 
-            multi_class='auto', 
-            max_iter=1000, 
-            random_state=random_state
-        ).fit(train_features, train_noisy_labels_np.ravel())
-        
-        def accuracy_helper(classifier, features, labels):
-            y_pred = classifier.predict(features)
-            _cls = ClassificationMetrics()
-            return _cls.compute_accuracy(y_pred, labels)
-        
-        train_acc = accuracy_helper(clf, train_features, clean_labels_np[graph_data.train_mask.cpu().numpy()])
-        val_acc = accuracy_helper(clf, val_features, clean_labels_np[graph_data.val_mask.cpu().numpy()])
-        test_acc = accuracy_helper(clf, test_features, clean_labels_np[graph_data.test_mask.cpu().numpy()])
-        
-        return train_acc, val_acc, test_acc
-
 class EnhancedGNNWrapper(nn.Module):
 
-    def __init__(self, base_gnn_model, use_layer_normalization=False, use_residual_connections=False, 
-                 use_learnable_residual_projection=False, final_activation_function='relu', 
+    def __init__(self, base_gnn_model, use_layer_normalization=False, use_residual_connections=False,
+                 use_learnable_residual_projection=False, final_activation_function='relu',
                  final_feature_normalization=None):
         super().__init__()
-        
+
         self.base_gnn_model = base_gnn_model
         self.use_layer_normalization = use_layer_normalization
         self.use_residual_connections = use_residual_connections
         self.use_learnable_residual_projection = use_learnable_residual_projection
         self.final_activation_function = final_activation_function
         self.final_feature_normalization = final_feature_normalization
-        
+
         self._initialize_enhancement_layers()
-        
+
     def _initialize_enhancement_layers(self):
 
         if self.final_feature_normalization == 'layer_norm':
             self.final_layer_norm = None
-            
+
         if self.use_learnable_residual_projection and self.use_residual_connections:
             self.residual_projection_layers = nn.ModuleDict()
-    
+
     def _create_dynamic_layers_if_needed(self, input_node_features, output_node_features):
 
         if self.final_feature_normalization == 'layer_norm' and self.final_layer_norm is None:
             self.final_layer_norm = nn.LayerNorm(output_node_features.size(-1))
             self.final_layer_norm = self.final_layer_norm.to(output_node_features.device)
-            
-        if (self.use_learnable_residual_projection and self.use_residual_connections and 
+
+        if (self.use_learnable_residual_projection and self.use_residual_connections and
             input_node_features.size(-1) != output_node_features.size(-1)):
             dimension_key = f"{input_node_features.size(-1)}_{output_node_features.size(-1)}"
             if dimension_key not in self.residual_projection_layers:
                 projection_layer = nn.Linear(input_node_features.size(-1), output_node_features.size(-1))
                 self.residual_projection_layers[dimension_key] = projection_layer.to(output_node_features.device)
-    
+
     def forward(self, graph_data):
 
         if hasattr(graph_data, 'x'):
             original_node_features = graph_data.x.clone()
         else:
             original_node_features = graph_data.clone()
-        
+
         enhanced_features = self.base_gnn_model(graph_data)
-        
+
         if hasattr(graph_data, 'x'):
             self._create_dynamic_layers_if_needed(original_node_features, enhanced_features)
         else:
             self._create_dynamic_layers_if_needed(original_node_features, enhanced_features)
-        
+
         # Apply residual connections
         if self.use_residual_connections:
             if self.use_learnable_residual_projection:
@@ -323,7 +283,7 @@ class EnhancedGNNWrapper(nn.Module):
                     enhanced_features = enhanced_features + self.residual_projection_layers[dimension_key](original_node_features)
             elif original_node_features.size(-1) == enhanced_features.size(-1):
                 enhanced_features = enhanced_features + original_node_features
-        
+
         # Apply normalization
         if self.final_feature_normalization == 'layer_norm' and self.final_layer_norm is not None:
             enhanced_features = self.final_layer_norm(enhanced_features)
@@ -331,7 +291,7 @@ class EnhancedGNNWrapper(nn.Module):
             enhanced_features = F.normalize(enhanced_features, p=1, dim=1)
         elif self.final_feature_normalization == 'l2':
             enhanced_features = F.normalize(enhanced_features, p=2, dim=1)
-        
+
         # Apply final activation
         if self.final_activation_function == 'relu':
             enhanced_features = F.relu(enhanced_features)
@@ -343,9 +303,9 @@ class EnhancedGNNWrapper(nn.Module):
             enhanced_features = torch.tanh(enhanced_features)
         elif self.final_activation_function is None:
             pass
-            
+
         return enhanced_features
-    
+
     def get_embeddings(self, graph_data):
         """Return hidden_channels-dim representations from the base GNN."""
         return self.base_gnn_model.get_embeddings(graph_data)
@@ -356,450 +316,79 @@ class EnhancedGNNWrapper(nn.Module):
             self.base_gnn_model.reset_parameters()
         elif hasattr(self.base_gnn_model, 'initialize'):
             self.base_gnn_model.initialize()
-            
+
         if hasattr(self, 'final_layer_norm') and self.final_layer_norm is not None:
             self.final_layer_norm.reset_parameters()
-            
+
         for projection_layer in self.residual_projection_layers.values():
             projection_layer.reset_parameters()
 
 
-class ERASETrainer:
-
-    def __init__(self, training_config: Dict[str, Any], computation_device: torch.device, 
-                 num_node_classes: int, model_creation_function):
-        self.training_config = training_config
-        self.computation_device = computation_device
-        self.num_node_classes = num_node_classes
-        self.model_creation_function = model_creation_function
-        self.oversmoothing_metrics_calculator = OversmoothingMetrics(device=computation_device)
-        self.cls_evaluator = ClassificationMetrics(average='macro')
-        self.oversmoothing_every = training_config.get('oversmoothing_every', 20)
-
-    def train_erase_model(self, graph_data, log_epoch_fn=None):
-        # Create enhanced model
-        
-        enhanced_model = self._create_enhanced_gnn_model()
-        
-        noisy_node_labels = graph_data.y
-
-        initial_predicted_labels, semantic_labels_matrix, adjacency_matrix = (
-            AdjacencyMatrixProcessor.preprocess_semantic_labels_with_propagation(
-                graph_data, noisy_node_labels, 
-                self.training_config.get('alpha', 0.6), 
-                self.training_config.get('T', 5), 
-                str(self.computation_device)
-            )
-        )
-
-        # Create loss function
-        mcr2_loss_function = MaximalCodingRateReductionLoss(
-            compression_weight=self.training_config.get('gam1', 1.0),
-            discrimination_weight=self.training_config.get('gam2', 2.0), 
-            eps=self.training_config.get('eps', 0.05)
-        )
-        
-        model_optimizer = torch.optim.Adam(
-            enhanced_model.parameters(),
-            lr=self.training_config.get('lr', 0.001),
-            weight_decay=self.training_config.get('weight_decay', 0.0005),
-            amsgrad=True
-        )
-        
-        training_results = self._execute_training_loop(
-            enhanced_model, graph_data, model_optimizer, mcr2_loss_function,
-            adjacency_matrix, semantic_labels_matrix, initial_predicted_labels,
-            log_epoch_fn=log_epoch_fn
-        )
-        
-        return training_results
-
-    def _create_enhanced_gnn_model(self):
-        #Create enhanced GNN model
-        enhancement_configuration = {
-            'use_layer_normalization': self.training_config.get('use_layer_norm', False),
-            'use_residual_connections': self.training_config.get('use_residual', False),
-            'use_learnable_residual_projection': self.training_config.get('use_residual_linear', False),
-            'final_activation_function': 'relu',
-            'final_feature_normalization': 'l1'
-        }
-        
-        base_gnn_model = self.model_creation_function(
-            model_name=self.training_config.get('erase_gnn_type', 'gcn').lower(),
-            in_channels=self.training_config.get('in_channels'),
-            hidden_channels=self.training_config.get('hidden_channels', 128),
-            out_channels=self.training_config.get('n_embedding', 512),
-            n_layers=self.training_config.get('n_layers', 2),
-            dropout=self.training_config.get('dropout', 0.5),
-            self_loop=self.training_config.get('self_loop', True),
-            mlp_layers=self.training_config.get('mlp_layers', 2),
-            train_eps=self.training_config.get('train_eps', True),
-            heads=self.training_config.get('n_heads', 8)
-        )
-        
-        if not any(enhancement_configuration.values()):
-            return base_gnn_model.to(self.computation_device)
-        
-        enhanced_model = EnhancedGNNWrapper(
-            base_gnn_model=base_gnn_model,
-            **enhancement_configuration
-        )
-        return enhanced_model.to(self.computation_device)
-
-    def _execute_training_loop(self, model, graph_data, optimizer, loss_function,
-                                  adjacency_matrix, semantic_labels_matrix, predicted_labels,
-                                  log_epoch_fn=None):
-            per_epochs_oversmoothing = defaultdict(list)
-            per_epochs_val_oversmoothing = defaultdict(list)
-            best_validation_loss = float('inf')
-            patience_counter = 0
-            max_epochs = self.training_config.get('total_epochs', 200)
-            patience_limit = self.training_config.get('patience', 50)
-
-            # Assign early so get_checkpoint_state() can access the model during training
-            self._trained_model = model
-
-            for current_epoch in range(max_epochs):
-
-                epoch_training_results = self._execute_single_training_epoch(
-                    model, graph_data, optimizer, loss_function, adjacency_matrix, 
-                    semantic_labels_matrix, predicted_labels
-                )
-                epoch_loss, loss_components, predicted_labels = epoch_training_results
-                self._final_predicted_labels = predicted_labels
-
-                train_accuracy, validation_accuracy, validation_loss = self._evaluate_training_and_validation_performance(
-                    model, graph_data, predicted_labels
-                )
-                train_f1, validation_f1 = self._compute_f1_scores_for_splits(model, graph_data, predicted_labels)
-
-                should_compute_oversmoothing = current_epoch % self.oversmoothing_every == 0 or current_epoch == max_epochs - 1
-                if should_compute_oversmoothing:
-                    model.eval()
-                    with torch.no_grad():
-                        embeddings = model.get_embeddings(graph_data)
-                    train_oversmoothing = compute_oversmoothing_for_mask(
-                        self.oversmoothing_metrics_calculator, embeddings, graph_data.edge_index, graph_data.train_mask)
-                    validation_oversmoothing = compute_oversmoothing_for_mask(
-                        self.oversmoothing_metrics_calculator, embeddings, graph_data.edge_index, graph_data.val_mask)
-                    for key, value in train_oversmoothing.items():
-                        per_epochs_oversmoothing[key].append(value)
-                    for key, value in validation_oversmoothing.items():
-                        per_epochs_val_oversmoothing[key].append(value)
-                else:
-                    train_oversmoothing = {}
-                    validation_oversmoothing = {}
-                
-                self._print_epoch_debug_information(current_epoch, train_accuracy, validation_accuracy,
-                                                  train_f1, validation_f1, train_oversmoothing, validation_oversmoothing,
-                                                  should_print_oversmoothing=should_compute_oversmoothing)
-
-                # Early stopping
-                is_best = validation_loss < best_validation_loss
-                os_entry = ({'train': dict(train_oversmoothing), 'val': dict(validation_oversmoothing)}
-                            if should_compute_oversmoothing else None)
-                if log_epoch_fn is not None:
-                    model.eval()
-                    with torch.no_grad():
-                        pred = model(graph_data).argmax(dim=1)
-                    log_epoch_fn(current_epoch, epoch_loss, validation_loss, train_accuracy, validation_accuracy,
-                                 train_f1=train_f1, val_f1=validation_f1,
-                                 oversmoothing=os_entry, is_best=is_best,
-                                 train_predictions=pred)
-                if is_best:
-                    best_validation_loss = validation_loss
-                    patience_counter = 0
-                else:
-                    patience_counter += 1
-
-                if patience_counter >= patience_limit:
-                    print(f'Early stopping triggered at epoch {current_epoch}')
-                    break
-
-            self._trained_model = model
-            self._final_predicted_labels = predicted_labels
-
-            print("\nERASE Training completed!")
-
-            return {
-                'train_oversmoothing': dict(per_epochs_oversmoothing),
-                'val_oversmoothing': dict(per_epochs_val_oversmoothing),
-                'stopped_at_epoch': current_epoch,
-            }
-
-    def _execute_single_training_epoch(self, model, graph_data, optimizer, loss_function, 
-                                     adjacency_matrix, semantic_labels_matrix, predicted_labels):
-
-        model.train()
-        optimizer.zero_grad(set_to_none=True)
-        
-        node_features = model(graph_data)
-        
-        loss_computation_result = loss_function(
-            node_features, graph_data, adjacency_matrix, semantic_labels_matrix, 
-            self.training_config.get('alpha', 0.6), 
-            self.training_config.get('beta', 0.6), 
-            self.training_config.get('T', 5), 
-            graph_data.train_mask
-        )
-        
-        if len(loss_computation_result) == 3:
-            total_loss, loss_components, updated_predicted_labels = loss_computation_result
-        else:
-            total_loss, loss_components, updated_predicted_labels = (
-                loss_computation_result[0], loss_computation_result[1], loss_computation_result[3]
-            )
-        
-        total_loss.backward()
-        optimizer.step()
-        return total_loss.item(), loss_components, updated_predicted_labels
-
-    @torch.no_grad()
-    def _evaluate_training_and_validation_performance(self, model, graph_data, predicted_labels):
-
-        model.eval()
-        learned_node_features = model(graph_data)
-
-        train_accuracy, validation_accuracy, _ = LinearProbeEvaluator.evaluate_with_linear_probe(
-            learned_node_features, 
-            graph_data, 
-            predicted_labels, 
-            graph_data.y,
-            random_state=self.training_config.get('seed', 42)
-        )
-
-        validation_loss = self._compute_cross_entropy_loss_for_split(model, graph_data, graph_data.val_mask)
-        return train_accuracy, validation_accuracy, validation_loss
-
-    @torch.no_grad()
-    def _compute_f1_scores_for_splits(self, model, graph_data, predicted_labels):
-
-        model.eval()
-        learned_node_features = model(graph_data)
-
-        normalized_features = normalize(learned_node_features.detach().cpu().numpy(), norm='l2')
-        
-        train_features = normalized_features[graph_data.train_mask.cpu()]
-        validation_features = normalized_features[graph_data.val_mask.cpu()]
-        
-        train_noisy_labels = predicted_labels[graph_data.train_mask].cpu().numpy()
-        true_labels = graph_data.y.cpu().numpy()
-        
-        linear_classifier = LogisticRegression(
-            solver='lbfgs', 
-            multi_class='auto', 
-            max_iter=1000, 
-            random_state=self.training_config.get('seed', 42)
-        )
-        linear_classifier.fit(train_features, train_noisy_labels)
-        
-        train_predictions = linear_classifier.predict(train_features)
-        validation_predictions = linear_classifier.predict(validation_features)
-        
-        train_f1 = self.cls_evaluator.compute_f1(
-            train_predictions,
-            true_labels[graph_data.train_mask.cpu()],
-        )
-        validation_f1 = self.cls_evaluator.compute_f1(
-            validation_predictions,
-            true_labels[graph_data.val_mask.cpu()],
-        )
-        
-        return train_f1, validation_f1
-
-    @torch.no_grad()
-    def _compute_cross_entropy_loss_for_split(self, model, graph_data, split_mask):
-        # TODO: verify - are logits here okay, or should be a hidden embedding instead
-        learned_features = model(graph_data)
-        split_true_labels = graph_data.y[split_mask]
-        cross_entropy_loss = torch.nn.CrossEntropyLoss()
-        split_loss = cross_entropy_loss(learned_features[split_mask], split_true_labels)
-        return split_loss
-
-    def _print_epoch_debug_information(self, epoch_number, train_acc, val_acc, train_f1, val_f1,
-                                     train_oversmoothing, val_oversmoothing, should_print_oversmoothing=True):
-
-        print(f"Epoch {epoch_number+1:03d} | Train Acc: {train_acc:.4f}, Val Acc: {val_acc:.4f} | "
-              f"Train F1: {train_f1:.4f}, Val F1: {val_f1:.4f}")
-        
-        if should_print_oversmoothing and train_oversmoothing and val_oversmoothing:
-            train_edir = train_oversmoothing.get('EDir', 0.0)
-            train_edir_trad = train_oversmoothing.get('EDir_traditional', 0.0)
-            train_eproj = train_oversmoothing.get('EProj', 0.0)
-            train_mad = train_oversmoothing.get('MAD', 0.0)
-            train_num_rank = train_oversmoothing.get('NumRank', 0.0)
-            train_eff_rank = train_oversmoothing.get('Erank', 0.0)
-
-            val_edir = val_oversmoothing.get('EDir', 0.0)
-            val_edir_trad = val_oversmoothing.get('EDir_traditional', 0.0)
-            val_eproj = val_oversmoothing.get('EProj', 0.0)
-            val_mad = val_oversmoothing.get('MAD', 0.0)
-            val_num_rank = val_oversmoothing.get('NumRank', 0.0)
-            val_eff_rank = val_oversmoothing.get('Erank', 0.0)
-
-            print(f"[Oversmoothing Metrics] Train EDir: {train_edir:.4f}, Val EDir: {val_edir:.4f} | "
-                  f"Train EDir_trad: {train_edir_trad:.4f}, Val EDir_trad: {val_edir_trad:.4f}")
-            print(f"[Oversmoothing Metrics] Train EProj: {train_eproj:.4f}, Val EProj: {val_eproj:.4f} | "
-                  f"Train MAD: {train_mad:.4f}, Val MAD: {val_mad:.4f}")
-            print(f"[Oversmoothing Metrics] Train NumRank: {train_num_rank:.4f}, Val NumRank: {val_num_rank:.4f} | "
-                  f"Train Erank: {train_eff_rank:.4f}, Val Erank: {val_eff_rank:.4f}")
-        elif should_print_oversmoothing:
-            print("[Oversmoothing Metrics] Computed every 20 epochs - skipping this epoch")
-
-
-def create_enhanced_gnn_model(model_creation_function, gnn_model_name, enhancement_configuration=None, **model_creation_kwargs):
-
-    default_enhancement_config = {
-        'use_layer_normalization': False,
-        'use_residual_connections': False,
-        'use_learnable_residual_projection': False,
-        'final_activation_function': 'relu',
-        'final_feature_normalization': None  # None, 'layer_norm', 'l1', 'l2'
-    }
-    
-    if enhancement_configuration:
-        default_enhancement_config.update(enhancement_configuration)
-    
-    base_gnn_model = model_creation_function(model_name=gnn_model_name, **model_creation_kwargs)
-    
-    if not any(default_enhancement_config.values()):
-        return base_gnn_model
-    
-    return EnhancedGNNWrapper(
-        base_gnn_model=base_gnn_model,
-        **default_enhancement_config
-    )
-
-
 @register('erase')
 class ERASEMethodTrainer(BaseTrainer):
-    def _create_erase_trainer(self):
-        """Build an ERASETrainer with the full config."""
-        d = self.init_data
-        data = d['data']
-        erase_params = self.config['erase_params']
-
-        erase_config = {
-            'erase_gnn_type': self.config['model']['name'],
-            'in_channels': data.num_features,
-            'hidden_channels': self.config['model'].get('hidden_channels', 128),
-            'n_embedding': erase_params.get('n_embedding', 512),
-            'n_layers': self.config['model'].get('n_layers', 2),
-            'n_heads': erase_params.get('n_heads', self.config['model'].get('heads', 8)),
-            'dropout': self.config['model'].get('dropout', 0.5),
-            'self_loop': self.config['model'].get('self_loop', True),
-            'mlp_layers': self.config['model'].get('mlp_layers', 2),
-            'train_eps': self.config['model'].get('train_eps', True),
-            'lr': d['lr'],
-            'weight_decay': d['weight_decay'],
-            'total_epochs': d['epochs'],
-            'patience': d['patience'],
-            'gam1': erase_params.get('gam1', 1.0),
-            'gam2': erase_params.get('gam2', 2.0),
-            'eps': erase_params.get('eps', 0.05),
-            'alpha': erase_params.get('alpha', 0.6),
-            'beta': erase_params.get('beta', 0.6),
-            'T': erase_params.get('T', 3),
-            'use_layer_norm': erase_params.get('use_layer_norm', False),
-            'use_residual': erase_params.get('use_residual', False),
-            'use_residual_linear': erase_params.get('use_residual_linear', False),
-            'seed': d['seed'],
-            'oversmoothing_every': d['oversmoothing_every'],
-        }
-
-        return ERASETrainer(
-            training_config=erase_config,
-            computation_device=d['device'],
-            num_node_classes=d['num_classes'],
-            model_creation_function=d['get_model'],
-        )
-
     def train(self):
+        from methods.registry import get_helper
+        from training.training_loop import TrainingLoop
+
         d = self.init_data
-        self._erase_trainer = self._create_erase_trainer()
-        return self._erase_trainer.train_erase_model(
-            d['data_for_training'],
-            log_epoch_fn=self.log_epoch,
+        self._helper = get_helper('erase')
+        self._loop = TrainingLoop(self._helper, log_epoch_fn=self.log_epoch)
+        return self._loop.run(
+            d['backbone_model'], d['data_for_training'],
+            self.config, d['device'], d,
         )
+
+    def _get_state(self):
+        """Get helper state — works both during and after training."""
+        if hasattr(self, '_loop') and hasattr(self._loop, '_state'):
+            return self._loop.state
+        return self._loop_state
 
     def get_checkpoint_state(self) -> dict:
-        trainer = self._erase_trainer
-        state = {
-            'trained_model': copy.deepcopy(trainer._trained_model.state_dict()),
-        }
-        if hasattr(trainer, '_final_predicted_labels') and trainer._final_predicted_labels is not None:
-            state['final_predicted_labels'] = trainer._final_predicted_labels.clone()
-        return state
-
-    def _setup_for_eval(self, state):
-        """Create the ERASETrainer so load_checkpoint_state can access it."""
-        self._erase_trainer = self._create_erase_trainer()
-        self._erase_trainer._trained_model = self._erase_trainer._create_enhanced_gnn_model()
+        return self._helper.get_checkpoint_state(self._get_state())
 
     def load_checkpoint_state(self, state):
-        if not hasattr(self, '_erase_trainer'):
-            self._setup_for_eval(state)
-        trainer = self._erase_trainer
-        trainer._trained_model.load_state_dict(state['trained_model'])
-        if 'final_predicted_labels' in state:
-            trainer._final_predicted_labels = state['final_predicted_labels']
+        if not hasattr(self, '_helper'):
+            from methods.registry import get_helper
+            self._helper = get_helper('erase')
+            d = self.init_data
+            self._loop_state = self._helper.setup(
+                d['backbone_model'], d['data_for_training'],
+                self.config, d['device'], d,
+            )
+        else:
+            self._loop_state = self._get_state()
+        self._helper.load_checkpoint_state(self._loop_state, state)
 
     def profile_flops(self):
         from util.profiling import profile_model_flops
         d = self.init_data
-        model = self._erase_trainer._trained_model
-        return profile_model_flops(model, d['data_for_training'], d['device'])
+        state = self._get_state()
+        fwd = self._helper.get_inference_forward_fn(state, d['data_for_training'])
+        return profile_model_flops(state['models'][0], d['data_for_training'],
+                                   d['device'], forward_fn=fwd)
 
     def profile_training_step(self):
-        """Profile one training step for ERASE.
-
-        Simplified vs the real step — uses cross_entropy instead of the
-        MCR2 loss (which involves logdet/slogdet, membership matrices, and
-        label propagation that are not GNN-layer FLOPs).  Captures the
-        dominant model forward+backward cost.
-        """
         from util.profiling import profile_training_step_flops
         d = self.init_data
-        model = self._erase_trainer._trained_model
-        data = d['data_for_training']
-
-        def step_fn():
-            out = model(data)
-            return F.cross_entropy(out[data.train_mask], data.y[data.train_mask])
-
-        return profile_training_step_flops(model, d['device'], step_fn)
+        state = self._get_state()
+        step_fn = self._helper.get_training_step_fn(state, d['data_for_training'])
+        return profile_training_step_flops(state['models'][0], d['device'], step_fn)
 
     def evaluate(self):
         d = self.init_data
-        trainer = self._erase_trainer
-        model = trainer._trained_model
+        state = self._get_state()
         data = d['data_for_training']
-        device = d['device']
-
-        model.eval()
-        with torch.no_grad():
-            # TODO: verify - are logits here okay, or should be a hidden embedding instead
-            learned_features = model(data)
-
-        normalized_features = normalize(learned_features.detach().cpu().numpy(), norm='l2')
-        train_features = normalized_features[data.train_mask.cpu()]
-        train_labels = trainer._final_predicted_labels[data.train_mask].cpu().numpy()
-
-        fitted_classifier = LogisticRegression(
-            solver='lbfgs', multi_class='auto', max_iter=1000,
-            random_state=trainer.training_config.get('seed', 42),
-        ).fit(train_features, train_labels)
+        clean_labels = getattr(data, 'y_original', data.y)
 
         def get_predictions():
-            norm_feats = normalize(learned_features.detach().cpu().numpy(), norm='l2')
-            preds = fitted_classifier.predict(norm_feats)
-            return torch.tensor(preds, device=device, dtype=torch.long)
+            return self._helper.get_predictions(state, data)
 
         def get_embeddings():
-            return model.get_embeddings(data)
+            return self._helper.get_embeddings(state, data)
 
         return evaluate_model(
-            get_predictions, get_embeddings, data.y,
+            get_predictions, get_embeddings, clean_labels,
             data.train_mask, data.val_mask, data.test_mask,
-            data.edge_index, device,
+            data.edge_index, d['device'],
         )

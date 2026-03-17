@@ -403,37 +403,55 @@ def get_noise_split_indices(noisy_labels, clean_labels, train_mask):
     return train_indices[~is_mislabelled], train_indices[is_mislabelled]
 
 
-def compute_train_noise_split_cls(predictions, noisy_labels, clean_labels, train_mask):
-    """Classification metrics on clean vs mislabelled training subsets.
+def _compute_noise_split_cls(predictions, noisy_labels, clean_labels, mask, prefix):
+    """Classification metrics on clean vs mislabelled subsets within a split.
 
-    Mislabelled nodes are detected dynamically: noisy_labels != clean_labels on train_mask.
+    Mislabelled nodes are detected dynamically: noisy_labels != clean_labels on mask.
+
+    Args:
+        predictions: full-graph predictions tensor
+        noisy_labels: full-graph noisy labels
+        clean_labels: full-graph original clean labels
+        mask: boolean mask for the split (train or val)
+        prefix: key prefix ('train' or 'val')
 
     Returns dict with keys:
-        train_only_clean_cls, train_only_mislabelled_factual_cls,
-        train_only_mislabelled_corrected_cls
+        {prefix}_only_clean_cls, {prefix}_only_mislabelled_factual_cls,
+        {prefix}_only_mislabelled_corrected_cls
     """
-    split = get_noise_split_indices(noisy_labels, clean_labels, train_mask)
+    split = get_noise_split_indices(noisy_labels, clean_labels, mask)
+    keys = (f'{prefix}_only_clean_cls',
+            f'{prefix}_only_mislabelled_factual_cls',
+            f'{prefix}_only_mislabelled_corrected_cls')
     if split is None:
-        return {k: dict(ZERO_CLS) for k in (
-            'train_only_clean_cls', 'train_only_mislabelled_factual_cls',
-            'train_only_mislabelled_corrected_cls')}
+        return {k: dict(ZERO_CLS) for k in keys}
     clean_idx, mislabelled_idx = split
     cls_evaluator = ClassificationMetrics(average='macro')
 
     result = {}
-    result['train_only_clean_cls'] = (
+    result[keys[0]] = (
         cls_evaluator.compute_all_metrics(predictions[clean_idx], clean_labels[clean_idx])
         if len(clean_idx) > 0 else dict(ZERO_CLS)
     )
-    result['train_only_mislabelled_factual_cls'] = (
+    result[keys[1]] = (
         cls_evaluator.compute_all_metrics(predictions[mislabelled_idx], noisy_labels[mislabelled_idx])
         if len(mislabelled_idx) > 0 else dict(ZERO_CLS)
     )
-    result['train_only_mislabelled_corrected_cls'] = (
+    result[keys[2]] = (
         cls_evaluator.compute_all_metrics(predictions[mislabelled_idx], clean_labels[mislabelled_idx])
         if len(mislabelled_idx) > 0 else dict(ZERO_CLS)
     )
     return result
+
+
+def compute_train_noise_split_cls(predictions, noisy_labels, clean_labels, train_mask):
+    """Classification metrics on clean vs mislabelled training subsets."""
+    return _compute_noise_split_cls(predictions, noisy_labels, clean_labels, train_mask, 'train')
+
+
+def compute_val_noise_split_cls(predictions, noisy_labels, clean_labels, val_mask):
+    """Classification metrics on clean vs mislabelled validation subsets."""
+    return _compute_noise_split_cls(predictions, noisy_labels, clean_labels, val_mask, 'val')
 
 
 def compute_oversmoothing_for_mask(oversmoothing_evaluator, embeddings, edge_index, mask):
@@ -477,6 +495,16 @@ def compute_oversmoothing_for_mask(oversmoothing_evaluator, embeddings, edge_ind
         return dict(DEFAULT_OVERSMOOTHING)
 
 
+def normalize_metrics(d):
+    """Normalise an oversmoothing metrics dict to the canonical key set."""
+    if d is None:
+        return dict(DEFAULT_OVERSMOOTHING)
+    return {k: d.get(k, 0.0) for k in OVERSMOOTHING_KEYS}
+
+# Keep old name as private alias used internally
+_normalize_metrics = normalize_metrics
+
+
 @torch.no_grad()
 def evaluate_model(get_predictions, get_embeddings, labels, train_mask, val_mask, test_mask,
                    edge_index, device):
@@ -511,56 +539,13 @@ def evaluate_model(get_predictions, get_embeddings, labels, train_mask, val_mask
     val_oversmoothing = compute_oversmoothing_for_mask(
         oversmoothing_evaluator, embeddings, edge_index, val_mask)
 
-    def normalize_metrics(d):
-        if d is None:
-            return dict(DEFAULT_OVERSMOOTHING)
-        return {k: d.get(k, 0.0) for k in OVERSMOOTHING_KEYS}
-
     result = {
         'test_cls': test_cls_metrics,
         'train_cls': train_cls_metrics,
         'val_cls': val_cls_metrics,
-        'test_oversmoothing': normalize_metrics(test_oversmoothing),
-        'train_oversmoothing_final': normalize_metrics(train_oversmoothing),
-        'val_oversmoothing_final': normalize_metrics(val_oversmoothing),
+        'test_oversmoothing': _normalize_metrics(test_oversmoothing),
+        'train_oversmoothing_final': _normalize_metrics(train_oversmoothing),
+        'val_oversmoothing_final': _normalize_metrics(val_oversmoothing),
     }
     result['_predictions'] = predictions  # consumed by _make_result, not serialised
-    return result
-
-
-def compute_training_metrics(predictions, labels, train_mask, val_mask,
-                             embeddings=None, edge_index=None, device=None,
-                             compute_oversmoothing=False):
-    """In-loop monitoring utility.
-
-    Args:
-        predictions: Tensor[num_nodes] of integer class labels
-        labels: Tensor[num_nodes] of true labels
-        train_mask, val_mask: boolean masks
-        embeddings: optional Tensor[num_nodes, dim] for oversmoothing
-        edge_index: optional edge index for oversmoothing
-        device: computation device
-        compute_oversmoothing: whether to compute oversmoothing metrics
-
-    Returns:
-        dict with train_acc, val_acc, train_f1, val_f1,
-        and optionally train_oversmoothing, val_oversmoothing
-    """
-    cls_evaluator = ClassificationMetrics(average='macro')
-
-    result = {
-        'train_acc': cls_evaluator.compute_accuracy(predictions[train_mask], labels[train_mask]),
-        'val_acc': cls_evaluator.compute_accuracy(predictions[val_mask], labels[val_mask]),
-        'train_f1': cls_evaluator.compute_f1(predictions[train_mask], labels[train_mask]),
-        'val_f1': cls_evaluator.compute_f1(predictions[val_mask], labels[val_mask]),
-    }
-
-    if compute_oversmoothing and embeddings is not None and edge_index is not None:
-        oversmoothing_evaluator = OversmoothingMetrics(
-            device=device or embeddings.device)
-        result['train_oversmoothing'] = compute_oversmoothing_for_mask(
-            oversmoothing_evaluator, embeddings, edge_index, train_mask)
-        result['val_oversmoothing'] = compute_oversmoothing_for_mask(
-            oversmoothing_evaluator, embeddings, edge_index, val_mask)
-
     return result

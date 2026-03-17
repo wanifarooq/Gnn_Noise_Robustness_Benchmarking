@@ -146,15 +146,6 @@ def expand_yaml_sweeps(base_cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
     return expanded_configs
 
 
-def load_yaml(path: str) -> Dict[str, Any]:
-    """
-    Load a YAML file into a Python dictionary.
-    """
-    with open(path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
-
-
-
 def json_serializer(obj):
     # NumPy scalars
     if isinstance(obj, np.generic):

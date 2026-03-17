@@ -50,28 +50,67 @@ def initialize_experiment(config, run_id=1):
     train_features = data.x[train_mask] if config['noise'].get('type', 'clean') == 'instance' else None
     train_indices = train_mask.nonzero(as_tuple=True)[0]
 
+    noise_type = config['noise'].get('type', 'clean')
+    noise_rate = config['noise'].get('rate', 0)
+    noise_base_seed = config['noise'].get('seed', 42) + run_id * 10
+
     noisy_train_labels, relative_noisy_indices = noise_operation(
         train_labels,
         train_features,
         num_classes,
-        noise_type=config['noise'].get('type', 'clean'),
-        noise_rate=config['noise'].get('rate', 0),
-        noise_seed=config['noise'].get('seed', 42) + run_id * 10,
+        noise_type=noise_type,
+        noise_rate=noise_rate,
+        noise_seed=noise_base_seed,
         idx_train=train_indices,
         debug=True
     )
 
     global_noisy_indices = train_indices[relative_noisy_indices]
 
+    # Apply noise to validation labels (same type/rate, different seed)
+    val_labels = data.y[val_mask]
+    val_features = data.x[val_mask] if noise_type == 'instance' else None
+    val_indices = val_mask.nonzero(as_tuple=True)[0]
+
+    noisy_val_labels, relative_noisy_val_indices = noise_operation(
+        val_labels,
+        val_features,
+        num_classes,
+        noise_type=noise_type,
+        noise_rate=noise_rate,
+        noise_seed=noise_base_seed + 1,  # different seed for independent noise
+        idx_train=val_indices,
+        debug=False
+    )
+
+    global_noisy_val_indices = val_indices[relative_noisy_val_indices]
+
     data.y_noisy = data.y.clone()
     data.y_noisy[train_mask] = noisy_train_labels
+    data.y_noisy[val_mask] = noisy_val_labels
 
     print(f"Run {run_id}: Applied noise to {len(relative_noisy_indices)} training samples out of {train_mask.sum().item()}")
+    print(f"Run {run_id}: Applied noise to {len(relative_noisy_val_indices)} validation samples out of {val_mask.sum().item()}")
 
     method = config['training']['method']
-    data_for_training = prepare_data_for_method(data, train_mask, val_mask, test_mask, noisy_train_labels, method)
+    data_for_training = prepare_data_for_method(data, train_mask, val_mask, test_mask, noisy_train_labels, noisy_val_labels, method)
 
     verify_label_distribution(data_for_training, train_mask, val_mask, test_mask, run_id, method)
+
+    # Inductive partitioning (if requested)
+    mode = config.get('training', {}).get('mode', 'transductive').lower()
+    train_subgraph = val_subgraph = test_subgraph = None
+    if mode == 'inductive':
+        from util.inductive import partition_graph_inductive
+        train_subgraph, val_subgraph, test_subgraph = partition_graph_inductive(
+            data_for_training,
+        )
+        print(
+            f"Run {run_id}: Inductive mode — train {train_subgraph.num_nodes} nodes / "
+            f"{train_subgraph.edge_index.size(1)} edges, "
+            f"val {val_subgraph.num_nodes} / {val_subgraph.edge_index.size(1)}, "
+            f"test {test_subgraph.num_nodes} / {test_subgraph.edge_index.size(1)}"
+        )
 
     # backbone model
     backbone_model = get_model(
@@ -102,7 +141,7 @@ def initialize_experiment(config, run_id=1):
     patience = int(trainer_params.get('patience', 100))
     oversmoothing_every = int(trainer_params.get('oversmoothing_every', 20))
 
-    return {
+    result = {
         'device': device,
         'data': data,
         'num_classes': num_classes,
@@ -113,6 +152,8 @@ def initialize_experiment(config, run_id=1):
         'relative_noisy_indices': relative_noisy_indices,
         'noisy_train_labels': noisy_train_labels,
         'global_noisy_indices': global_noisy_indices,
+        'noisy_val_labels': noisy_val_labels,
+        'global_noisy_val_indices': global_noisy_val_indices,
         'data_for_training': data_for_training,
         'backbone_model': backbone_model,
         'lr': lr,
@@ -125,6 +166,13 @@ def initialize_experiment(config, run_id=1):
         'compute_info': compute_info,
         'get_model': get_model,
     }
+
+    if train_subgraph is not None:
+        result['train_subgraph'] = train_subgraph
+        result['val_subgraph'] = val_subgraph
+        result['test_subgraph'] = test_subgraph
+
+    return result
 
 def run_experiment(config, run_id=1, *, checkpoint_path=None, eval_only=False,
                    run_dir=None):

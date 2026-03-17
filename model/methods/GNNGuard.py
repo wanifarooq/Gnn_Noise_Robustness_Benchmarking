@@ -2,317 +2,16 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn import Parameter
-import torch.optim as optim
 from torch_geometric.nn import GCNConv
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.preprocessing import normalize
 from scipy.sparse import lil_matrix
 import scipy.sparse as sp
 import numpy as np
-from copy import deepcopy
-from torch_geometric.utils import to_scipy_sparse_matrix
 from torch_geometric.data import Data
-from collections import defaultdict
-from model.evaluation import (OversmoothingMetrics, ClassificationMetrics,
-                              compute_oversmoothing_for_mask, evaluate_model as shared_evaluate_model)
 from model.base import BaseTrainer
 from model.registry import register
 
-
-class GNNGuardTrainer:
-
-    def __init__(self, input_features, hidden_channels, num_classes, dropout=0.5, lr=0.01, 
-                 weight_decay=5e-4, attention=True, device=None, similarity_threshold=0.5, 
-                 num_layers=2, attention_dim=16, data_for_training=None, backbone=None,
-                 oversmoothing_every=20):
-
-        self.device = device
-        self.backbone = backbone
-        self.model = None
-        self.input_features = input_features
-        self.num_classes = num_classes
-        self.hidden_channels = hidden_channels
-        self.dropout_rate = dropout
-        self.learning_rate = lr
-        self.weight_decay_coeff = weight_decay if attention else 0
-        self.use_attention = attention
-        
-        # GNNGuard specific parameters
-        self.similarity_threshold = similarity_threshold
-        self.num_layers = num_layers
-        self.attention_dim = attention_dim
-        self.oversmoothing_every = oversmoothing_every
-
-        self.model_output = None
-        self.best_model_state = None
-        self.best_output = None
-        self.normalized_adjacency = None
-        self.node_features = None
-        self.node_labels = None
-        
-        # Oversmoothing evaluation
-        self.oversmoothing_evaluator = OversmoothingMetrics(device=device)
-        self.cls_evaluator = ClassificationMetrics(average='macro')
-        self.oversmoothing_metrics_history = {
-            'train': [],
-            'val': [],
-            'test': []
-        }
-        
-        self._initialize_model()
-        self.data_for_training = data_for_training
-    
-    def _initialize_model(self):
-
-        self.model = GNNGuardModel(
-            input_features=self.input_features,
-            hidden_channels=self.hidden_channels,
-            num_classes=self.num_classes,
-            dropout=self.dropout_rate,
-            similarity_threshold=self.similarity_threshold,
-            num_layers=self.num_layers,
-            attention_dim=self.attention_dim,
-            device=self.device,
-            backbone=self.backbone
-        ).to(self.device)
-
-    def prepare_data(self):
-        # adjacency
-        self.adjacency_matrix = to_scipy_sparse_matrix(
-            self.data_for_training.edge_index, num_nodes=self.data_for_training.num_nodes
-        )
-
-        # split train/val/test
-        if hasattr(self.data_for_training, "train_mask"):
-            self.train_indices = self.data_for_training.train_mask.nonzero(as_tuple=True)[0].cpu().numpy()
-            self.val_indices = self.data_for_training.val_mask.nonzero(as_tuple=True)[0].cpu().numpy()
-            self.test_indices = self.data_for_training.test_mask.nonzero(as_tuple=True)[0].cpu().numpy()
-        else:
-            total_nodes = self.data_for_training.num_nodes
-            self.train_indices = np.arange(min(140, total_nodes // 5))
-            self.val_indices = np.arange(len(self.train_indices),
-                                         min(len(self.train_indices) + 500, total_nodes // 2))
-            self.test_indices = np.arange(max(len(self.train_indices) + len(self.val_indices), total_nodes // 2),
-                                          total_nodes)
-    
-    def _convert_sparse_matrix_to_torch_tensor(self, sparse_matrix):
-        # Convert scipy sparse matrix to PyTorch sparse tensor
-        sparse_coo = sparse_matrix.tocoo().astype(np.float32)
-        indices_tensor = torch.from_numpy(
-            np.vstack((sparse_coo.row, sparse_coo.col)).astype(np.int64)
-        ).to(self.device)
-        values_tensor = torch.from_numpy(sparse_coo.data).to(self.device)
-        shape_tensor = torch.Size(sparse_coo.shape)
-        return torch.sparse_coo_tensor(indices_tensor, values_tensor, shape_tensor, 
-                                     dtype=torch.float32, device=self.device)
-    
-    def _add_self_loops_to_sparse_tensor(self, adjacency_tensor, loop_weight=1):
-
-        num_nodes = adjacency_tensor.shape[0]
-        diagonal_indices = torch.arange(num_nodes, dtype=torch.int64)
-        self_loop_indices = torch.stack((diagonal_indices, diagonal_indices), dim=0)
-        self_loop_values = torch.ones(num_nodes, dtype=torch.float32)
-        identity_tensor = torch.sparse.FloatTensor(
-            self_loop_indices, self_loop_values, adjacency_tensor.shape
-        ).to(self.device)
-        return adjacency_tensor + identity_tensor
-    
-    def _reset_model_parameters(self):
-        if hasattr(self.model, 'gcn_layers'):
-            for gcn_layer in self.model.gcn_layers:
-                gcn_layer.reset_parameters()
-        elif hasattr(self.model, 'initialize'):
-            self.model.initialize()
-
-    def train_model(self, node_features=None, node_labels=None, max_epochs=200, verbose=True, patience=5,
-                    log_epoch_fn=None):
-        self._reset_model_parameters()
-
-        if node_features is not None:
-            self.node_features = node_features.to(self.device)
-        if node_labels is not None:
-            self.node_labels = node_labels.to(self.device)
-
-        self.normalized_adjacency = self._add_self_loops_to_sparse_tensor(
-            self._convert_sparse_matrix_to_torch_tensor(self.adjacency_matrix)
-        )
-
-        return self._train_with_early_stopping(
-            self.node_labels,
-            self.train_indices,
-            self.val_indices,
-            self.test_indices,
-            max_epochs,
-            patience,
-            verbose,
-            log_epoch_fn=log_epoch_fn,
-        )
-    
-    def _train_with_early_stopping(self, labels, train_indices, val_indices, test_indices,
-                                  max_epochs, patience, verbose, log_epoch_fn=None):
-
-        if verbose:
-            print('Training GNNGuard model')
-        per_epochs_oversmoothing = defaultdict(list)
-        per_epochs_val_oversmoothing = defaultdict(list)
-        optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate,
-                             weight_decay=self.weight_decay_coeff)
-        
-        # Early stopping
-        best_validation_loss = float('inf')
-        epochs_no_improve = 0
-        
-        for epoch in range(max_epochs):
-
-            self.model.train()
-            optimizer.zero_grad(set_to_none=True)
-            
-            train_output = self.model(self.node_features, self.normalized_adjacency, 
-                                    use_attention=self.use_attention)
-            train_loss = F.nll_loss(train_output[train_indices], labels[train_indices])
-            train_loss.backward()
-            optimizer.step()
-            
-            self.model.eval()
-            with torch.no_grad():
-                eval_output = self.model(self.node_features, self.normalized_adjacency,
-                                       use_attention=self.use_attention)
-                val_loss = F.nll_loss(eval_output[val_indices], labels[val_indices])
-
-                train_predictions = train_output[train_indices].max(1)[1].cpu().numpy()
-                val_predictions = eval_output[val_indices].max(1)[1].cpu().numpy()
-                train_true_labels = labels[train_indices].cpu().numpy()
-                val_true_labels = labels[val_indices].cpu().numpy()
-                
-                train_accuracy = self.cls_evaluator.compute_accuracy(train_predictions, train_true_labels)
-                val_accuracy = self.cls_evaluator.compute_accuracy(val_predictions, val_true_labels)
-                train_f1_score = self.cls_evaluator.compute_f1(train_predictions, train_true_labels)
-                val_f1_score = self.cls_evaluator.compute_f1(val_predictions, val_true_labels)
-                
-                # Compute oversmoothing metrics
-                train_node_mask = torch.zeros(self.node_features.size(0), dtype=torch.bool, device=self.device)
-                val_node_mask = torch.zeros(self.node_features.size(0), dtype=torch.bool, device=self.device)
-                train_node_mask[train_indices] = True
-                val_node_mask[val_indices] = True
-                
-                edge_connectivity = self.normalized_adjacency._indices()
-                train_oversmoothing_metrics = None
-                val_oversmoothing_metrics = None
-                if epoch % self.oversmoothing_every == 0 or epoch == max_epochs - 1:
-                    embeddings = self.model.get_embeddings(
-                        self.node_features, self.normalized_adjacency, use_attention=self.use_attention)
-                    train_oversmoothing_metrics = compute_oversmoothing_for_mask(
-                        self.oversmoothing_evaluator, embeddings, edge_connectivity, train_node_mask)
-                    val_oversmoothing_metrics = compute_oversmoothing_for_mask(
-                        self.oversmoothing_evaluator, embeddings, edge_connectivity, val_node_mask)
-                    for key, value in train_oversmoothing_metrics.items():
-                        per_epochs_oversmoothing[key].append(value)
-                    for key, value in val_oversmoothing_metrics.items():
-                        per_epochs_val_oversmoothing[key].append(value)
-                    self.oversmoothing_metrics_history['train'].append(train_oversmoothing_metrics)
-                    self.oversmoothing_metrics_history['val'].append(val_oversmoothing_metrics)
-            
-            if verbose:
-                self._log_training_progress(epoch, train_loss, val_loss, train_accuracy, val_accuracy,
-                                          train_f1_score, val_f1_score, train_oversmoothing_metrics,
-                                          val_oversmoothing_metrics)
-
-            # Build oversmoothing entry for callback
-            os_entry = None
-            if epoch % self.oversmoothing_every == 0 or epoch == max_epochs - 1:
-                os_entry = {'train': dict(train_oversmoothing_metrics), 'val': dict(val_oversmoothing_metrics)}
-
-            # Early stopping tracking
-            is_best = val_loss < best_validation_loss
-            if is_best:
-                best_validation_loss = val_loss
-                self.model_output = eval_output
-                epochs_no_improve = 0
-            else:
-                epochs_no_improve += 1
-
-            if log_epoch_fn is not None:
-                log_epoch_fn(epoch, train_loss, val_loss, train_accuracy, val_accuracy,
-                             train_f1=train_f1_score, val_f1=val_f1_score,
-                             oversmoothing=os_entry, is_best=is_best,
-                             train_predictions=eval_output.argmax(dim=1))
-
-            if epochs_no_improve >= patience:
-                if verbose:
-                    print(f'Early stopping at epoch {epoch}, best_val_loss={best_validation_loss:.4f}')
-                break
-
-        return {
-            'train_oversmoothing': dict(per_epochs_oversmoothing),
-            'val_oversmoothing': dict(per_epochs_val_oversmoothing),
-            'stopped_at_epoch': epoch,
-        }
-
-    def _log_training_progress(self, epoch, train_loss, val_loss, train_acc, val_acc, 
-                             train_f1, val_f1, train_oversmoothing, val_oversmoothing):
-        
-        print(f"Epoch {epoch+1:03d} | Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f} | "
-              f"Train Acc: {train_acc:.4f}, Val Acc: {val_acc:.4f} | "
-              f"Train F1: {train_f1:.4f}, Val F1: {val_f1:.4f}")
-        if train_oversmoothing is not None:
-            train_edir = train_oversmoothing['EDir'] if train_oversmoothing else 0.0
-            train_edir_trad = train_oversmoothing['EDir_traditional'] if train_oversmoothing else 0.0
-            train_eproj = train_oversmoothing['EProj'] if train_oversmoothing else 0.0
-            train_mad = train_oversmoothing['MAD'] if train_oversmoothing else 0.0
-            train_numrank = train_oversmoothing['NumRank'] if train_oversmoothing else 0.0
-            train_erank = train_oversmoothing['Erank'] if train_oversmoothing else 0.0
-            
-            val_edir = val_oversmoothing['EDir'] if val_oversmoothing else 0.0
-            val_edir_trad = val_oversmoothing['EDir_traditional'] if val_oversmoothing else 0.0
-            val_eproj = val_oversmoothing['EProj'] if val_oversmoothing else 0.0
-            val_mad = val_oversmoothing['MAD'] if val_oversmoothing else 0.0
-            val_numrank = val_oversmoothing['NumRank'] if val_oversmoothing else 0.0
-            val_erank = val_oversmoothing['Erank'] if val_oversmoothing else 0.0
-            print(f"Train EDir: {train_edir:.4f}, Val EDir: {val_edir:.4f} | "
-                  f"Train EDir_trad: {train_edir_trad:.4f}, Val EDir_trad: {val_edir_trad:.4f} | "
-                  f"Train EProj: {train_eproj:.4f}, Val EProj: {val_eproj:.4f} | "
-                  f"Train MAD: {train_mad:.4f}, Val MAD: {val_mad:.4f} | "
-                  f"Train NumRank: {train_numrank:.4f}, Val NumRank: {val_numrank:.4f} | "
-                  f"Train Erank: {train_erank:.4f}, Val Erank: {val_erank:.4f}")
-    
-    def evaluate_model(self):
-        num_nodes = self.node_features.size(0)
-        train_mask = torch.zeros(num_nodes, dtype=torch.bool, device=self.device)
-        val_mask = torch.zeros(num_nodes, dtype=torch.bool, device=self.device)
-        test_mask = torch.zeros(num_nodes, dtype=torch.bool, device=self.device)
-        train_mask[self.train_indices] = True
-        val_mask[self.val_indices] = True
-        test_mask[self.test_indices] = True
-
-        self.model.eval()
-        with torch.no_grad():
-            def get_predictions():
-                return self.model(
-                    self.node_features, self.normalized_adjacency, use_attention=self.use_attention
-                ).argmax(dim=1)
-
-            def get_embeddings():
-                return self.model.get_embeddings(
-                    self.node_features, self.normalized_adjacency, use_attention=self.use_attention
-                )
-            edge_index = self.normalized_adjacency._indices()
-
-            results = shared_evaluate_model(
-                get_predictions, get_embeddings, self.node_labels,
-                train_mask, val_mask, test_mask,
-                edge_index, self.device
-            )
-
-        print("GNNGuard Training completed!")
-        print(f"Test Acc: {results['test_cls']['accuracy']:.4f} | Test F1: {results['test_cls']['f1']:.4f} | "
-              f"Precision: {results['test_cls']['precision']:.4f}, Recall: {results['test_cls']['recall']:.4f}")
-        print(f"Test Oversmoothing: {results['test_oversmoothing']}")
-
-        return results
-    
-    def get_oversmoothing_metrics_history(self):
-
-        return self.oversmoothing_metrics_history
 
 class GNNGuardModel(nn.Module):
     
@@ -478,93 +177,70 @@ class GNNGuardModel(nn.Module):
 
 @register('gnnguard')
 class GNNGuardMethodTrainer(BaseTrainer):
-    def _create_trainer(self):
-        """Build a GNNGuardTrainer and prepare its data."""
-        d = self.init_data
-        gnnguard_params = self.config.get('gnnguard_params', {})
-
-        trainer = GNNGuardTrainer(
-            input_features=d['data'].num_features,
-            hidden_channels=self.config['model'].get('hidden_channels', 64),
-            num_classes=d['num_classes'],
-            dropout=self.config['model'].get('dropout', 0.5),
-            lr=d['lr'],
-            weight_decay=d['weight_decay'],
-            attention=gnnguard_params.get('attention', True),
-            device=d['device'],
-            similarity_threshold=gnnguard_params.get('P0', 0.5),
-            num_layers=gnnguard_params.get('K', 2),
-            attention_dim=gnnguard_params.get('D2', 16),
-            data_for_training=d['data_for_training'],
-            backbone=d['backbone_model'],
-            oversmoothing_every=d['oversmoothing_every'],
-        )
-        trainer.prepare_data()
-        return trainer
-
     def train(self):
-        d = self.init_data
-        self._trainer = self._create_trainer()
+        from methods.registry import get_helper
+        from training.training_loop import TrainingLoop
 
-        return self._trainer.train_model(
-            node_features=d['data_for_training'].x,
-            node_labels=d['data_for_training'].y,
-            max_epochs=d['epochs'],
-            verbose=True,
-            patience=d['patience'],
-            log_epoch_fn=self.log_epoch,
+        d = self.init_data
+        self._helper = get_helper('gnnguard')
+        self._loop = TrainingLoop(self._helper, log_epoch_fn=self.log_epoch)
+        return self._loop.run(
+            d['backbone_model'], d['data_for_training'],
+            self.config, d['device'], d,
         )
+
+    def _get_state(self):
+        """Get helper state — works both during and after training."""
+        if hasattr(self, '_loop') and hasattr(self._loop, '_state'):
+            return self._loop.state
+        return self._loop_state
 
     def get_checkpoint_state(self) -> dict:
-        return {
-            # Saved separately for inspection convenience, but backbone weights are already
-            # embedded in gnnguard_model (GNNGuardModel registers backbone as a submodule).
-            'backbone': deepcopy(self.init_data['backbone_model'].state_dict()),
-            'gnnguard_model': deepcopy(self._trainer.model.state_dict()),
-        }
-
-    def _setup_for_eval(self, state):
-        """Create the GNNGuardTrainer so load_checkpoint_state can access it."""
-        d = self.init_data
-        self._trainer = self._create_trainer()
-        self._trainer.node_features = d['data_for_training'].x.to(d['device'])
-        self._trainer.node_labels = d['data_for_training'].y.to(d['device'])
-        self._trainer.normalized_adjacency = self._trainer._add_self_loops_to_sparse_tensor(
-            self._trainer._convert_sparse_matrix_to_torch_tensor(self._trainer.adjacency_matrix)
-        )
+        return self._helper.get_checkpoint_state(self._get_state())
 
     def load_checkpoint_state(self, state):
-        if not hasattr(self, '_trainer'):
-            self._setup_for_eval(state)
-        # Restoring gnnguard_model is sufficient — backbone state is included within it.
-        self._trainer.model.load_state_dict(state['gnnguard_model'])
+        if not hasattr(self, '_helper'):
+            from methods.registry import get_helper
+            self._helper = get_helper('gnnguard')
+            d = self.init_data
+            # Setup state for eval-only mode
+            self._loop_state = self._helper.setup(
+                d['backbone_model'], d['data_for_training'],
+                self.config, d['device'], d,
+            )
+        else:
+            self._loop_state = self._loop.state
+        self._helper.load_checkpoint_state(self._loop_state, state)
 
     def profile_flops(self):
         from util.profiling import profile_model_flops
         d = self.init_data
-        trainer = self._trainer
-        model = trainer.model
-
-        def fwd():
-            return model(trainer.node_features, trainer.normalized_adjacency,
-                         use_attention=trainer.use_attention)
-
-        return profile_model_flops(model, d['data_for_training'], d['device'],
-                                   forward_fn=fwd)
+        state = self._get_state()
+        fwd = self._helper.get_inference_forward_fn(state, d['data_for_training'])
+        return profile_model_flops(state['models'][0], d['data_for_training'],
+                                   d['device'], forward_fn=fwd)
 
     def profile_training_step(self):
         from util.profiling import profile_training_step_flops
         d = self.init_data
-        trainer = self._trainer
-        model = trainer.model
-
-        def step_fn():
-            out = model(trainer.node_features, trainer.normalized_adjacency,
-                        use_attention=trainer.use_attention)
-            return F.nll_loss(out[trainer.train_indices],
-                              trainer.node_labels[trainer.train_indices])
-
-        return profile_training_step_flops(model, d['device'], step_fn)
+        state = self._get_state()
+        step_fn = self._helper.get_training_step_fn(state, d['data_for_training'])
+        return profile_training_step_flops(state['models'][0], d['device'], step_fn)
 
     def evaluate(self):
-        return self._trainer.evaluate_model()
+        from model.evaluation import evaluate_model as shared_evaluate_model
+        d = self.init_data
+        state = self._get_state()
+        data = d['data_for_training']
+
+        def get_predictions():
+            return self._helper.get_predictions(state, data)
+
+        def get_embeddings():
+            return self._helper.get_embeddings(state, data)
+
+        return shared_evaluate_model(
+            get_predictions, get_embeddings, data.y,
+            data.train_mask, data.val_mask, data.test_mask,
+            data.edge_index, d['device'],
+        )

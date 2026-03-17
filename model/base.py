@@ -12,7 +12,9 @@ import torch.nn.functional as F
 import numpy as np
 
 from model.evaluation import (evaluate_model, ZERO_CLS, compute_train_noise_split_cls,
-                              get_noise_split_indices, ClassificationMetrics)
+                              compute_val_noise_split_cls,
+                              get_noise_split_indices, ClassificationMetrics,
+                              normalize_metrics)
 from sweep_utils import json_serializer
 
 
@@ -34,24 +36,33 @@ class BaseTrainer(ABC):
     # ── epoch logging ───────────────────────────────────────────────────
 
     def _get_noise_split_masks(self):
-        """Lazy-compute and cache clean/mislabelled index tensors + label refs."""
+        """Lazy-compute and cache clean/mislabelled index tensors + label refs for train and val."""
         if hasattr(self, '_cached_noise_masks'):
             return self._cached_noise_masks
         d = self.init_data
         data_obj, train_mask = d.get('data'), d.get('train_mask')
+        val_mask = d.get('val_mask')
         if (data_obj is None or train_mask is None
                 or not hasattr(data_obj, 'y_original')
                 or not hasattr(data_obj, 'y_noisy')):
             self._cached_noise_masks = None
             return None
-        split = get_noise_split_indices(data_obj.y_noisy, data_obj.y_original, train_mask)
-        if split is None:
+        train_split = get_noise_split_indices(data_obj.y_noisy, data_obj.y_original, train_mask)
+        val_split = get_noise_split_indices(data_obj.y_noisy, data_obj.y_original, val_mask) if val_mask is not None else None
+        if train_split is None and val_split is None:
             self._cached_noise_masks = None
             return None
-        self._cached_noise_masks = {
-            'clean_idx': split[0], 'mislabelled_idx': split[1],
-            'noisy_labels': data_obj.y_noisy.clone(), 'clean_labels': data_obj.y_original.clone(),
+        result = {
+            'noisy_labels': data_obj.y_noisy.clone(),
+            'clean_labels': data_obj.y_original.clone(),
         }
+        if train_split is not None:
+            result['clean_idx'] = train_split[0]
+            result['mislabelled_idx'] = train_split[1]
+        if val_split is not None:
+            result['val_clean_idx'] = val_split[0]
+            result['val_mislabelled_idx'] = val_split[1]
+        self._cached_noise_masks = result
         return self._cached_noise_masks
 
     def log_epoch(self, epoch, train_loss, val_loss, train_acc, val_acc,
@@ -72,19 +83,34 @@ class BaseTrainer(ABC):
             'train_f1_only_mislabelled_factual': None,
             'train_acc_only_mislabelled_corrected': None,
             'train_f1_only_mislabelled_corrected': None,
+            'val_acc_clean_only': None,
+            'val_f1_clean_only': None,
+            'val_acc_only_mislabelled_factual': None,
+            'val_f1_only_mislabelled_factual': None,
+            'val_acc_only_mislabelled_corrected': None,
+            'val_f1_only_mislabelled_corrected': None,
             'oversmoothing': oversmoothing,
         }
         masks = self._get_noise_split_masks()
         if train_predictions is not None and masks is not None:
             cls = ClassificationMetrics(average='macro')
-            ci, mi = masks['clean_idx'], masks['mislabelled_idx']
             ny, cy = masks['noisy_labels'], masks['clean_labels']
-            entry['train_acc_clean_only'] = cls.compute_accuracy(train_predictions[ci], cy[ci])
-            entry['train_f1_clean_only'] = cls.compute_f1(train_predictions[ci], cy[ci])
-            entry['train_acc_only_mislabelled_factual'] = cls.compute_accuracy(train_predictions[mi], ny[mi])
-            entry['train_f1_only_mislabelled_factual'] = cls.compute_f1(train_predictions[mi], ny[mi])
-            entry['train_acc_only_mislabelled_corrected'] = cls.compute_accuracy(train_predictions[mi], cy[mi])
-            entry['train_f1_only_mislabelled_corrected'] = cls.compute_f1(train_predictions[mi], cy[mi])
+            if 'clean_idx' in masks:
+                ci, mi = masks['clean_idx'], masks['mislabelled_idx']
+                entry['train_acc_clean_only'] = cls.compute_accuracy(train_predictions[ci], cy[ci])
+                entry['train_f1_clean_only'] = cls.compute_f1(train_predictions[ci], cy[ci])
+                entry['train_acc_only_mislabelled_factual'] = cls.compute_accuracy(train_predictions[mi], ny[mi])
+                entry['train_f1_only_mislabelled_factual'] = cls.compute_f1(train_predictions[mi], ny[mi])
+                entry['train_acc_only_mislabelled_corrected'] = cls.compute_accuracy(train_predictions[mi], cy[mi])
+                entry['train_f1_only_mislabelled_corrected'] = cls.compute_f1(train_predictions[mi], cy[mi])
+            if 'val_clean_idx' in masks:
+                vci, vmi = masks['val_clean_idx'], masks['val_mislabelled_idx']
+                entry['val_acc_clean_only'] = cls.compute_accuracy(train_predictions[vci], cy[vci])
+                entry['val_f1_clean_only'] = cls.compute_f1(train_predictions[vci], cy[vci])
+                entry['val_acc_only_mislabelled_factual'] = cls.compute_accuracy(train_predictions[vmi], ny[vmi])
+                entry['val_f1_only_mislabelled_factual'] = cls.compute_f1(train_predictions[vmi], ny[vmi])
+                entry['val_acc_only_mislabelled_corrected'] = cls.compute_accuracy(train_predictions[vmi], cy[vmi])
+                entry['val_f1_only_mislabelled_corrected'] = cls.compute_f1(train_predictions[vmi], cy[vmi])
         self.epoch_log.append(entry)
 
         run_dir = self.init_data.get('run_dir')
@@ -204,12 +230,20 @@ class BaseTrainer(ABC):
 
         Uses backbone_model(data) for classification predictions (out_channels dim)
         and backbone_model.get_embeddings(data) for oversmoothing metrics (hidden_channels dim).
+
+        In inductive mode, each subgraph is evaluated independently and results
+        are mapped back to global indices.
+
         Override in subclasses that use wrapper models or non-standard evaluation.
         """
         d = self.init_data
         model = d['backbone_model']
         data = d['data_for_training']
         device = d['device']
+        mode = self.config.get('training', {}).get('mode', 'transductive').lower()
+
+        if mode == 'inductive' and 'test_subgraph' in d:
+            return self._evaluate_inductive(model, d, device)
 
         model.eval()
         with torch.no_grad():
@@ -224,6 +258,55 @@ class BaseTrainer(ABC):
                 data.train_mask, data.val_mask, data.test_mask,
                 data.edge_index, device,
             )
+
+    def _evaluate_inductive(self, model, d, device) -> dict:
+        """Evaluate in inductive mode — separate forward pass per subgraph."""
+        from model.evaluation import (
+            ClassificationMetrics, OversmoothingMetrics,
+            compute_oversmoothing_for_mask, normalize_metrics,
+        )
+
+        cls = ClassificationMetrics(average='macro')
+        os_eval = OversmoothingMetrics(device=device)
+
+        model.eval()
+        result = {}
+
+        for split_name in ('train', 'val', 'test'):
+            sub = d.get(f'{split_name}_subgraph')
+            if sub is None:
+                continue
+
+            with torch.no_grad():
+                preds = model(sub).argmax(dim=1)
+                emb = model.get_embeddings(sub)
+
+            all_true = torch.ones(sub.num_nodes, dtype=torch.bool, device=device)
+            cls_metrics = cls.compute_all_metrics(preds, sub.y)
+            os_metrics = compute_oversmoothing_for_mask(
+                os_eval, emb, sub.edge_index, all_true,
+            )
+
+            result[f'{split_name}_cls'] = cls_metrics
+            if split_name == 'test':
+                result['test_oversmoothing'] = normalize_metrics(os_metrics)
+            elif split_name == 'train':
+                result['train_oversmoothing_final'] = normalize_metrics(os_metrics)
+            elif split_name == 'val':
+                result['val_oversmoothing_final'] = normalize_metrics(os_metrics)
+
+        # Build global predictions for noise-split metrics
+        full_data = d['data_for_training']
+        global_preds = torch.zeros(full_data.num_nodes, dtype=torch.long, device=device)
+        for split_name in ('train', 'val', 'test'):
+            sub = d.get(f'{split_name}_subgraph')
+            if sub is not None:
+                with torch.no_grad():
+                    sp = model(sub).argmax(dim=1)
+                global_preds[sub.original_node_ids] = sp
+
+        result['_predictions'] = global_preds
+        return result
 
     # ── flops ─────────────────────────────────────────────────────────────
     #
@@ -340,8 +423,9 @@ class BaseTrainer(ABC):
         """
         predictions = result_dict.pop('_predictions', None)
 
-        # Noise-split train metrics (derived from y_noisy vs y_original)
-        noise_split = {}
+        # Noise-split metrics (derived from y_noisy vs y_original)
+        train_noise_split = {}
+        val_noise_split = {}
         d = self.init_data
         data_obj = d.get('data')
         if (predictions is not None
@@ -349,18 +433,27 @@ class BaseTrainer(ABC):
                 and hasattr(data_obj, 'y_original')
                 and hasattr(data_obj, 'y_noisy')):
             train_mask = d.get('train_mask', getattr(d.get('data_for_training'), 'train_mask', None))
+            val_mask = d.get('val_mask', getattr(d.get('data_for_training'), 'val_mask', None))
             if train_mask is not None:
-                noise_split = compute_train_noise_split_cls(
+                train_noise_split = compute_train_noise_split_cls(
                     predictions, data_obj.y_noisy, data_obj.y_original, train_mask)
+            if val_mask is not None:
+                val_noise_split = compute_val_noise_split_cls(
+                    predictions, data_obj.y_noisy, data_obj.y_original, val_mask)
 
         return {
             'test_cls': result_dict.get('test_cls', dict(ZERO_CLS)),
             'train_cls': result_dict.get('train_cls', dict(ZERO_CLS)),
             'val_cls': result_dict.get('val_cls', dict(ZERO_CLS)),
-            **{k: noise_split.get(k, dict(ZERO_CLS)) for k in (
+            **{k: train_noise_split.get(k, dict(ZERO_CLS)) for k in (
                 'train_only_clean_cls',
                 'train_only_mislabelled_factual_cls',
                 'train_only_mislabelled_corrected_cls',
+            )},
+            **{k: val_noise_split.get(k, dict(ZERO_CLS)) for k in (
+                'val_only_clean_cls',
+                'val_only_mislabelled_factual_cls',
+                'val_only_mislabelled_corrected_cls',
             )},
             'test_oversmoothing': result_dict.get('test_oversmoothing', {}),
             'train_oversmoothing': (

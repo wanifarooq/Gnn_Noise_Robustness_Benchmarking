@@ -1,6 +1,6 @@
 seed: 42
 device: cpu
-num_runs: 2
+num_runs: 1
 
 dataset:
   name: cora
@@ -27,9 +27,14 @@ training:
   method: £[standard, positive_eigenvalues, gcod, nrgnn, pi_gnn, cr_gnn, community_defense, rtgnn, graphcleaner, unionnet, gnn_cleaner, erase, gnnguard]
   lr: 0.001
   weight_decay: 5e-4
-  epochs: 5           # keep low for local runs
+  epochs: 2           # keep low for local runs
   patience: 10
   oversmoothing_every: 1  # must be <= epochs to avoid NaN metrics
+  mode: inductive   # transductive or inductive
+  # batch_size: 512    # uncomment to enable mini-batch processing
+  # sampler: neighbor   # neighbor, cluster, graphsaint, or random_node
+  # sampler_params:     # sampler-specific parameters
+  #   num_neighbors: [15, 10]
 
 positive_eigenvalues_params:
   batch_size: 32

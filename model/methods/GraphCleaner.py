@@ -14,7 +14,7 @@ from cleanlab.count import estimate_latent, compute_confident_joint
 from model.evaluation import OversmoothingMetrics, ClassificationMetrics, compute_oversmoothing_for_mask
 from model.base import BaseTrainer
 from model.registry import register
-from model.methods.Standard import train_with_standard_loss
+
 
 
 class GraphCleanerNoiseDetector:
@@ -535,33 +535,13 @@ class GraphCleanerNoiseDetector:
 @register('graphcleaner')
 class GraphCleanerMethodTrainer(BaseTrainer):
     def train(self):
+        from methods.registry import get_helper
+        from training.training_loop import TrainingLoop
+
         d = self.init_data
-
-        self.config.setdefault('training', {})['oversmoothing_every'] = d['oversmoothing_every']
-        detector = GraphCleanerNoiseDetector(
-            configuration_params=self.config,
-            computation_device=d['device'],
-            random_seed=d['seed'],
-        )
-        clean_train_mask, _cleaned_data = detector.clean_training_data(
-            graph_data=d['data_for_training'],
-            neural_network_model=d['backbone_model'],
-            num_classes=d['num_classes'],
-        )
-
-        final_training_data = d['data'].clone()
-        final_training_data.train_mask = clean_train_mask
-        final_training_data.y = d['data_for_training'].y.clone()
-        noisy_indices_after = (
-            (~clean_train_mask & d['data_for_training'].train_mask)
-            .nonzero(as_tuple=True)[0]
-        )
-
-        return train_with_standard_loss(
-            d['backbone_model'], final_training_data,
-            noisy_indices_after, device=d['device'],
-            total_epochs=d['epochs'], lr=d['lr'],
-            weight_decay=d['weight_decay'], patience=d['patience'],
-            oversmoothing_every=d['oversmoothing_every'],
-            log_epoch_fn=self.log_epoch,
+        self._helper = get_helper('graphcleaner')
+        self._loop = TrainingLoop(self._helper, log_epoch_fn=self.log_epoch)
+        return self._loop.run(
+            d['backbone_model'], d['data_for_training'],
+            self.config, d['device'], d,
         )

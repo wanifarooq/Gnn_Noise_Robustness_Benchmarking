@@ -1,15 +1,12 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.optim as optim
-import time
 from copy import deepcopy
 from torch_geometric.nn import GCNConv
 from torch_geometric.utils import from_scipy_sparse_matrix, to_scipy_sparse_matrix, negative_sampling
 from torch_geometric.data import Data
 import numpy as np
 import scipy.sparse as sp
-from collections import defaultdict
 
 from model.gnns import GCN, GIN, GAT, GATv2, GPS
 from model.evaluation import (OversmoothingMetrics, ClassificationMetrics,
@@ -443,194 +440,6 @@ class RTGNN(nn.Module):
             
             return performance_metrics, train_oversmoothing, val_oversmoothing
 
-    def train_model(self, log_epoch_fn=None):
-
-
-        per_epochs_oversmoothing = defaultdict(list)
-        per_epochs_val_oversmoothing = defaultdict(list)
-
-        training_start_time = time.time()
-
-        node_features = self.node_features.to(self.device)
-        node_labels = torch.as_tensor(self.node_labels, dtype=torch.long, device=self.device)
-        train_indices = self.train_node_indices
-        val_indices = self.val_node_indices
-        test_indices = self.test_node_indices
-        adjacency_matrix = self.adjacency_matrix
-        
-        edge_indices, _ = from_scipy_sparse_matrix(adjacency_matrix)
-        edge_indices = edge_indices.to(self.device)
-        node_features = node_features.to(self.device)
-        
-        # Generate KNN edges
-        knn_edge_indices = self._generate_knn_edge_connections(node_features, edge_indices, train_indices)
-        
-        optimizer = optim.Adam(self.parameters(), lr=self.training_config.lr, 
-                             weight_decay=self.training_config.weight_decay)
-
-        # Early stopping
-        early_stop_patience = getattr(self.training_config, 'patience', 8)
-        patience_counter = 0
-        best_validation_loss = float('inf') #best_validation_accuracy = 0.0
-        
-        print(f"Starting RTGNN training with {self.gnn_backbone.upper()}")
-        
-        for epoch in range(self.training_config.epochs):
-            self.train()
-            optimizer.zero_grad(set_to_none=True)
-            
-            node_representations, reconstruction_loss = self.structure_estimator(node_features, edge_indices)
-            
-            # Combine original and KNN edges
-            if knn_edge_indices.size(1) > 0:
-                combined_edge_indices = torch.cat([edge_indices, knn_edge_indices], dim=1)
-                base_edge_weights = torch.cat([
-                    torch.ones(edge_indices.size(1)),
-                    torch.zeros(knn_edge_indices.size(1))
-                ]).to(self.device)
-            else:
-                combined_edge_indices = edge_indices
-                base_edge_weights = torch.ones(edge_indices.size(1)).to(self.device)
-            
-            # Compute adaptive edge weights
-            adaptive_edge_weights = self.structure_estimator.compute_adaptive_edge_weights(
-                combined_edge_indices, node_representations, base_edge_weights
-            )
-            
-            # Filter edges with positive weights
-            valid_edge_mask = adaptive_edge_weights > 0
-            final_edge_indices = combined_edge_indices[:, valid_edge_mask]
-            final_edge_weights = adaptive_edge_weights[valid_edge_mask]
-
-            # Always store current epoch's edges for checkpoint capture
-            self._current_edges = final_edge_indices
-            self._current_weights = final_edge_weights
-
-            first_branch_output, second_branch_output = self.dual_branch_predictor(
-                node_features, final_edge_indices, final_edge_weights
-            )
-
-            main_prediction_loss = self.adaptive_loss_function(
-                first_branch_output[train_indices], second_branch_output[train_indices], 
-                node_labels[train_indices], epoch
-            )
-
-            pseudo_labeling_loss = self._compute_pseudo_labeling_loss(first_branch_output, second_branch_output, train_indices)
-
-            # Compute intra-view regularization loss
-            intraview_consistency_loss = self.intraview_regularizer(
-                first_branch_output, second_branch_output, final_edge_indices, final_edge_weights, train_indices
-            )
-
-            # Combine all loss components
-            total_training_loss = (main_prediction_loss +
-                          self.training_config.alpha * reconstruction_loss +
-                          pseudo_labeling_loss +
-                          self.training_config.co_lambda * intraview_consistency_loss)
-
-            total_training_loss.backward()
-            optimizer.step()
-
-            os_entry = None
-            if epoch % self.training_config.oversmoothing_every == 0 or epoch == self.training_config.epochs - 1:
-                performance_metrics, train_oversmoothing, val_oversmoothing = self.evaluate_model_performance(
-                    node_features, final_edge_indices, final_edge_weights, node_labels, train_indices, val_indices
-                )
-
-                for key, value in train_oversmoothing.items():
-                    per_epochs_oversmoothing[key].append(value)
-                for key, value in val_oversmoothing.items():
-                    per_epochs_val_oversmoothing[key].append(value)
-
-                train_de_edir = train_oversmoothing['EDir'] if train_oversmoothing else 0.0
-                train_de_traditional = train_oversmoothing['EDir_traditional'] if train_oversmoothing else 0.0
-                train_eproj = train_oversmoothing['EProj'] if train_oversmoothing else 0.0
-                train_mad = train_oversmoothing['MAD'] if train_oversmoothing else 0.0
-                train_num_rank = train_oversmoothing['NumRank'] if train_oversmoothing else 0.0
-                train_eff_rank = train_oversmoothing['Erank'] if train_oversmoothing else 0.0
-
-                val_de_edir = val_oversmoothing['EDir'] if val_oversmoothing else 0.0
-                val_de_traditional = val_oversmoothing['EDir_traditional'] if val_oversmoothing else 0.0
-                val_eproj = val_oversmoothing['EProj'] if val_oversmoothing else 0.0
-                val_mad = val_oversmoothing['MAD'] if val_oversmoothing else 0.0
-                val_num_rank = val_oversmoothing['NumRank'] if val_oversmoothing else 0.0
-                val_eff_rank = val_oversmoothing['Erank'] if val_oversmoothing else 0.0
-
-                print(f"Epoch {epoch:03d} | Train Acc: {performance_metrics['train_acc']:.4f}, Val Acc: {performance_metrics['val_acc']:.4f} | "
-                      f"Train F1: {performance_metrics['train_f1']:.4f}, Val F1: {performance_metrics['val_f1']:.4f}")
-                print(f"Train DE: {train_de_edir:.4f}, Val DE: {val_de_edir:.4f} | "
-                      f"Train DE_trad: {train_de_traditional:.4f}, Val DE_trad: {val_de_traditional:.4f} | "
-                      f"Train EProj: {train_eproj:.4f}, Val EProj: {val_eproj:.4f} | "
-                      f"Train MAD: {train_mad:.4f}, Val MAD: {val_mad:.4f} | "
-                      f"Train NumRank: {train_num_rank:.4f}, Val NumRank: {val_num_rank:.4f} | "
-                      f"Train Erank: {train_eff_rank:.4f}, Val Erank: {val_eff_rank:.4f}")
-                os_entry = {'train': dict(train_oversmoothing), 'val': dict(val_oversmoothing)}
-            else:
-                performance_metrics, _, _ = self.evaluate_model_performance(
-                    node_features, final_edge_indices, final_edge_weights, node_labels, train_indices, val_indices
-                )
-                print(f"Epoch {epoch:03d} | Train Acc: {performance_metrics['train_acc']:.4f}, Val Acc: {performance_metrics['val_acc']:.4f} | "
-                      f"Train F1: {performance_metrics['train_f1']:.4f}, Val F1: {performance_metrics['val_f1']:.4f}")
-
-            # Early stopping
-            current_val_loss = performance_metrics['val_loss'].item() #current_val_accuracy = performance_metrics['val_acc']
-            is_best = current_val_loss < best_validation_loss
-            if is_best:
-                best_validation_loss = current_val_loss
-                patience_counter = 0
-            else:
-                patience_counter += 1
-
-            if log_epoch_fn is not None:
-                log_epoch_fn(epoch, float(performance_metrics['train_loss']),
-                             float(performance_metrics['val_loss']),
-                             performance_metrics['train_acc'], performance_metrics['val_acc'],
-                             train_f1=performance_metrics['train_f1'],
-                             val_f1=performance_metrics['val_f1'],
-                             oversmoothing=os_entry, is_best=is_best,
-                             train_predictions=performance_metrics['_predictions'])
-
-            if patience_counter >= early_stop_patience:
-                print(f"Early stopping at epoch {epoch} (no improvement for {early_stop_patience} epochs)")
-                break
-
-        total_training_time = time.time() - training_start_time
-
-        if test_indices is not None:
-            best_edges = self.best_model_state['edges'] if self.best_model_state else final_edge_indices
-            best_weights = self.best_model_state['weights'] if self.best_model_state else final_edge_weights
-            final_performance_metrics, final_train_oversmoothing, final_val_oversmoothing, final_test_oversmoothing = self.evaluate_model_performance(
-                node_features, best_edges, best_weights,
-                node_labels, train_indices, val_indices, test_indices
-            )
-            
-            print(f"\nTraining completed in {total_training_time:.2f}s")
-            print(f"Test Loss: {final_performance_metrics['test_loss']:.4f} | Test Acc: {final_performance_metrics['test_acc']:.4f} | Test F1: {final_performance_metrics['test_f1']:.4f}")
-            print("Final Oversmoothing Metrics:")
-            
-            if final_train_oversmoothing is not None:
-                print(f"Train: EDir: {final_train_oversmoothing['EDir']:.4f}, EDir_traditional: {final_train_oversmoothing['EDir_traditional']:.4f}, "
-                      f"EProj: {final_train_oversmoothing['EProj']:.4f}, MAD: {final_train_oversmoothing['MAD']:.4f}, "
-                      f"NumRank: {final_train_oversmoothing['NumRank']:.4f}, Erank: {final_train_oversmoothing['Erank']:.4f}")
-            
-            if final_val_oversmoothing is not None:
-                print(f"Val: EDir: {final_val_oversmoothing['EDir']:.4f}, EDir_traditional: {final_val_oversmoothing['EDir_traditional']:.4f}, "
-                      f"EProj: {final_val_oversmoothing['EProj']:.4f}, MAD: {final_val_oversmoothing['MAD']:.4f}, "
-                      f"NumRank: {final_val_oversmoothing['NumRank']:.4f}, Erank: {final_val_oversmoothing['Erank']:.4f}")
-            
-            if final_test_oversmoothing is not None:
-                print(f"Test: EDir: {final_test_oversmoothing['EDir']:.4f}, EDir_traditional: {final_test_oversmoothing['EDir_traditional']:.4f}, "
-                      f"EProj: {final_test_oversmoothing['EProj']:.4f}, MAD: {final_test_oversmoothing['MAD']:.4f}, "
-                      f"NumRank: {final_test_oversmoothing['NumRank']:.4f}, Erank: {final_test_oversmoothing['Erank']:.4f}")
-            
-        print(f"Training completed! Best validation loss: {best_validation_loss:.4f}") #print(f"Training completed! Best validation accuracy: {best_validation_accuracy:.4f}")
-        return {
-            'train_oversmoothing': dict(per_epochs_oversmoothing),
-            'val_oversmoothing': dict(per_epochs_val_oversmoothing),
-            'stopped_at_epoch': epoch,
-        }
-
-
     def evaluate_final_performance(self, clean_labels=None):
 
         node_features = self.node_features.to(self.device)
@@ -764,61 +573,46 @@ class RTGNN(nn.Module):
 @register('rtgnn')
 class RTGNNMethodTrainer(BaseTrainer):
 
-    def _create_rtgnn(self):
-        """Build an RTGNN instance (includes data preparation)."""
-        d = self.init_data
-        local_config = deepcopy(self.config)
-        local_config.setdefault('training', {})['oversmoothing_every'] = d['oversmoothing_every']
-        rtgnn_config = RTGNNTrainingConfig(local_config)
-        return RTGNN(
-            training_config=rtgnn_config,
-            device=d['device'],
-            gnn_backbone=self.config['model']['name'].lower(),
-            data_for_training=d['data_for_training'],
-        ).to(d['device'])
-
     def train(self):
-        self._rtgnn = self._create_rtgnn()
-        return self._rtgnn.train_model(log_epoch_fn=self.log_epoch)
+        from methods.registry import get_helper
+        from training.training_loop import TrainingLoop
+        d = self.init_data
+        self._helper = get_helper('rtgnn')
+        self._loop = TrainingLoop(self._helper, log_epoch_fn=self.log_epoch)
+        result = self._loop.run(
+            d['backbone_model'], d['data_for_training'],
+            self.config, d['device'], d,
+        )
+        self._rtgnn = self._loop.state['rtgnn']
+        return result
+
+    def _get_state(self):
+        if hasattr(self, '_loop') and hasattr(self._loop, '_state'):
+            return self._loop.state
+        return None
 
     def get_checkpoint_state(self) -> dict:
-        rtgnn = self._rtgnn
-        state = {
-            'dual_branch_predictor': deepcopy(rtgnn.dual_branch_predictor.state_dict()),
-            'structure_estimator': deepcopy(rtgnn.structure_estimator.state_dict()),
-        }
-        if hasattr(rtgnn, '_current_edges') and rtgnn._current_edges is not None:
-            state['edges'] = rtgnn._current_edges.clone()
-            state['weights'] = rtgnn._current_weights.clone()
-        return state
+        return self._helper.get_checkpoint_state(self._get_state())
 
-    def _setup_for_eval(self, state):
-        """Create the RTGNN instance so load_checkpoint_state can access it."""
-        self._rtgnn = self._create_rtgnn()
+    def _setup_for_eval(self, checkpoint_state):
+        """Create state via helper so load_checkpoint_state can populate it."""
+        from methods.registry import get_helper
+        from training.training_loop import TrainingLoop
+        d = self.init_data
+        if not hasattr(self, '_helper'):
+            self._helper = get_helper('rtgnn')
+        self._loop = TrainingLoop(self._helper)
+        state = self._helper.setup(
+            d['backbone_model'], d['data_for_training'],
+            self.config, d['device'], d,
+        )
+        self._loop._state = state
+        self._rtgnn = state['rtgnn']
 
     def load_checkpoint_state(self, state):
         if not hasattr(self, '_rtgnn'):
             self._setup_for_eval(state)
-        # Note: save/load are intentionally asymmetric.
-        # get_checkpoint_state saves raw components (predictor, structure_estimator, edges, weights).
-        # load_checkpoint_state must also reconstruct rtgnn.best_model_state, which is the
-        # internal structure that evaluate_final_performance() reads — it is never populated
-        # during normal training, only via this path.
-        # structure_estimator is restored for resume-training completeness but is not needed
-        # for evaluation (evaluate_final_performance uses the predictor directly + stored edges).
-        # The 'model' key in best_model_state is not read by evaluate_final_performance();
-        # it only serves as a non-None sentinel to signal that the model has been trained.
-        rtgnn = self._rtgnn
-        rtgnn.dual_branch_predictor.load_state_dict(state['dual_branch_predictor'])
-        rtgnn.structure_estimator.load_state_dict(state['structure_estimator'])
-        rtgnn.best_model_state = {
-            'model': state['dual_branch_predictor'],
-            'edges': state.get('edges'),
-            'weights': state.get('weights'),
-        }
-        # Sync _current_* so a subsequent get_checkpoint_state() roundtrips correctly
-        rtgnn._current_edges = state.get('edges')
-        rtgnn._current_weights = state.get('weights')
+        self._helper.load_checkpoint_state(self._get_state(), state)
 
     def profile_flops(self):
         from util.profiling import profile_model_flops

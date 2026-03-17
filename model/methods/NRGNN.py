@@ -1,4 +1,3 @@
-import time
 import numpy as np
 from copy import deepcopy
 import torch
@@ -8,10 +7,9 @@ import torch.optim as optim
 import scipy.sparse as sp
 from torch_geometric.utils import from_scipy_sparse_matrix, to_undirected, negative_sampling, to_scipy_sparse_matrix
 from torch_geometric.nn import GCNConv
-from collections import defaultdict
 
 from model.evaluation import (OversmoothingMetrics, ClassificationMetrics,
-                              compute_oversmoothing_for_mask, evaluate_model,
+                              evaluate_model,
                               DEFAULT_OVERSMOOTHING, ZERO_CLS)
 from model.base import BaseTrainer
 from model.registry import register
@@ -325,211 +323,6 @@ class NRGNN:
         
         return confident_edge_index, confident_nodes.cpu().numpy()
 
-    def train_single_epoch(self, epoch, train_indices, validation_indices, log_epoch_fn=None):
-        start_time = time.time()
-        
-        self.main_model.train()
-        self.node_predictor.train()
-        self.edge_weight_estimator.train()
-        
-        self.optimizer.zero_grad(set_to_none=True)
-        
-        # Get node representations and reconstruction loss
-        edge_weights = torch.ones(self.original_edge_index.shape[1], device=self.device, dtype=torch.float32)
-        node_representations = self.edge_weight_estimator.forward(self.node_features, self.original_edge_index, edge_weights)
-        reconstruction_loss = self.compute_reconstruction_loss(self.original_edge_index, node_representations)
-        
-        if self.potential_edge_index is not None and self.potential_edge_index.shape[1] > 0:
-            potential_weights = self.compute_estimated_edge_weights(self.potential_edge_index, node_representations)
-            predictor_edges = torch.cat([self.original_edge_index, self.potential_edge_index], dim=1)
-            predictor_weights = torch.cat([
-                torch.ones(self.original_edge_index.shape[1], device=self.device), 
-                potential_weights
-            ], dim=0)
-        else:
-            predictor_edges = self.original_edge_index
-            predictor_weights = torch.ones(self.original_edge_index.shape[1], device=self.device)
-
-        predictor_logits = self.node_predictor.forward(self.node_features, predictor_edges, predictor_weights)
-        
-        if self.best_predictions is None:
-            with torch.no_grad():
-                prediction_probs = F.softmax(predictor_logits, dim=1)
-                self.best_predictions = prediction_probs.detach().to(self.device)
-                self.confident_edge_index, self.confident_node_indices = self.identify_confident_edges(self.best_predictions)
-        
-        if self.confident_edge_index is not None and self.confident_edge_index.shape[1] > 0:
-            confident_weights = self.compute_estimated_edge_weights(self.confident_edge_index, node_representations)
-            main_model_weights = torch.cat([predictor_weights, confident_weights], dim=0)
-            main_model_edges = torch.cat([predictor_edges, self.confident_edge_index], dim=1)
-        else:
-            main_model_weights = predictor_weights
-            main_model_edges = predictor_edges
-
-        main_model_output = self.main_model.forward(self.node_features, main_model_edges, main_model_weights)
-        
-        # Compute losses
-        predictor_loss = F.cross_entropy(predictor_logits[train_indices], self.node_labels[train_indices])
-        main_model_loss = F.cross_entropy(main_model_output[train_indices], self.node_labels[train_indices])
-        
-        # Consistency loss for confident nodes
-        if len(self.confident_node_indices) > 0:
-            main_model_probs = F.softmax(main_model_output, dim=1)
-            main_model_probs = torch.clamp(main_model_probs, 1e-8, 1 - 1e-8)
-            
-            consistency_loss = F.kl_div(
-                torch.log(main_model_probs[self.confident_node_indices]), 
-                self.best_predictions[self.confident_node_indices], 
-                reduction='batchmean'
-            )
-        else:
-            consistency_loss = torch.tensor(0.0, device=self.device, requires_grad=True)
-
-        # Total loss
-        total_loss = (main_model_loss + predictor_loss + 
-                     self.reconstruction_weight * reconstruction_loss + 
-                     self.consistency_weight * consistency_loss)
-
-        if torch.isnan(total_loss):
-            print(f"NaN detected! Skipping epoch {epoch}")
-            return
-
-        total_loss.backward()
-        self.optimizer.step()
-
-        metrics = self.evaluate_epoch(epoch, train_indices, validation_indices,
-                          predictor_edges, predictor_weights,
-                          main_model_edges, main_model_weights,
-                          total_loss, start_time, log_epoch_fn=log_epoch_fn)
-        return metrics
-
-    def evaluate_epoch(self, epoch, train_indices, validation_indices,
-                      predictor_edges, predictor_weights,
-                      main_model_edges, main_model_weights,
-                      total_loss, start_time, log_epoch_fn=None):
-        train_metrics = {}
-        val_metrics = {}
-        self.main_model.eval()
-        self.node_predictor.eval()
-        self.edge_weight_estimator.eval()
-
-        with torch.no_grad():
-
-            predictor_output = self.node_predictor.forward(self.node_features, predictor_edges, predictor_weights)
-            predictor_probabilities = F.softmax(predictor_output, dim=1)
-
-            main_model_output = self.main_model.forward(self.node_features, main_model_edges, main_model_weights.detach())
-
-            # Compute metrics
-            train_loss = F.cross_entropy(main_model_output[train_indices], self.node_labels[train_indices]).item()
-            validation_loss = F.cross_entropy(main_model_output[validation_indices], self.node_labels[validation_indices]).item()
-
-            train_accuracy = self.compute_accuracy(main_model_output[train_indices], self.node_labels[train_indices])
-            validation_accuracy = self.compute_accuracy(main_model_output[validation_indices], self.node_labels[validation_indices])
-            predictor_validation_accuracy = self.compute_accuracy(predictor_probabilities[validation_indices], self.node_labels[validation_indices])
-
-            train_f1 = self.cls_evaluator.compute_f1(main_model_output[train_indices].argmax(dim=1), self.node_labels[train_indices])
-            validation_f1 = self.cls_evaluator.compute_f1(main_model_output[validation_indices].argmax(dim=1), self.node_labels[validation_indices])
-
-            os_entry = None
-            if epoch % self.oversmoothing_every == 0 or epoch == self.max_epochs - 1:
-                # Compute oversmoothing metrics
-                train_mask = self._indices_to_mask(train_indices, self.node_features.shape[0])
-                val_mask = self._indices_to_mask(validation_indices, self.node_features.shape[0])
-                main_model_embeddings = self.main_model.get_embeddings(self.node_features, main_model_edges, main_model_weights.detach())
-                train_oversmoothing = compute_oversmoothing_for_mask(self.oversmoothing_evaluator, main_model_embeddings, main_model_edges, train_mask)
-                validation_oversmoothing = compute_oversmoothing_for_mask(self.oversmoothing_evaluator, main_model_embeddings, main_model_edges, val_mask)
-
-                if train_oversmoothing is not None:
-                    self.oversmoothing_metrics_history['train'].append(train_oversmoothing)
-                if validation_oversmoothing is not None:
-                    self.oversmoothing_metrics_history['val'].append(validation_oversmoothing)
-
-                train_metrics = train_oversmoothing if train_oversmoothing else {}
-                val_metrics = validation_oversmoothing if validation_oversmoothing else {}
-
-                os_entry = {'train': dict(train_metrics), 'val': dict(val_metrics)}
-
-                print(f"Epoch {epoch:03d} | Train Loss: {train_loss:.4f}, Val Loss: {validation_loss:.4f} | "
-                        f"Train Acc: {train_accuracy:.4f}, Val Acc: {validation_accuracy:.4f} | "
-                        f"Train F1: {train_f1:.4f}, Val F1: {validation_f1:.4f}")
-                print(f"Train DE: {train_metrics.get('EDir', 0.0):.4f}, Val DE: {val_metrics.get('EDir', 0.0):.4f} | "
-                        f"Train DE_trad: {train_metrics.get('EDir_traditional', 0.0):.4f}, Val DE_trad: {val_metrics.get('EDir_traditional', 0.0):.4f} | "
-                        f"Train EProj: {train_metrics.get('EProj', 0.0):.4f}, Val EProj: {val_metrics.get('EProj', 0.0):.4f} | "
-                        f"Train MAD: {train_metrics.get('MAD', 0.0):.4f}, Val MAD: {val_metrics.get('MAD', 0.0):.4f} | "
-                        f"Train NumRank: {train_metrics.get('NumRank', 0.0):.4f}, Val NumRank: {val_metrics.get('NumRank', 0.0):.4f} | "
-                        f"Train Erank: {train_metrics.get('Erank', 0.0):.4f}, Val Erank: {val_metrics.get('Erank', 0.0):.4f}")
-                print(f"  Pred Val Acc: {predictor_validation_accuracy:.4f} | Add Nodes: {len(self.confident_node_indices)} | "
-                        f"Time: {time.time() - start_time:.2f}s")
-
-            # Always store current epoch's edges for checkpoint capture
-            self._current_edge_indices = main_model_edges
-            self._current_edge_weights = main_model_weights.detach()
-
-            if predictor_validation_accuracy > self.best_predictor_accuracy:
-                self.best_predictor_accuracy = predictor_validation_accuracy
-                self.best_predictor_edge_weights = predictor_weights.detach()
-                self.best_predictions = predictor_probabilities.detach()
-
-                self.confident_edge_index, self.confident_node_indices = self.identify_confident_edges(self.best_predictions)
-
-            is_best = validation_loss < self.best_validation_loss
-            if is_best:
-                self.best_validation_loss = validation_loss
-                self.best_edge_weights = main_model_weights.detach()
-                self.best_edge_indices = main_model_edges
-                self.early_stopping_counter = 0
-            else:
-                self.early_stopping_counter += 1
-
-            if log_epoch_fn is not None:
-                log_epoch_fn(epoch, train_loss, validation_loss,
-                             float(train_accuracy), float(validation_accuracy),
-                             train_f1=train_f1,
-                             val_f1=validation_f1,
-                             oversmoothing=os_entry, is_best=is_best,
-                             train_predictions=main_model_output.argmax(dim=1))
-
-            # Early stopping
-            if self.early_stopping_counter >= self.patience:
-                print(f"Early stopping at epoch {epoch+1}, best val loss: {self.best_validation_loss:.4f}")
-                self._should_stop = True
-        return train_metrics, val_metrics
-
-    def fit(self, features, adjacency_matrix, labels, train_indices, validation_indices,
-            log_epoch_fn=None):
-
-        self.prepare_training_data(features, adjacency_matrix, labels, train_indices)
-        self.train_indices = train_indices
-        self.validation_indices = validation_indices
-
-        self.initialize_model_components()
-        per_epochs_oversmoothing = defaultdict(list)
-        per_epochs_val_oversmoothing = defaultdict(list)
-
-        start_time = time.time()
-        self._should_stop = False
-        for epoch in range(self.max_epochs):
-            results = self.train_single_epoch(epoch, train_indices, validation_indices,
-                                              log_epoch_fn=log_epoch_fn)
-            if results is not None:
-                train_metrics, val_metrics = results
-                for key, value in train_metrics.items():
-                    per_epochs_oversmoothing[key].append(value)
-                for key, value in val_metrics.items():
-                    per_epochs_val_oversmoothing[key].append(value)
-            if self._should_stop:
-                break
-
-        total_training_time = time.time() - start_time
-        print(f"\nTraining completed in {total_training_time:.2f}s")
-
-        return {
-            'train_oversmoothing': dict(per_epochs_oversmoothing),
-            'val_oversmoothing': dict(per_epochs_val_oversmoothing),
-            'stopped_at_epoch': epoch,
-        }
-
     def test(self, test_indices):
         self.main_model.eval()
         self.node_predictor.eval()
@@ -576,83 +369,48 @@ class NRGNN:
 @register('nrgnn')
 class NRGNNMethodTrainer(BaseTrainer):
 
-    def _create_nrgnn(self):
-        """Build an NRGNN instance, prepare data, and extract split indices."""
-        d = self.init_data
-        nrgnn_config = {
-            'lr': d['lr'],
-            'weight_decay': d['weight_decay'],
-            'epochs': d['epochs'],
-            'patience': d['patience'],
-            'nrgnn_params': self.config.get('nrgnn_params', {}),
-            'oversmoothing_every': d['oversmoothing_every'],
-        }
-
-        nrgnn = NRGNN(nrgnn_config, d['device'], base_model=d['backbone_model'])
-
-        adj = to_scipy_sparse_matrix(
-            d['data_for_training'].edge_index,
-            num_nodes=d['data_for_training'].x.size(0),
-        )
-        train_idx = d['train_mask'].nonzero(as_tuple=True)[0].cpu().numpy()
-        val_idx = d['val_mask'].nonzero(as_tuple=True)[0].cpu().numpy()
-        test_idx = d['test_mask'].nonzero(as_tuple=True)[0].cpu().numpy()
-
-        return nrgnn, adj, train_idx, val_idx, test_idx
-
     def train(self):
+        from methods.registry import get_helper
+        from training.training_loop import TrainingLoop
         d = self.init_data
-        self._nrgnn, adj, train_idx, val_idx, self._test_idx = self._create_nrgnn()
-
-        return self._nrgnn.fit(
-            d['data_for_training'].x.to(d['device']),
-            adj,
-            d['data_for_training'].y.to(d['device']),
-            train_idx, val_idx,
-            log_epoch_fn=self.log_epoch,
+        self._helper = get_helper('nrgnn')
+        self._loop = TrainingLoop(self._helper, log_epoch_fn=self.log_epoch)
+        result = self._loop.run(
+            d['backbone_model'], d['data_for_training'],
+            self.config, d['device'], d,
         )
+        self._nrgnn = self._loop.state['nrgnn']
+        self._test_idx = d['test_mask'].nonzero(as_tuple=True)[0].cpu().numpy()
+        return result
+
+    def _get_state(self):
+        if hasattr(self, '_loop') and hasattr(self._loop, '_state'):
+            return self._loop.state
+        return None
 
     def get_checkpoint_state(self) -> dict:
-        nrgnn = self._nrgnn
-        state = {
-            'main_model': deepcopy(nrgnn.main_model.state_dict()),
-            'node_predictor': deepcopy(nrgnn.node_predictor.state_dict()),
-            'edge_weight_estimator': deepcopy(nrgnn.edge_weight_estimator.state_dict()),
-        }
-        if hasattr(nrgnn, '_current_edge_indices') and nrgnn._current_edge_indices is not None:
-            state['edge_indices'] = nrgnn._current_edge_indices.clone()
-            state['edge_weights'] = nrgnn._current_edge_weights.clone()
-        return state
+        return self._helper.get_checkpoint_state(self._get_state())
 
-    def _setup_for_eval(self, state):
-        """Create the NRGNN instance so load_checkpoint_state can access it."""
+    def _setup_for_eval(self, checkpoint_state):
+        """Create state via helper so load_checkpoint_state can populate it."""
+        from methods.registry import get_helper
+        from training.training_loop import TrainingLoop
         d = self.init_data
-        self._nrgnn, adj, train_idx, val_idx, self._test_idx = self._create_nrgnn()
-
-        self._nrgnn.prepare_training_data(
-            d['data_for_training'].x.to(d['device']),
-            adj,
-            d['data_for_training'].y.to(d['device']),
-            train_idx,
+        if not hasattr(self, '_helper'):
+            self._helper = get_helper('nrgnn')
+        self._loop = TrainingLoop(self._helper)
+        state = self._helper.setup(
+            d['backbone_model'], d['data_for_training'],
+            self.config, d['device'], d,
         )
-        self._nrgnn.train_indices = train_idx
-        self._nrgnn.validation_indices = val_idx
-        self._nrgnn.initialize_model_components()
+        self._loop._state = state
+        self._nrgnn = state['nrgnn']
+        self._test_idx = d['test_mask'].nonzero(as_tuple=True)[0].cpu().numpy()
 
     def load_checkpoint_state(self, state):
         if not hasattr(self, '_nrgnn'):
             self._setup_for_eval(state)
-        nrgnn = self._nrgnn
-        nrgnn.main_model.load_state_dict(state['main_model'])
-        nrgnn.node_predictor.load_state_dict(state['node_predictor'])
-        if 'edge_weight_estimator' in state:
-            nrgnn.edge_weight_estimator.load_state_dict(state['edge_weight_estimator'])
-        # Set the edge attributes that test() uses
-        nrgnn.best_edge_indices = state.get('edge_indices')
-        nrgnn.best_edge_weights = state.get('edge_weights')
-        # Sync _current_* so a subsequent get_checkpoint_state() roundtrips correctly
-        nrgnn._current_edge_indices = state.get('edge_indices')
-        nrgnn._current_edge_weights = state.get('edge_weights')
+        self._helper.load_checkpoint_state(self._get_state(), state)
 
     def profile_flops(self):
         from util.profiling import profile_model_flops
