@@ -742,7 +742,10 @@ Mean/std computed across all runs:
     "val":   { "..." },
     "train_only_clean": { "..." },
     "train_only_mislabelled_factual": { "..." },
-    "train_only_mislabelled_corrected": { "..." }
+    "train_only_mislabelled_corrected": { "..." },
+    "val_only_clean": { "..." },
+    "val_only_mislabelled_factual": { "..." },
+    "val_only_mislabelled_corrected": { "..." }
   },
   "oversmoothing": {
     "test":  { "NumRank": [45.0, 46.0, ...], "Erank": [...], "EDir": [...], "..." },

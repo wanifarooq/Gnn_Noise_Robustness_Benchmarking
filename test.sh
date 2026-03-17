@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 #
-# Smoke tests for all 13 training methods.
-# Runs each method end-to-end on Cora (5 epochs, uniform noise 0.2).
+# Run the full test suite (99 tests across 13 methods).
 #
 # Usage:
-#   ./test.sh                        # run all 13 methods
+#   ./test.sh                        # run all tests
 #   ./test.sh -k standard            # run a single method by name
 #   ./test.sh -k "nrgnn or rtgnn"    # run several methods
 #   ./test.sh -x                     # stop on first failure
@@ -14,4 +13,4 @@
 # All arguments are forwarded to pytest.
 #
 set -euo pipefail
-python -m pytest tests/test_smoke.py -v "$@"
+python -m pytest tests/ -v "$@"
