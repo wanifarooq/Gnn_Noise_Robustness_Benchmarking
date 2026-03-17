@@ -1,5 +1,5 @@
 seed: 42
-device: cpu
+device: cuda
 num_runs: 1
 
 dataset:
@@ -24,13 +24,13 @@ model:
   pe_dim: 8
 
 training:
-  method: £[standard, positive_eigenvalues, gcod, nrgnn, pi_gnn, cr_gnn, community_defense, rtgnn, graphcleaner, unionnet, gnn_cleaner, erase, gnnguard]
+  method: £[standard, positive_eigenvalues]
   lr: 0.001
   weight_decay: 5e-4
-  epochs: 5          # keep low for local runs
+  epochs: 1500          # keep low for local runs
   patience: 10
   oversmoothing_every: 1  # must be <= epochs to avoid NaN metrics
-  mode: inductive   # transductive or inductive
+  mode: transductive   # transductive or inductive
   # batch_size: 512    # uncomment to enable mini-batch processing
   # sampler: neighbor   # neighbor, cluster, graphsaint, or random_node
   # sampler_params:     # sampler-specific parameters

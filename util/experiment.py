@@ -3,6 +3,7 @@
 import os
 import time
 
+import numpy as np
 import torch
 from torch_geometric.data import Data
 
@@ -46,48 +47,48 @@ def initialize_experiment(config, run_id=1):
 
     data.y_original = data.y.clone()
 
-    train_labels = data.y[train_mask]
-    train_features = data.x[train_mask] if config['noise'].get('type', 'clean') == 'instance' else None
-    train_indices = train_mask.nonzero(as_tuple=True)[0]
-
     noise_type = config['noise'].get('type', 'clean')
     noise_rate = config['noise'].get('rate', 0)
-    noise_base_seed = config['noise'].get('seed', 42) + run_id * 10
+    noise_seed = config['noise'].get('seed', 42) + run_id * 10
 
-    noisy_train_labels, relative_noisy_indices = noise_operation(
-        train_labels,
-        train_features,
+    # Apply noise once to all train+val labels jointly (single annotation
+    # process), then split back.  This mirrors real-world settings where
+    # noisy labels come from one labelling pass, not two independent ones.
+    trainval_mask = train_mask | val_mask
+    trainval_labels = data.y[trainval_mask]
+    trainval_features = data.x[trainval_mask] if noise_type == 'instance' else None
+    trainval_indices = trainval_mask.nonzero(as_tuple=True)[0]
+
+    noisy_trainval_labels, relative_noisy_trainval_indices = noise_operation(
+        trainval_labels,
+        trainval_features,
         num_classes,
         noise_type=noise_type,
         noise_rate=noise_rate,
-        noise_seed=noise_base_seed,
-        idx_train=train_indices,
+        noise_seed=noise_seed,
+        idx_train=trainval_indices,
         debug=True
     )
 
-    global_noisy_indices = train_indices[relative_noisy_indices]
+    global_noisy_trainval_indices = trainval_indices[relative_noisy_trainval_indices]
 
-    # Apply noise to validation labels (same type/rate, different seed)
-    val_labels = data.y[val_mask]
-    val_features = data.x[val_mask] if noise_type == 'instance' else None
-    val_indices = val_mask.nonzero(as_tuple=True)[0]
-
-    noisy_val_labels, relative_noisy_val_indices = noise_operation(
-        val_labels,
-        val_features,
-        num_classes,
-        noise_type=noise_type,
-        noise_rate=noise_rate,
-        noise_seed=noise_base_seed + 1,  # different seed for independent noise
-        idx_train=val_indices,
-        debug=False
-    )
-
-    global_noisy_val_indices = val_indices[relative_noisy_val_indices]
-
+    # Write noisy labels back to full graph, then extract train/val portions.
     data.y_noisy = data.y.clone()
-    data.y_noisy[train_mask] = noisy_train_labels
-    data.y_noisy[val_mask] = noisy_val_labels
+    data.y_noisy[trainval_mask] = noisy_trainval_labels
+
+    train_indices = train_mask.nonzero(as_tuple=True)[0]
+    val_indices = val_mask.nonzero(as_tuple=True)[0]
+    noisy_train_labels = data.y_noisy[train_mask]
+    noisy_val_labels = data.y_noisy[val_mask]
+
+    # Identify which noisy indices fall in train vs val
+    global_noisy_set = set(trainval_indices[relative_noisy_trainval_indices].cpu().numpy())
+    train_indices_np = train_indices.cpu().numpy()
+    val_indices_np = val_indices.cpu().numpy()
+    relative_noisy_indices = np.array([i for i, idx in enumerate(train_indices_np) if idx in global_noisy_set])
+    relative_noisy_val_indices = np.array([i for i, idx in enumerate(val_indices_np) if idx in global_noisy_set])
+    global_noisy_indices = train_indices[relative_noisy_indices] if len(relative_noisy_indices) > 0 else train_indices[:0]
+    global_noisy_val_indices = val_indices[relative_noisy_val_indices] if len(relative_noisy_val_indices) > 0 else val_indices[:0]
 
     print(f"Run {run_id}: Applied noise to {len(relative_noisy_indices)} training samples out of {train_mask.sum().item()}")
     print(f"Run {run_id}: Applied noise to {len(relative_noisy_val_indices)} validation samples out of {val_mask.sum().item()}")
