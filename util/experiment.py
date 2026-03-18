@@ -230,7 +230,7 @@ def run_experiment(config, run_id=1, *, checkpoint_path=None, eval_only=False,
         # Prefer the best-epoch checkpoint from run_dir if available
         best_ckpt_src = None
         if run_dir and trainer.best_epoch is not None:
-            fname = f"epoch_{trainer.best_epoch:03d}_valloss_{trainer.best_val_loss:.4f}.pt"
+            fname = f"epoch_{trainer.best_epoch:03d}_valacc_{trainer.best_val_acc:.4f}.pt"
             candidate = os.path.join(run_dir, fname)
             if os.path.exists(candidate):
                 best_ckpt_src = candidate

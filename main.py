@@ -167,11 +167,26 @@ def run_benchmarking(base_folder='results', config_path=DEFAULT_CONFIG,
             run_dir = os.path.join(experiment_dir, f"run_{run}")
             ckpt_path = (os.path.join(experiment_dir, f"best_run_{run}.pt")
                          if save_checkpoint or run_eval_only else None)
-            run_result = run_experiment(
-                sweep_config, run_id=run,
-                checkpoint_path=ckpt_path, eval_only=run_eval_only,
-                run_dir=run_dir if not run_eval_only else None,
-            )
+            try:
+                run_result = run_experiment(
+                    sweep_config, run_id=run,
+                    checkpoint_path=ckpt_path, eval_only=run_eval_only,
+                    run_dir=run_dir if not run_eval_only else None,
+                )
+            except torch.cuda.OutOfMemoryError:
+                print("[OOM] CUDA out of memory — falling back to CPU for this run")
+                torch.cuda.empty_cache()
+                gc.collect()
+                # Retry on CPU
+                cpu_config = {**sweep_config, 'device': 'cpu'}
+                run_result = run_experiment(
+                    cpu_config, run_id=run,
+                    checkpoint_path=ckpt_path, eval_only=run_eval_only,
+                    run_dir=run_dir if not run_eval_only else None,
+                )
+                # Clear any leftover GPU state before next CUDA run
+                torch.cuda.empty_cache()
+
             if run_codecarbon:
                 tracker.stop()
 

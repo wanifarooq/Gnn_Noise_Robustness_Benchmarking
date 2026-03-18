@@ -1,6 +1,6 @@
 """GCOD method helper — Graph Centroid Outlier Discounting.
 
-Wraps the existing GraphCentroidOutlierDiscounting loss module from
+Wraps the GraphCentroidOutlierDiscounting loss module from
 model.methods.GCOD_loss into the shared TrainingLoop + MethodHelper system.
 
 GCOD uses mini-batch training with NeighborLoader, dual optimizers
@@ -41,18 +41,21 @@ class GCODHelper(MethodHelper):
 
         backbone_model = backbone_model.to(device)
 
-        # Determine embedding dim
-        if hasattr(backbone_model, 'out_channels'):
-            embedding_dim = backbone_model.out_channels
-        else:
-            embedding_dim = num_classes
+        # Determine embedding dim by probing the backbone
+        backbone_model.eval()
+        with torch.no_grad():
+            _probe = backbone_model.get_embeddings(data.to(device))
+            embedding_dim = _probe.shape[1]
+        del _probe
 
-        # GCOD loss module (holds uncertainty_params + class centroids)
+        # GCOD loss module (holds uncertainty u + centroid buffers)
         gcod_loss = GraphCentroidOutlierDiscounting(
             num_classes=num_classes,
             device=device,
             num_samples=data.num_nodes,
             embedding_dim=embedding_dim,
+            sample_labels=data.y,
+            train_mask=data.train_mask,
         ).to(device)
 
         # Dual optimizers
@@ -60,7 +63,7 @@ class GCODHelper(MethodHelper):
             backbone_model.parameters(), lr=lr, weight_decay=weight_decay
         )
         uncertainty_optimizer = torch.optim.Adam(
-            [gcod_loss.uncertainty_params], lr=uncertainty_lr
+            [gcod_loss.u], lr=uncertainty_lr
         )
 
         # NeighborLoaders for mini-batch training / evaluation
@@ -118,6 +121,9 @@ class GCODHelper(MethodHelper):
         )
         training_accuracy = state['training_accuracy']
 
+        # --- Recompute centroids at start of each epoch ---
+        gcod_loss_fn.recompute_centroids()
+
         # --- Mini-batch training ---
         model.train()
         gcod_loss_fn.train()
@@ -128,8 +134,12 @@ class GCODHelper(MethodHelper):
         for batch in train_loader:
             batch = batch.to(device)
 
-            model_outputs = model(batch)
-            node_embeddings = model_outputs
+            # Get embeddings (detached — for similarity/centroid storage)
+            with torch.no_grad():
+                embeddings = model.get_embeddings(batch)
+
+            # Get logits (with gradient — for L1 and L3)
+            model_logits = model(batch)
 
             batch_train_mask = batch.train_mask[:batch.batch_size]
             target_nodes = batch_train_mask.nonzero(as_tuple=True)[0]
@@ -146,31 +156,24 @@ class GCODHelper(MethodHelper):
             # GCOD loss components
             gcod_total_loss, loss_l1, loss_l2, loss_l3 = gcod_loss_fn(
                 batch_indices=original_indices,
-                model_predictions=model_outputs[target_nodes],
-                true_labels_onehot=true_labels_onehot,
-                node_embeddings=node_embeddings[target_nodes],
+                model_logits=model_logits[target_nodes],
+                label_onehot=true_labels_onehot,
+                embeddings_detached=embeddings[target_nodes],
                 training_accuracy=training_accuracy,
-                true_labels=true_labels,
             )
 
-            # Model backward + step (L1 + L3)
+            # Model backward + step (L1 + L3 — u is detached in both)
             model_optimizer.zero_grad(set_to_none=True)
             model_loss = loss_l1 + loss_l3
             model_loss.backward(retain_graph=True)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             model_optimizer.step()
 
-            # Uncertainty backward + step (L2)
+            # Uncertainty backward + step (L2 — model output detached)
             uncertainty_optimizer.zero_grad(set_to_none=True)
             loss_l2.backward()
-            torch.nn.utils.clip_grad_norm_(
-                [gcod_loss_fn.uncertainty_params], max_norm=1.0
-            )
+            torch.nn.utils.clip_grad_norm_([gcod_loss_fn.u], max_norm=1.0)
             uncertainty_optimizer.step()
-
-            # Clamp uncertainty to [0, 1]
-            with torch.no_grad():
-                gcod_loss_fn.uncertainty_params.clamp_(0, 1)
 
             total_loss += gcod_total_loss.item()
             num_batches += 1

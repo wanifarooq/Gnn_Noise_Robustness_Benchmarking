@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import numpy as np
 
 from model.evaluation import ClassificationMetrics
 from model.base import BaseTrainer
@@ -51,140 +52,152 @@ def evaluate_ce_only(model, data_loader, device='cuda', mask_name='val'):
 
     return {'ce_loss': avg_ce_loss, 'accuracy': accuracy, 'f1': f1}
 
+
 class GraphCentroidOutlierDiscounting(nn.Module):
-    
-    def __init__(self, num_classes, device, num_samples, embedding_dim=None):
+    """GCOD loss — matches the reference ncodLoss implementation.
+
+    Uses stored per-sample embeddings from the previous epoch to compute
+    class centroids, similarity-based soft targets, and three loss components:
+        L1: Soft-label cross-entropy with uncertainty-adjusted predictions
+        L2: MSE between (predicted_onehot + uncertainty) and true labels
+        L3: Batch-wide KL divergence between alignment and uncertainty
+    """
+
+    def __init__(self, num_classes, device, num_samples, embedding_dim=None,
+                 sample_labels=None, train_mask=None):
         super().__init__()
         self.num_classes = num_classes
         self.device = device
         self.num_samples = num_samples
         self.embedding_dim = embedding_dim if embedding_dim is not None else num_classes
-        
-        self.uncertainty_params = nn.Parameter(torch.zeros(num_samples, dtype=torch.float32))
-        
-        # Class centroids for soft label computation
-        self.class_centroids = nn.Parameter(torch.randn(num_classes, self.embedding_dim) * 0.1)
-        
-        self.register_buffer('class_counts', torch.zeros(num_classes))
 
-    def update_class_centroids(self, node_embeddings, node_labels, global_indices):
-        # Update class centroids based on current embeddings
+        # Uncertainty parameter — shape (N, 1), init with very small values
+        self.u = nn.Parameter(torch.empty(num_samples, 1, dtype=torch.float32))
+        nn.init.normal_(self.u, mean=1e-8, std=1e-9)
+
+        # Buffers for centroid computation (not trainable)
+        self.register_buffer(
+            'prevSimilarity', torch.rand(num_samples, self.embedding_dim))
+        self.register_buffer(
+            'masterVector', torch.rand(num_classes, self.embedding_dim))
+
+        # Pre-compute per-class bins of training node indices
+        if sample_labels is not None and train_mask is not None:
+            train_idx = train_mask.nonzero(as_tuple=True)[0].cpu().numpy()
+            labels_np = (sample_labels.cpu().numpy()
+                         if isinstance(sample_labels, torch.Tensor)
+                         else np.asarray(sample_labels))
+            self.bins = []
+            for i in range(num_classes):
+                mask = labels_np[train_idx] == i
+                self.bins.append(train_idx[mask].copy())
+        else:
+            self.bins = None
+
+    def recompute_centroids(self):
+        """Recompute class centroids from stored embeddings (call once per epoch)."""
+        if self.bins is None:
+            return
+
         with torch.no_grad():
-            for class_id in range(self.num_classes):
-                class_mask = (node_labels == class_id)
-                if class_mask.sum() > 0:
-                    class_embeddings = node_embeddings[class_mask]
-                    current_centroid = class_embeddings.mean(dim=0)
-                    
-                    # Update with momentum
-                    momentum = min(0.9, self.class_counts[class_id] / (self.class_counts[class_id] + 1))
-                    self.class_centroids[class_id] = momentum * self.class_centroids[class_id] + (1 - momentum) * current_centroid
-                    self.class_counts[class_id] += class_mask.sum().float()
-        
-    def compute_soft_labels(self, node_embeddings, true_labels_onehot):
-        # Compute soft labels based on similarity to class centroids
-        # Normalize embeddings and centroids
-        normalized_embeddings = F.normalize(node_embeddings, p=2, dim=1)
-        normalized_centroids = F.normalize(self.class_centroids, p=2, dim=1)
-        
-        # Compute similarities
-        similarities = torch.mm(normalized_embeddings, normalized_centroids.t())
-        
-        # Temperature scaling
-        temperature = 1.0
-        soft_labels = F.softmax(similarities / temperature, dim=1)
-        
-        interpolation_weight = 0.7
-        soft_labels = interpolation_weight * true_labels_onehot + (1 - interpolation_weight) * soft_labels
-        
-        return soft_labels
-    
-    def compute_loss_l1(self, batch_indices, model_predictions, true_labels_onehot, 
-                        node_embeddings, training_accuracy):
+            for i in range(self.num_classes):
+                if len(self.bins[i]) == 0:
+                    continue
+                class_u = self.u.detach()[self.bins[i]]
+                bottomK = max(int(len(class_u)), 1)
+                important_idx = torch.topk(
+                    class_u.view(-1), bottomK, largest=False, dim=0,
+                )[1]
+                self.masterVector[i] = torch.mean(
+                    self.prevSimilarity[self.bins[i]][important_idx], dim=0,
+                )
 
-        batch_uncertainty = self.uncertainty_params[batch_indices]
-        
-        # Compute soft labels
-        soft_labels = self.compute_soft_labels(node_embeddings, true_labels_onehot)
-        
-        # Create diagonal matrix from uncertainty parameters
-        uncertainty_diag = batch_uncertainty.unsqueeze(1) * true_labels_onehot
+    def compute_loss_l1(self, u_masked, model_logits, label_onehot,
+                        embeddings_detached, training_accuracy):
+        """L1: soft-label CE with uncertainty-adjusted predictions."""
+        eps = 1e-4
 
-        modified_predictions = model_predictions + training_accuracy * uncertainty_diag
+        # Normalized centroid matrix
+        mv_norm = self.masterVector.norm(p=2, dim=1, keepdim=True).clamp(min=1e-8)
+        mv_t = self.masterVector.div(mv_norm).t()
 
-        loss_l1 = F.cross_entropy(modified_predictions, soft_labels)
-        
-        return loss_l1
-    
-    def compute_loss_l2(self, batch_indices, model_predictions, true_labels_onehot):
+        # Similarity between normalized embeddings and centroids
+        out_norm = embeddings_detached.norm(p=2, dim=1, keepdim=True).clamp(min=1e-8)
+        out_normalized = embeddings_detached.div(out_norm)
+        similarity = torch.mm(out_normalized, mv_t)
+        similarity = similarity * label_onehot
+        similarity = similarity * (similarity > 0.0).float()
 
-        batch_uncertainty = self.uncertainty_params[batch_indices]
+        # Prediction: softmax + uncertainty offset (u detached for L1)
+        prediction = F.softmax(model_logits, dim=1)
+        prediction = torch.clamp(
+            prediction + training_accuracy * u_masked.detach(),
+            min=eps, max=1.0,
+        )
 
-        predicted_onehot = F.one_hot(
-            model_predictions.argmax(dim=1),
-            num_classes=self.num_classes
-        ).float()
-        
-        # Diagonal uncertainty matrix
-        uncertainty_diag = batch_uncertainty.unsqueeze(1) * true_labels_onehot
-        
-        diff = predicted_onehot + uncertainty_diag - true_labels_onehot
-        loss_l2 = (diff.pow(2).sum(dim=1).mean()) / self.num_classes
-        
-        return loss_l2
-        
-    def compute_loss_l3(self, batch_indices, model_predictions, true_labels_onehot, 
+        loss = torch.mean(-torch.sum(similarity * torch.log(prediction), dim=1))
+        return loss
+
+    def compute_loss_l2(self, u_masked, model_logits, label_onehot):
+        """L2: MSE between (predicted_onehot + u) and true labels."""
+        label_one_hot = self._soft_to_hard(model_logits.detach())
+        mse_loss = F.mse_loss(
+            label_one_hot + u_masked, label_onehot, reduction='sum',
+        ) / len(label_onehot)
+        return mse_loss
+
+    def compute_loss_l3(self, batch_indices, model_logits, label_onehot,
                         training_accuracy):
+        """L3: batch-wide categorical KL between alignment and uncertainty."""
+        alignment = torch.sum(model_logits * label_onehot, dim=1)
+        u_detached = self.u[batch_indices].detach().view(-1)
 
-        batch_uncertainty = self.uncertainty_params[batch_indices]
-        
-        # Compute alignment between predictions and true labels
-        alignment = torch.sum(model_predictions * true_labels_onehot, dim=1)
-        
-        # First distribution
-        p_logits = alignment
-        p_probs = torch.sigmoid(p_logits)
-        
-        # Second distribution
-        clamped_uncertainty = torch.clamp(batch_uncertainty, min=1e-8, max=1-1e-8)
-        q_logits = -torch.log(clamped_uncertainty)
-        q_probs = torch.sigmoid(q_logits)
-        
-        # KL divergence
-        eps = 1e-8
-        kl_div = (p_probs * torch.log((p_probs + eps) / (q_probs + eps)) + 
-                  (1 - p_probs) * torch.log((1 - p_probs + eps) / (1 - q_probs + eps)))
-        
-        kl_divergence = kl_div.mean()
-        
-        loss_l3 = (1 - training_accuracy) * kl_divergence
-        
-        loss_l3 = torch.clamp(loss_l3, min=0.0)
-        
-        return loss_l3
-    
-    def forward(self, batch_indices, model_predictions, true_labels_onehot, 
-                node_embeddings, training_accuracy, true_labels=None):
-        
-        if true_labels is not None:
-            self.update_class_centroids(node_embeddings, true_labels, batch_indices)
-        
+        kl_loss = F.kl_div(
+            F.log_softmax(alignment, dim=0),
+            F.softmax(-torch.log(u_detached.clamp(min=1e-8)), dim=0),
+            reduction='batchmean',
+        )
+
+        loss = (1 - training_accuracy) * kl_loss
+        return loss
+
+    def forward(self, batch_indices, model_logits, label_onehot,
+                embeddings_detached, training_accuracy):
+        """Compute GCOD loss components.
+
+        Args:
+            batch_indices: Global node indices for this batch.
+            model_logits: Model output logits (with gradient).
+            label_onehot: One-hot encoded labels.
+            embeddings_detached: Detached node embeddings from backbone.
+            training_accuracy: Current epoch training accuracy.
+        """
+        # Store current embeddings for next epoch's centroid computation
+        with torch.no_grad():
+            self.prevSimilarity[batch_indices] = embeddings_detached
+
+        # u masked by label — only true-class position (used in L1 and L2)
+        u = self.u[batch_indices]       # (batch, 1)
+        u_masked = u * label_onehot     # (batch, C)
+
         loss_l1 = self.compute_loss_l1(
-            batch_indices, model_predictions, true_labels_onehot, 
-            node_embeddings, training_accuracy
+            u_masked, model_logits, label_onehot,
+            embeddings_detached, training_accuracy,
         )
-        
-        loss_l2 = self.compute_loss_l2(
-            batch_indices, model_predictions, true_labels_onehot
-        )
-        
+        loss_l2 = self.compute_loss_l2(u_masked, model_logits, label_onehot)
         loss_l3 = self.compute_loss_l3(
-            batch_indices, model_predictions, true_labels_onehot, training_accuracy
+            batch_indices, model_logits, label_onehot, training_accuracy,
         )
-        
-        total_loss = loss_l1 + loss_l3
-        
+
+        total_loss = loss_l1 + loss_l2 + loss_l3
         return total_loss, loss_l1, loss_l2, loss_l3
+
+    def _soft_to_hard(self, x):
+        """Convert logits to one-hot of predicted class."""
+        with torch.no_grad():
+            return torch.zeros(
+                len(x), self.num_classes, device=self.device,
+            ).scatter_(1, x.argmax(dim=1).view(-1, 1), 1)
 
 
 @register('gcod')

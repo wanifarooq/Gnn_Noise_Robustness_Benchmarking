@@ -270,18 +270,18 @@ class TestLogEpoch:
         dummy = _make_dummy()
         dummy.log_epoch(1, 1.5, 1.2, 0.3, 0.35, is_best=True)
         assert dummy.best_epoch == 1
-        assert dummy.best_val_loss == 1.2
+        assert dummy.best_val_acc == 0.35
 
         dummy.log_epoch(2, 1.0, 0.8, 0.5, 0.55, is_best=True)
         assert dummy.best_epoch == 2
-        assert dummy.best_val_loss == 0.8
+        assert dummy.best_val_acc == 0.55
 
     def test_log_epoch_not_best_keeps_previous(self):
         dummy = _make_dummy()
         dummy.log_epoch(1, 1.5, 1.2, 0.3, 0.35, is_best=True)
         dummy.log_epoch(2, 1.0, 1.5, 0.5, 0.55, is_best=False)
         assert dummy.best_epoch == 1
-        assert dummy.best_val_loss == 1.2
+        assert dummy.best_val_acc == 0.35
 
     def test_log_epoch_oversmoothing_null(self):
         dummy = _make_dummy()
@@ -302,7 +302,7 @@ class TestLogEpoch:
             'compute_info': dict(_ZERO_COMPUTE_INFO),
         })
         dummy.log_epoch(5, 1.0, 0.5, 0.6, 0.65, is_best=True)
-        expected_file = tmp_path / "epoch_005_valloss_0.5000.pt"
+        expected_file = tmp_path / "epoch_005_valacc_0.6500.pt"
         assert expected_file.exists()
 
     def test_log_epoch_checkpoint_saved_every_epoch(self, tmp_path):
@@ -329,7 +329,7 @@ class TestLogEpoch:
         })
         dummy.epoch_log.append({'epoch': 1, 'train_loss': 1.5, 'val_loss': 1.2})
         dummy.best_epoch = 1
-        dummy.best_val_loss = 1.2
+        dummy.best_val_acc = 0.35
         dummy.save_training_log(
             run_id=1, config={'seed': 42}, duration=5.0,
             stopped_at_epoch=10, final_result={'test_cls': {}}

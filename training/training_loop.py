@@ -174,8 +174,8 @@ class TrainingLoop:
                 train_f1 = cls_evaluator.compute_f1(pred[train_idx], data.y[train_idx])
                 val_f1 = cls_evaluator.compute_f1(pred[val_idx], data.y[val_idx])
 
-            # 4. Early stopping
-            should_stop = early_stopping.step(val_loss, epoch)
+            # 4. Early stopping (based on validation accuracy)
+            should_stop = early_stopping.step(val_acc, epoch)
             is_best = early_stopping.is_best
 
             # 5. Oversmoothing metrics (periodic)

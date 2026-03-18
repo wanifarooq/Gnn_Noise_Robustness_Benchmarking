@@ -30,7 +30,7 @@ class BaseTrainer(ABC):
         self.config = config
         self.epoch_log: list = []
         self.best_epoch: int | None = None
-        self.best_val_loss: float = float('inf')
+        self.best_val_acc: float = -float('inf')
         self._best_checkpoint_state = None
 
     # ── epoch logging ───────────────────────────────────────────────────
@@ -121,11 +121,11 @@ class BaseTrainer(ABC):
             state = self.get_checkpoint_state()
             if is_best:
                 self.best_epoch = epoch
-                self.best_val_loss = float(val_loss) if val_loss is not None else 0.0
+                self.best_val_acc = float(val_acc) if val_acc is not None else 0.0
                 self._best_checkpoint_state = state
             if should_save_disk:
-                vl = float(val_loss) if val_loss is not None else 0.0
-                fname = f"epoch_{epoch:03d}_valloss_{vl:.4f}.pt"
+                va = float(val_acc) if val_acc is not None else 0.0
+                fname = f"epoch_{epoch:03d}_valacc_{va:.4f}.pt"
                 torch.save(state, os.path.join(run_dir, fname))
 
     def save_training_log(self, run_id, config, duration, stopped_at_epoch,
@@ -137,7 +137,7 @@ class BaseTrainer(ABC):
 
         best_ckpt = None
         if self.best_epoch is not None:
-            best_ckpt = f"epoch_{self.best_epoch:03d}_valloss_{self.best_val_loss:.4f}.pt"
+            best_ckpt = f"epoch_{self.best_epoch:03d}_valacc_{self.best_val_acc:.4f}.pt"
 
         training_params = {
             'method': self.init_data.get('method'),
@@ -155,7 +155,7 @@ class BaseTrainer(ABC):
             'duration_seconds': round(duration, 4),
             'stopped_at_epoch': stopped_at_epoch,
             'best_epoch': self.best_epoch,
-            'best_val_loss': self.best_val_loss if self.best_epoch is not None else None,
+            'best_val_acc': self.best_val_acc if self.best_epoch is not None else None,
             'best_checkpoint': best_ckpt,
             'epoch_log': self.epoch_log,
             'final_result': final_result,

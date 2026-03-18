@@ -2,32 +2,32 @@
 
 
 class EarlyStopping:
-    """Track validation loss and signal when to stop training.
+    """Track validation accuracy and signal when to stop training.
 
     Args:
         patience: Number of epochs without improvement before stopping.
-        min_delta: Minimum decrease in val_loss to count as improvement.
+        min_delta: Minimum increase in val_acc to count as improvement.
     """
 
     def __init__(self, patience: int = 20, min_delta: float = 0.0):
         self.patience = patience
         self.min_delta = min_delta
-        self.best_val_loss: float = float('inf')
+        self.best_val_acc: float = -float('inf')
         self.counter: int = 0
         self.best_epoch: int | None = None
 
-    def step(self, val_loss: float, epoch: int) -> bool:
+    def step(self, val_acc: float, epoch: int) -> bool:
         """Update state and return True if training should stop.
 
         Args:
-            val_loss: Current epoch's validation loss.
+            val_acc: Current epoch's validation accuracy.
             epoch: Current epoch index (0-based).
 
         Returns:
             True if patience is exhausted, False otherwise.
         """
-        if val_loss < self.best_val_loss - self.min_delta:
-            self.best_val_loss = val_loss
+        if val_acc > self.best_val_acc + self.min_delta:
+            self.best_val_acc = val_acc
             self.counter = 0
             self.best_epoch = epoch
             return False
