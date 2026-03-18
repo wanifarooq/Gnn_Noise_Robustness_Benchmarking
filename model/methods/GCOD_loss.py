@@ -104,7 +104,7 @@ class GraphCentroidOutlierDiscounting(nn.Module):
                 if len(self.bins[i]) == 0:
                     continue
                 class_u = self.u.detach()[self.bins[i]]
-                bottomK = max(int(len(class_u)), 1)
+                bottomK = max(int(0.5 * len(class_u)), 1)
                 important_idx = torch.topk(
                     class_u.view(-1), bottomK, largest=False, dim=0,
                 )[1]
@@ -135,6 +135,7 @@ class GraphCentroidOutlierDiscounting(nn.Module):
             min=eps, max=1.0,
         )
 
+        # similarity_weighted = 0.8 * similarity + 0.2 * label_onehot
         loss = torch.mean(-torch.sum(similarity * torch.log(prediction), dim=1))
         return loss
 
@@ -158,7 +159,7 @@ class GraphCentroidOutlierDiscounting(nn.Module):
             reduction='batchmean',
         )
 
-        loss = (1 - training_accuracy) * kl_loss
+        loss = (1- training_accuracy) * kl_loss
         return loss
 
     def forward(self, batch_indices, model_logits, label_onehot,
@@ -188,6 +189,7 @@ class GraphCentroidOutlierDiscounting(nn.Module):
         loss_l3 = self.compute_loss_l3(
             batch_indices, model_logits, label_onehot, training_accuracy,
         )
+
 
         total_loss = loss_l1 + loss_l2 + loss_l3
         return total_loss, loss_l1, loss_l2, loss_l3
