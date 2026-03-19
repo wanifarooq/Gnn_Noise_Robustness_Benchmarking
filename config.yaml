@@ -1,6 +1,6 @@
 seed: 42
 device: cuda
-num_runs: 1
+num_runs: 2
 
 dataset:
   name: cora
@@ -24,7 +24,7 @@ model:
   pe_dim: 8
 
 training:
-  method: gcod
+  method: £[gcod, standard, positive_eigenvalues]
   lr: 0.001
   weight_decay: 5e-4
   epochs: 1500          # keep low for local runs
