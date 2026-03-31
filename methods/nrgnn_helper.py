@@ -148,9 +148,10 @@ class NRGNNHelper(MethodHelper):
             main_probs = torch.clamp(
                 F.softmax(main_output, dim=1), 1e-8, 1 - 1e-8,
             )
+            # N-2 Fix: detach best_predictions to stop gradient flow into the historical prediction buffer
             consistency_loss = F.kl_div(
                 torch.log(main_probs[nrgnn.confident_node_indices]),
-                nrgnn.best_predictions[nrgnn.confident_node_indices],
+                nrgnn.best_predictions[nrgnn.confident_node_indices].detach(),
                 reduction='batchmean',
             )
         else:

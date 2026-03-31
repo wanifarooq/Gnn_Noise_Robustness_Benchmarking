@@ -168,10 +168,12 @@ class PiGnnHelper(MethodHelper):
                 importance[neg_mask] = 1 - sig_pred[neg_mask]
                 importance = importance.view(adj_target.size(0), adj_target.size(1))
 
+                # P-1 Fix: Removed .detach(). Gradients must flow through 'importance' 
+                # to the MI model during the main classification backward pass.
                 weighted = F.binary_cross_entropy_with_logits(
                     main_link, adj_target,
                     pos_weight=pos_weight, reduction='none',
-                ) * importance.detach()
+                ) * importance
                 ctx_loss = loss_norm * weighted.mean()
             else:
                 ctx_loss = loss_norm * F.binary_cross_entropy_with_logits(
@@ -181,6 +183,9 @@ class PiGnnHelper(MethodHelper):
         total_loss = cls_loss + ctx_loss
         total_loss.backward()
         main_opt.step()
+        # P-2 Fix: Step MI optimizer again because total_loss includes ctx_loss 
+        # which provides gradients to the MI model.
+        mi_opt.step()
 
         return {'train_loss': total_loss.item()}
 

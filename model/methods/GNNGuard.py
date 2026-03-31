@@ -139,15 +139,15 @@ class GNNGuardModel(nn.Module):
         attention_matrix = lil_matrix((num_nodes, num_nodes), dtype=np.float32)
         attention_matrix[source_nodes, target_nodes] = edge_similarities
         
-        # Remove self-loops if they exist
-        if attention_matrix[0, 0] == 1:
+        # G-2 Fix: Robust self-loop removal (check trace/diagonal sum)
+        if attention_matrix.diagonal().sum() > 0:
             attention_matrix -= sp.diags(attention_matrix.diagonal(), offsets=0, format="lil")
         
         # Normalize attention weights
         normalized_attention_matrix = normalize(attention_matrix, axis=1, norm='l1')
         
         # Add self-connections with adaptive weights
-        if normalized_attention_matrix[0, 0] == 0:
+        if normalized_attention_matrix.diagonal().sum() == 0:
             # Compute adaptive self-loop weights
             node_degrees = (normalized_attention_matrix != 0).sum(1).A1
             adaptive_self_weights = 1 / (node_degrees + 1)
@@ -160,7 +160,8 @@ class GNNGuardModel(nn.Module):
         attention_edge_weights = final_attention_matrix[attention_row_indices, attention_col_indices]
         attention_edge_weights = np.array(attention_edge_weights, dtype=np.float32, copy=True).flatten()
         
-        attention_edge_weights = np.exp(attention_edge_weights)
+        # G-1 Fix: Removed np.exp(). Weights are already L1-normalized probabilities.
+        # Applying exp() destroys the normalization and biases toward high-degree nodes.
         attention_weights_tensor = torch.tensor(attention_edge_weights, dtype=torch.float32).to(self.device)
         
         attention_edge_indices = torch.tensor(

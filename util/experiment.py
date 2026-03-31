@@ -27,7 +27,12 @@ def initialize_experiment(config, run_id=1):
     device = torch.device(config.get('device', 'cuda') if torch.cuda.is_available() else 'cpu')
 
     # Dataset
-    data, num_classes = load_dataset(config['dataset'].get('name', 'cora'), root=config['dataset'].get('root', './data'))
+    normalize = config['dataset'].get('normalize', True)
+    data, num_classes = load_dataset(
+        config['dataset'].get('name', 'cora'),
+        root=config['dataset'].get('root', './data'),
+        normalize=normalize
+    )
     if not isinstance(data, Data):
         data = data[0]
     data = data.to(device)
@@ -124,7 +129,8 @@ def initialize_experiment(config, run_id=1):
         heads=config['model'].get('heads', 8),
         n_layers=config['model'].get('n_layers', 2),
         dropout=config['model'].get('dropout', 0.5),
-        self_loop=config['model'].get('self_loop', True)
+        self_loop=config['model'].get('self_loop', True),
+        use_residual=config['model'].get('use_residual', False)
     ).to(device)
 
     compute_info = {

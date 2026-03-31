@@ -47,42 +47,47 @@ def contrastive_loss_original_style(z1, z2, tau):
 
 
 def dynamic_cross_entropy_loss_corrected(p1, p2, labels):
-    #Dynamic cross-entropy loss
+    # C-1 Fix: Use pseudo-labels for samples where both views agree (consistency).
+    # Also handle empty masks to avoid gradient issues.
     if len(labels) == 0:
-        return torch.tensor(0.0, device=p1.device, requires_grad=True)
-    
-    labels = labels.long()
-    pseudo_labels1 = p1.argmax(dim=1)
-    pseudo_labels2 = p2.argmax(dim=1)
-    consistent_mask = (pseudo_labels1 == pseudo_labels2)
-    
-    if consistent_mask.sum() > 0:
+        return (p1.sum() * 0.0)
 
-        loss = F.nll_loss(p1[consistent_mask], labels[consistent_mask])
-    else:
-        loss = torch.tensor(0.0, device=p1.device, requires_grad=True)
-    
-    return loss
+    labels = labels.long()
+    # Predictions (proxy for pseudo-labels)
+    pred1 = p1.argmax(dim=1)
+    pred2 = p2.argmax(dim=1)
+    consistent_mask = (pred1 == pred2)
+
+    # For inconsistent samples, we use noisy labels (p1/p2 use log_softmax already)
+    loss = F.nll_loss(p1, labels, reduction='none') + F.nll_loss(p2, labels, reduction='none')
+
+    # C-1 Implementation: For consistent samples, trust the model's agreement over the label
+    if consistent_mask.any():
+        pseudo_labels = pred1[consistent_mask]
+        loss[consistent_mask] = (
+            F.nll_loss(p1[consistent_mask], pseudo_labels, reduction='none') +
+            F.nll_loss(p2[consistent_mask], pseudo_labels, reduction='none')
+        )
+
+    return loss.mean() / 2.0
 
 
 def compute_cross_space_consistency_fixed(z1, z2, p1, p2, T, p_threshold):
-
-    # Similarity matrix
-    z1_expanded = z1.unsqueeze(1)
-    z2_expanded = z2.unsqueeze(0)
-    zm = torch.exp(F.cosine_similarity(z1_expanded, z2_expanded, dim=2) / T)
-    zm = zm.mean(dim=1)
+    # C-2 Fix: Use normalized similarities and avoid collapsing the matrix.
+    # Prediction similarity (Softmax-based)
+    p1_soft = F.softmax(p1 / T, dim=1)
+    p2_soft = F.softmax(p2 / T, dim=1)
+    pm = torch.mm(p1_soft, p2_soft.t())
     
-    # Similarity matrix
-    p1_expanded = p1.unsqueeze(1)
-    p2_expanded = p2.unsqueeze(0)
-    pm = torch.exp(F.cosine_similarity(p1_expanded, p2_expanded, dim=2) / T)
-    pm = pm.mean(dim=1)
+    # Projection similarity (L2-normalized cosine)
+    z1_norm = F.normalize(z1, p=2, dim=1)
+    z2_norm = F.normalize(z2, p=2, dim=1)
+    zm = torch.mm(z1_norm, z2_norm.t())
     
-    # Apply thresholding
+    # Apply thresholding to probability similarity to filter out low-confidence relations
     pm = torch.where(pm > p_threshold, pm, torch.zeros_like(pm))
     
-    # MSE loss
+    # MSE between the feature relationship space and prediction relationship space
     return F.mse_loss(zm, pm)
 
 

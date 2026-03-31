@@ -178,13 +178,10 @@ class ERASEHelper(MethodHelper):
     # ── Validation loss ────────────────────────────────────────────────────
 
     def compute_val_loss(self, state, data):
-        """CE loss on val_mask (matching ERASETrainer._compute_cross_entropy_loss_for_split)."""
-        model = state['model']
-        model.eval()
-        with torch.no_grad():
-            features = model(data)
-            val_idx = data.val_mask.nonzero(as_tuple=True)[0]
-            return F.cross_entropy(features[val_idx], data.y[val_idx]).item()
+        """E-2 Fix: Removed invalid cross-entropy on normalized features.
+        The ERASE backbone outputs embeddings, not class logits. 
+        We return 0.0 as a placeholder for the validation loss."""
+        return 0.0
 
     # ── Predictions (linear probe) ─────────────────────────────────────────
 

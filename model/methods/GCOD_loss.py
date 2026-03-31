@@ -64,22 +64,27 @@ class GraphCentroidOutlierDiscounting(nn.Module):
     """
 
     def __init__(self, num_classes, device, num_samples, embedding_dim=None,
-                 sample_labels=None, train_mask=None):
+                 sample_labels=None, train_mask=None, momentum=0.9, temperature=1.0,
+                 kl_start_epoch=2):
         super().__init__()
         self.num_classes = num_classes
         self.device = device
         self.num_samples = num_samples
         self.embedding_dim = embedding_dim if embedding_dim is not None else num_classes
+        self.momentum = momentum        # Improvement 2: Centroid momentum
+        self.temperature = temperature  # Improvement 3: Softmax temperature
+        self.kl_start_epoch = kl_start_epoch # Configurable delay
 
         # Uncertainty parameter — shape (N, 1), init with very small values
         self.u = nn.Parameter(torch.empty(num_samples, 1, dtype=torch.float32))
         nn.init.normal_(self.u, mean=1e-8, std=1e-9)
 
         # Buffers for centroid computation (not trainable)
+        # Improvement 1: Store L2-normalised features for scale-invariant similarity
         self.register_buffer(
-            'prevSimilarity', torch.rand(num_samples, self.embedding_dim))
+            'prevSimilarity', torch.zeros(num_samples, self.embedding_dim))
         self.register_buffer(
-            'masterVector', torch.rand(num_classes, self.embedding_dim))
+            'masterVector', torch.zeros(num_classes, self.embedding_dim))
 
         # Pre-compute per-class bins of training node indices
         if sample_labels is not None and train_mask is not None:
@@ -108,9 +113,19 @@ class GraphCentroidOutlierDiscounting(nn.Module):
                 important_idx = torch.topk(
                     class_u.view(-1), bottomK, largest=False, dim=0,
                 )[1]
-                self.masterVector[i] = torch.mean(
+                
+                # Improvement 1: Centroids are now averages of L2-normalised features
+                computed_centroid = torch.mean(
                     self.prevSimilarity[self.bins[i]][important_idx], dim=0,
                 )
+                computed_centroid = F.normalize(computed_centroid, p=2, dim=0)
+
+                # Improvement 2: Momentum-based update to prevent jitter
+                # new = momentum * old + (1-momentum) * current
+                self.masterVector[i] = (self.momentum * self.masterVector[i]) + \
+                                      (1 - self.momentum) * computed_centroid
+                # Ensure the master vector itself stays normalised
+                self.masterVector[i] = F.normalize(self.masterVector[i], p=2, dim=0)
 
     def compute_loss_l1(self, u_masked, model_logits, label_onehot,
                         embeddings_detached, training_accuracy):
@@ -150,7 +165,8 @@ class GraphCentroidOutlierDiscounting(nn.Module):
     def compute_loss_l3(self, batch_indices, model_logits, label_onehot,
                         training_accuracy):
         """L3: batch-wide categorical KL between alignment and uncertainty."""
-        alignment = torch.sum(model_logits * label_onehot, dim=1)
+        # Improvement 3: Use Temperature scaling to soften the alignment distribution
+        alignment = torch.sum(model_logits * label_onehot, dim=1) / self.temperature
         u_detached = self.u[batch_indices].detach().view(-1)
 
         kl_loss = F.kl_div(
@@ -163,7 +179,7 @@ class GraphCentroidOutlierDiscounting(nn.Module):
         return loss
 
     def forward(self, batch_indices, model_logits, label_onehot,
-                embeddings_detached, training_accuracy):
+                embeddings_detached, training_accuracy, epoch):
         """Compute GCOD loss components.
 
         Args:
@@ -172,24 +188,27 @@ class GraphCentroidOutlierDiscounting(nn.Module):
             label_onehot: One-hot encoded labels.
             embeddings_detached: Detached node embeddings from backbone.
             training_accuracy: Current epoch training accuracy.
+            epoch: Current training epoch.
         """
-        # Store current embeddings for next epoch's centroid computation
+        # Improvement 1: Store L2-normalised features for scale-invariant similarity
         with torch.no_grad():
-            self.prevSimilarity[batch_indices] = embeddings_detached
+            self.prevSimilarity[batch_indices] = F.normalize(embeddings_detached, p=2, dim=1)
 
         # u masked by label — only true-class position (used in L1 and L2)
         u = self.u[batch_indices]       # (batch, 1)
         u_masked = u * label_onehot     # (batch, C)
 
-        loss_l1 = self.compute_loss_l1(
-            u_masked, model_logits, label_onehot,
-            embeddings_detached, training_accuracy,
-        )
         loss_l2 = self.compute_loss_l2(u_masked, model_logits, label_onehot)
-        loss_l3 = self.compute_loss_l3(
-            batch_indices, model_logits, label_onehot, training_accuracy,
-        )
 
+        # GCOD Improvement: Implement configurable delay for L3 KL loss.
+        # Uncertainty u is initialized very small (1e-8), which makes -log(u) huge.
+        # We wait kl_start_epoch epochs for the model to stabilize before turning on KL.
+        if epoch >= self.kl_start_epoch:
+            loss_l3 = self.compute_loss_l3(
+                batch_indices, model_logits, label_onehot, training_accuracy,
+            )
+        else:
+            loss_l3 = torch.tensor(0.0, device=self.device, requires_grad=True)
 
         total_loss = loss_l1 + loss_l2 + loss_l3
         return total_loss, loss_l1, loss_l2, loss_l3

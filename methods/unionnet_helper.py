@@ -102,12 +102,17 @@ class UnionNETHelper(MethodHelper):
             if not train_mask[node_idx]:
                 continue
             neighbor_nodes = edge_index[1][edge_index[0] == node_idx]
-            if len(neighbor_nodes) >= k:
+            # U-2 Fix: Use available neighbors if count < k instead of skipping
+            if len(neighbor_nodes) > 0:
+                current_k = min(len(neighbor_nodes), k)
                 anchor = features[node_idx].unsqueeze(0)
                 sims = torch.mm(features[neighbor_nodes], anchor.T).squeeze()
-                _, top_k = torch.topk(sims, k=k)
-                support_features[node_idx] = features[neighbor_nodes[top_k]]
-                support_labels[node_idx] = labels[neighbor_nodes[top_k]]
+                if current_k == 1:
+                    indices = torch.tensor([0], device=device)
+                else:
+                    _, indices = torch.topk(sims, k=current_k)
+                support_features[node_idx, :current_k] = features[neighbor_nodes[indices]]
+                support_labels[node_idx, :current_k] = labels[neighbor_nodes[indices]]
 
         # ── Aggregate labels from support set ──────────────────────────
         train_features = features[train_mask]
@@ -119,13 +124,21 @@ class UnionNETHelper(MethodHelper):
 
         class_probs = torch.zeros(n_train, num_classes, device=device)
         for i in range(n_train):
-            if sup_feat[i].sum() != 0:
+            # Only aggregate from actual neighbors (non-zero padding)
+            mask = sup_feat[i].abs().sum(dim=1) > 0
+            if mask.any():
                 sims = torch.exp(
-                    torch.mm(sup_feat[i], train_features[i:i + 1].T)
+                    torch.mm(sup_feat[i][mask], train_features[i:i + 1].T)
                 ).squeeze()
-                weights = sims / sims.sum()
-                for j, c in enumerate(sup_lab[i]):
+                if mask.sum() == 1:
+                    weights = torch.tensor([1.0], device=device)
+                else:
+                    weights = sims / sims.sum()
+                for j, c in enumerate(sup_lab[i][mask]):
                     class_probs[i, c] += weights[j]
+            else:
+                # Fallback to noisy label if no neighbors
+                class_probs[i, train_labels[i]] = 1.0
 
         # ── Loss components ────────────────────────────────────────────
         # Reweighted CE
@@ -137,9 +150,9 @@ class UnionNETHelper(MethodHelper):
         standard_loss = F.cross_entropy(out[train_mask], train_labels)
 
         # KL divergence
-        one_hot = F.one_hot(train_labels, num_classes=num_classes).float()
+        # U-1 Fix: Use class_probs (neighborhood consensus) as target rather than noisy labels
         log_probs = F.log_softmax(out[train_mask], dim=1)
-        kl_loss = F.kl_div(log_probs, one_hot, reduction='batchmean')
+        kl_loss = F.kl_div(log_probs, class_probs, reduction='batchmean')
 
         loss = alpha * reweighted_loss + (1 - alpha) * standard_loss + beta * kl_loss
         loss.backward()

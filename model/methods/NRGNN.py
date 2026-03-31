@@ -187,11 +187,11 @@ class NRGNN:
         )
         
         #Compute losses
-        negative_loss = F.mse_loss(negative_similarities, torch.zeros_like(negative_similarities), reduction='sum')
-        positive_loss = F.mse_loss(positive_similarities, torch.ones_like(positive_similarities), reduction='sum')
+        # N-4 Fix: Normalized by number of samples to stay in scale
+        negative_loss = F.mse_loss(negative_similarities, torch.zeros_like(negative_similarities), reduction='mean')
+        positive_loss = F.mse_loss(positive_similarities, torch.ones_like(positive_similarities), reduction='mean')
         
-        total_edges = negative_edges.shape[1] + positive_edges.shape[1]
-        reconstruction_loss = (negative_loss + positive_loss) * num_nodes / total_edges
+        reconstruction_loss = (negative_loss + positive_loss)
         
         return reconstruction_loss
 
@@ -310,7 +310,9 @@ class NRGNN:
             return torch.empty((2, 0), dtype=torch.long, device=self.device), confident_nodes.cpu().numpy()
         
         # Create all pairs between unlabeled and confident nodes
-        source_nodes = self.unlabeled_node_indices.repeat(num_confident)
+        # N-1 Fix: Use repeat_interleave for source to get [u1,u1, u2,u2...] 
+        # and repeat for target to get [c1,c2, c1,c2...] resulting in all pairs.
+        source_nodes = self.unlabeled_node_indices.repeat_interleave(num_confident)
         target_nodes = confident_nodes.repeat(num_unlabeled)
         
         valid_connections_mask = source_nodes != target_nodes

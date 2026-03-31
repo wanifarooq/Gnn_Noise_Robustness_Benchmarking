@@ -61,6 +61,10 @@ class RTGNNHelper(MethodHelper):
             weight_decay=rtgnn_config.weight_decay,
         )
 
+        # R-1 Implementation: Initialize noise transition matrix if not already present
+        if not hasattr(rtgnn, 'transition_matrix'):
+            rtgnn.transition_matrix = torch.eye(num_classes, device=device)
+
         return {
             'models': [rtgnn.dual_branch_predictor, rtgnn.structure_estimator],
             'optimizers': [optimizer],
@@ -73,6 +77,7 @@ class RTGNNHelper(MethodHelper):
             'edge_indices': edge_indices,
             'knn_edge_indices': knn_edge_indices,
             'device': device,
+            'num_classes': num_classes,
         }
 
     # ── Per-epoch training ─────────────────────────────────────────────────
@@ -84,11 +89,26 @@ class RTGNNHelper(MethodHelper):
         node_features = state['node_features']
         node_labels = state['node_labels']
         train_indices = state['train_indices']
+        val_indices = state['val_indices']
         edge_indices = state['edge_indices']
         knn_edge_indices = state['knn_edge_indices']
 
         rtgnn.train()
         optimizer.zero_grad(set_to_none=True)
+
+        # R-1 Implementation: Every few epochs, update transition matrix using validation set
+        if epoch % 5 == 0:
+            rtgnn.eval()
+            with torch.no_grad():
+                out1, out2 = rtgnn.dual_branch_predictor(
+                    node_features, getattr(rtgnn, '_current_edges', edge_indices),
+                    getattr(rtgnn, '_current_weights', torch.ones(edge_indices.size(1), device=device))
+                )
+                val_preds = (out1[val_indices] + out2[val_indices]).argmax(dim=1)
+                rtgnn.transition_matrix = rtgnn.estimate_noise_transition_matrix(
+                    val_preds, node_labels[val_indices]
+                )
+            rtgnn.train()
 
         # Structure estimator forward
         node_reps, recon_loss = rtgnn.structure_estimator(
@@ -139,6 +159,7 @@ class RTGNNHelper(MethodHelper):
             out1, out2, final_edges, final_weights, train_indices,
         )
 
+        # R-4 Fix: Apply co_lambda only once to the intraview_loss term
         total_loss = (
             main_loss
             + rtgnn.training_config.alpha * recon_loss

@@ -442,7 +442,10 @@ class GraphCleanerNoiseDetector:
         )
         
         # Extract validation data
-        validation_corrupted_labels = graph_data.y[graph_data.val_mask].cpu().numpy()
+        # GC-1 Fix: Explicitly use y_noisy for validation if available, 
+        # to ensure the transition matrix is estimated against the corrupted labels.
+        val_labels_source = getattr(graph_data, 'y_noisy', graph_data.y)
+        validation_corrupted_labels = val_labels_source[graph_data.val_mask].cpu().numpy()
         validation_prediction_probs = self._convert_logits_to_probabilities(
             torch.tensor(optimal_predictions))[graph_data.val_mask.cpu().numpy()]
         
@@ -452,6 +455,7 @@ class GraphCleanerNoiseDetector:
         )
         
         # Generate negative samples
+        # GC-2 Fix: Passes graph_data.y_noisy explicitly to ensure we know the source
         artificially_corrupted_data, artificial_corruption_indices = self._generate_negative_samples(
             graph_data, noise_transition_matrix, num_classes)
         print(f"{len(artificial_corruption_indices)} negative samples generated for detector training")

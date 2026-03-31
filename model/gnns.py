@@ -74,13 +74,15 @@ class GCN(nn.Module):
     def __init__(self, in_channels: int, hidden_channels: int, out_channels: int,
                  n_layers: int = 2, dropout: float = 0.5,
                  with_bias: bool = True, self_loop: bool = True, norm_info: dict | None = None,
-                 act: str = 'F.relu', input_layer: bool = False, output_layer: bool = False):
+                 act: str = 'F.relu', input_layer: bool = False, output_layer: bool = False,
+                 use_residual: bool = False):
         super().__init__()
 
         self.dropout = dropout
         self.n_layers = n_layers
         self.input_layer = input_layer
         self.output_layer = output_layer
+        self.use_residual = use_residual
 
         norm_info = norm_info or {'is_norm': False, 'norm_type': 'LayerNorm'}
         self.is_norm = norm_info['is_norm']
@@ -123,14 +125,23 @@ class GCN(nn.Module):
             x = F.dropout(x, p=self.dropout, training=self.training)
 
         for i, conv in enumerate(self.convs[:-1]):
-            x = conv(x, edge_index, edge_weight)
+            h = conv(x, edge_index, edge_weight)
             if self.is_norm:
-                x = self.norms[i](x)
-            x = self.act(x)
-            x = F.dropout(x, p=self.dropout, training=self.training)
+                h = self.norms[i](h)
+            h = self.act(h)
+            h = F.dropout(h, p=self.dropout, training=self.training)
+            
+            if self.use_residual and h.size(-1) == x.size(-1):
+                x = h + x
+            else:
+                x = h
 
         if self.output_layer:
-            x = self.convs[-1](x, edge_index, edge_weight)
+            h = self.convs[-1](x, edge_index, edge_weight)
+            if self.use_residual and h.size(-1) == x.size(-1):
+                x = h + x
+            else:
+                x = h
 
         return x
 
@@ -231,13 +242,15 @@ class GAT(nn.Module):
     def __init__(self, in_channels: int, hidden_channels: int, out_channels: int,
                  n_layers: int = 3, heads: int = 4, dropout: float = 0.6, 
                  with_bias: bool = True, self_loop: bool = True, 
-                 norm_info: dict | None = None, act: str = 'F.elu'):
+                 norm_info: dict | None = None, act: str = 'F.elu',
+                 use_residual: bool = False):
         super().__init__()
 
         self.n_layers = n_layers
         self.heads = heads
         self.dropout = dropout
         self.act = eval(act)
+        self.use_residual = use_residual
 
         norm_info = norm_info or {'is_norm': False, 'norm_type': 'LayerNorm'}
         self.is_norm = norm_info['is_norm']
@@ -270,15 +283,21 @@ class GAT(nn.Module):
         x, edge_index = data.x, data.edge_index
         edge_attr = _get_edge_attr(data)
         for i, conv in enumerate(self.convs[:-1]):
-            x = conv(x, edge_index, edge_attr=edge_attr)
+            h = conv(x, edge_index, edge_attr=edge_attr)
             if self.is_norm:
-                x = self.norms[i](x)
-            x = self.act(x)
-            x = F.dropout(x, p=self.dropout, training=self.training)
+                h = self.norms[i](h)
+            h = self.act(h)
+            h = F.dropout(h, p=self.dropout, training=self.training)
+            
+            if self.use_residual and h.size(-1) == x.size(-1):
+                x = h + x
+            else:
+                x = h
         return x
 
     def forward(self, data):
         return self.convs[-1](self._forward_body(data), data.edge_index, edge_attr=_get_edge_attr(data))
+
 
     def get_embeddings(self, data):
         """Return hidden representation before the final projection conv."""
@@ -303,13 +322,15 @@ class GATv2(nn.Module):
     def __init__(self, in_channels: int, hidden_channels: int, out_channels: int,
                  n_layers: int = 3, heads: int = 4, dropout: float = 0.6,
                  with_bias: bool = True, self_loop: bool = True,
-                 norm_info: dict | None = None, act: str = 'F.elu'):
+                 norm_info: dict | None = None, act: str = 'F.elu',
+                 use_residual: bool = False):
         super().__init__()
 
         self.n_layers = n_layers
         self.heads = heads
         self.dropout = dropout
         self.act = eval(act)
+        self.use_residual = use_residual
 
         norm_info = norm_info or {'is_norm': False, 'norm_type': 'LayerNorm'}
         self.is_norm = norm_info['is_norm']
@@ -352,11 +373,16 @@ class GATv2(nn.Module):
         x, edge_index = data.x, data.edge_index
         edge_attr = _get_edge_attr(data)
         for i, conv in enumerate(self.convs[:-1]):
-            x = conv(x, edge_index, edge_attr=edge_attr)
+            h = conv(x, edge_index, edge_attr=edge_attr)
             if self.is_norm:
-                x = self.norms[i](x)
-            x = self.act(x)
-            x = F.dropout(x, p=self.dropout, training=self.training)
+                h = self.norms[i](h)
+            h = self.act(h)
+            h = F.dropout(h, p=self.dropout, training=self.training)
+            
+            if self.use_residual and h.size(-1) == x.size(-1):
+                x = h + x
+            else:
+                x = h
         return x
 
     def forward(self, data):
@@ -449,14 +475,14 @@ class GPS(nn.Module):
         x = self.lin_in(x)
 
         # GINEConv requires (E, D) edge features matching hidden_channels.
-        # Unlike GATConv/GATv2Conv where edge_dim=1 cleanly skips when
-        # edge_attr=None, GINEConv always uses edge_attr (x_j + edge_attr).
-        # Adding edge_dim=1 to project scalar weights would introduce a
-        # Linear(1, hidden_channels, bias=True) whose bias term turns zero
-        # edge features into non-zero vectors — silently changing behavior
-        # for all experiments that don't use edge weights. Zeros are a safe
-        # no-op: x_j + 0 = x_j.
+        # We use edge_weight (produced by robustness methods like RTGNN/GNNGuard) 
+        # to scale these features.
+        edge_weight = getattr(data, 'edge_weight', None)
         edge_attr = x.new_zeros(edge_index.size(1), x.size(1))
+        
+        if edge_weight is not None:
+            # Scale the implicit edge attributes by the learned weights
+            edge_attr = edge_attr + edge_weight.view(-1, 1)
 
         for i, conv in enumerate(self.convs):
             x = conv(x, edge_index, batch, edge_attr=edge_attr)

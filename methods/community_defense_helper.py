@@ -158,12 +158,15 @@ class CommunityDefenseHelper(MethodHelper):
             community_labels, dtype=torch.long, device=device,
         )
 
+        # CD-1 Implementation: Determine actual embedding dimension from backbone
+        backbone_model.eval()
+        with torch.no_grad():
+            sample_emb = backbone_model.get_embeddings(data.to(device))
+            embedding_dim = sample_emb.shape[1]
+        
         # The community classifier takes the embedding dim as input.
-        # At setup time we don't know the exact logits dim yet, so we use
-        # num_features as a placeholder; it will be rebuilt on first forward
-        # if the dim differs.
         community_classifier = nn.Linear(
-            data.x.shape[1], num_communities,
+            embedding_dim, num_communities,
         ).to(device)
 
         # Single Adam optimizer over backbone + community classifier
@@ -209,27 +212,8 @@ class CommunityDefenseHelper(MethodHelper):
         train_idx = data.train_mask.nonzero(as_tuple=True)[0]
         ce_loss = F.cross_entropy(logits[train_idx], data.y[train_idx])
 
-        # Use dropout(logits) as surrogate embeddings (no model exposes last_hidden)
-        embeddings = F.dropout(logits, p=0.3, training=True)
-
-        # Rebuild community classifier if embedding dim changed
-        if community_classifier.in_features != embeddings.shape[1]:
-            community_classifier = nn.Linear(
-                embeddings.shape[1], state['num_communities'],
-            ).to(device)
-            state['community_classifier'] = community_classifier
-            # Rebuild optimizer with new classifier params
-            state['optimizer'] = torch.optim.Adam(
-                list(model.parameters()) + list(community_classifier.parameters()),
-                lr=optimizer.param_groups[0]['lr'],
-                weight_decay=optimizer.param_groups[0]['weight_decay'],
-            )
-            optimizer = state['optimizer']
-            optimizer.zero_grad(set_to_none=True)
-            # Recompute (graph is still alive)
-            logits = model(data)
-            ce_loss = F.cross_entropy(logits[train_idx], data.y[train_idx])
-            embeddings = F.dropout(logits, p=0.3, training=True)
+        # CD-2 Fix: Use actual hidden embeddings from the backbone instead of surrogate logits
+        embeddings = model.get_embeddings(data)
 
         # Community regularization loss (adaptive weight ramps over 50 epochs)
         adaptive_weight = community_loss_weight * min(1.0, (epoch + 1) / 50.0)
@@ -242,7 +226,7 @@ class CommunityDefenseHelper(MethodHelper):
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
 
-        return {'train_loss': total_loss.item()}
+        return {'train_loss': total_loss.item(), 'ce_loss': ce_loss.item(), 'comm_loss': comm_loss.item()}
 
     # ------------------------------------------------------------------
     # Checkpointing — community classifier is training-only

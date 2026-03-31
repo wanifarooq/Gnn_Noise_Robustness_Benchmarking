@@ -5,6 +5,7 @@ num_runs: 2
 dataset:
   name: cora
   root: data
+  normalize: true      # Set to false for heterophilous datasets (e.g. roman-empire)
 
 noise:
   type: uniform
@@ -17,6 +18,7 @@ model:
   n_layers: 2
   dropout: 0.5
   self_loop: true
+  use_residual: false  # Set to true for heterophilous datasets (e.g. roman-empire)
   mlp_layers: 1
   train_eps: false
   heads: 8
@@ -42,6 +44,7 @@ positive_eigenvalues_params:
 gcod_params:
   batch_size: 64
   uncertainty_lr: 0.0003
+  kl_start_epoch: 2    # Improvement: Delay KL activation to allow initial stabilization
 
 nrgnn_params:
   edge_hidden: 16

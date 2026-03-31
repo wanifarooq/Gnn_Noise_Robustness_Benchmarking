@@ -90,7 +90,10 @@ class GNNCleanerHelper(MethodHelper):
         weighting_net.train()
 
         noisy_labels = data.y.to(device)
-        ground_truth = data.y_original.to(device) if hasattr(data, 'y_original') else data.y.to(device)
+        
+        # GNC-1 Fix: Do NOT use y_original (ground_truth) in the training loop.
+        # This is a benchmark for robustness; the model must only see the noisy labels.
+        # We use noisy_labels as the source for propagation from the 'trusted' set.
 
         # Forward pass
         node_embeddings = model(data)
@@ -100,9 +103,9 @@ class GNNCleanerHelper(MethodHelper):
             data.edge_index, node_embeddings.detach(), sim_eps
         )
 
-        # Label propagation from expanding clean set
+        # Label propagation from expanding clean set (using noisy_labels)
         propagated_labels = self._label_propagation(
-            similarity_matrix, ground_truth,
+            similarity_matrix, noisy_labels,
             state['expanding_clean_mask'], data, num_classes, device,
             label_prop_iters,
         )
@@ -115,12 +118,17 @@ class GNNCleanerHelper(MethodHelper):
         for idx in train_indices:
             pseudo = propagated_labels[idx].argmax().item()
             given = noisy_labels[idx].item()
-            if pseudo == given:
+            # GNC-2 Implementation: Only select if model is confident enough 
+            # (thresholding pseudo-distribution)
+            is_confident = propagated_labels[idx].max() > 0.7
+            
+            if pseudo == given and is_confident:
                 D_select[idx] = True
             else:
                 D_left[idx] = True
 
         # Update expanding clean set
+        # GNC-2 Fix: Use the new confident selection
         state['expanding_clean_mask'] = (
             state['expanding_clean_mask'] | D_select
         ).detach()
@@ -130,7 +138,8 @@ class GNNCleanerHelper(MethodHelper):
         # Phase 1: Train on selected (consistent) nodes
         if D_select.sum() > 0:
             selected_emb = node_embeddings[D_select]
-            selected_labels = ground_truth[D_select]
+            # GNC-1 Fix: Use noisy_labels here too
+            selected_labels = noisy_labels[D_select]
             select_loss = F.cross_entropy(selected_emb, selected_labels)
 
             gnn_optimizer.zero_grad(set_to_none=True)

@@ -571,6 +571,79 @@ def plot_summary_table(group_exps, group_key, out_dir):
     print(f'  Saved: {fname}')
 
 
+# ── Plot 8 & 9: Leaderboards ──────────────────────────────────────────────
+
+def _plot_leaderboard(group_exps, group_key, out_dir, metric, metric_label):
+    """Horizontal bar chart ranking methods by a metric (highest first)."""
+    methods = []
+    means = []
+    stds = []
+    for exp in group_exps:
+        vals = get_metric(exp, 'test', metric)
+        m, s = mean_std(vals)
+        methods.append(exp['method'])
+        means.append(m)
+        stds.append(s)
+
+    # Sort by mean descending
+    order = np.argsort(means)[::-1]
+    methods = [methods[i] for i in order]
+    means = [means[i] for i in order]
+    stds = [stds[i] for i in order]
+
+    n = len(methods)
+    # Color gradient: gold → silver → bronze → grey
+    colors = []
+    medal_colors = ['#FFD700', '#C0C0C0', '#CD7F32']
+    for i in range(n):
+        if i < len(medal_colors):
+            colors.append(medal_colors[i])
+        else:
+            colors.append('#A0A0A0')
+
+    fig, ax = plt.subplots(figsize=(max(8, 4 + max(len(m) for m in methods) * 0.12),
+                                    max(4, n * 0.6 + 1.5)))
+    y = np.arange(n)
+    bars = ax.barh(y, means, xerr=stds, capsize=4, color=colors,
+                   edgecolor='#333333', linewidth=0.5)
+
+    # Value labels
+    for i, (bar, m, s) in enumerate(zip(bars, means, stds)):
+        label = f'{m:.4f}'
+        if s > 0:
+            label += f' +/- {s:.4f}'
+        ax.text(m + s + 0.005, bar.get_y() + bar.get_height() / 2,
+                label, va='center', fontsize=9, fontweight='bold' if i == 0 else 'normal')
+
+    # Rank labels
+    for i in range(n):
+        ax.text(0.005, y[i], f' #{i+1}', va='center', ha='left',
+                fontsize=10, fontweight='bold', color='#333333')
+
+    ax.set_yticks(y)
+    ax.set_yticklabels(methods, fontsize=10)
+    ax.invert_yaxis()
+    ax.set_xlabel(metric_label)
+    ax.set_title(f'Leaderboard: Test {metric_label} — {group_label(group_key)}',
+                 fontsize=12, fontweight='bold')
+    ax.set_xlim(0, min(1.0, max(means) + max(stds) + 0.08))
+    ax.grid(axis='x', alpha=0.3)
+    fig.tight_layout()
+
+    fname = _safe_filename(group_key, f'leaderboard_{metric}')
+    fig.savefig(os.path.join(out_dir, fname), dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    print(f'  Saved: {fname}')
+
+
+def plot_leaderboard_accuracy(group_exps, group_key, out_dir):
+    _plot_leaderboard(group_exps, group_key, out_dir, 'accuracy', 'Accuracy')
+
+
+def plot_leaderboard_f1(group_exps, group_key, out_dir):
+    _plot_leaderboard(group_exps, group_key, out_dir, 'f1', 'F1 Score')
+
+
 # ── Utilities ──────────────────────────────────────────────────────────────
 
 def _safe_filename(group_key, plot_name):
@@ -615,6 +688,8 @@ def main():
             continue
 
         plot_summary_table(group_exps, group_key, args.out_dir)
+        plot_leaderboard_accuracy(group_exps, group_key, args.out_dir)
+        plot_leaderboard_f1(group_exps, group_key, args.out_dir)
         plot_test_performance(group_exps, group_key, args.out_dir)
         plot_split_comparison(group_exps, group_key, args.out_dir)
         plot_noise_robustness(group_exps, group_key, args.out_dir)

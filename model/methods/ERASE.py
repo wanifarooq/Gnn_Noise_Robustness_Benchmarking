@@ -99,7 +99,7 @@ class MaximalCodingRateReductionLoss(nn.Module):
                 semantic_labels: torch.Tensor, label_prop_alpha: float, cosine_weight_beta: float,
                 propagation_steps: int, train_node_mask: torch.Tensor):
 
-        num_classes = graph_data.y.max().item() + 1
+        num_classes = int(graph_data.y.max().item() + 1)
         train_features = node_features[train_node_mask]
         feature_matrix = node_features.T
 
@@ -108,18 +108,20 @@ class MaximalCodingRateReductionLoss(nn.Module):
             train_features, semantic_labels, node_features, train_node_mask, cosine_weight_beta, num_classes
         )
 
-        # Apply label propagation
+        # Apply label propagation (maintain gradients)
         for _ in range(propagation_steps):
             semantic_labels = (1 - label_prop_alpha) * (adjacency_matrix @ semantic_labels) + label_prop_alpha * semantic_labels
 
-        predicted_labels = torch.argmax(semantic_labels, dim=1)
+        # E-1 Fix: Use soft probabilities instead of hard argmax to keep graph differentiable
+        # This allows the Coding Rate loss to provide gradients back to the backbone.
+        soft_labels = F.softmax(semantic_labels, dim=1)
+        predicted_labels = torch.argmax(soft_labels, dim=1)
 
         # Compute discrimination loss
         discrimination_loss_empirical = self.compute_discrimination_loss_empirical(feature_matrix)
 
-        # Standard variant with membership matrices
-        membership_matrices_np = self._convert_labels_to_membership_matrices(predicted_labels.cpu(), num_classes)
-        membership_matrices = torch.tensor(membership_matrices_np, dtype=torch.float32, device=node_features.device)
+        # E-1 Fix: Compute membership matrices differentiably
+        membership_matrices = self._convert_labels_to_membership_matrices_differentiable(soft_labels, num_classes)
 
         compression_loss_empirical = self.compute_compression_loss_empirical(feature_matrix, membership_matrices)
         compression_loss_theoretical = self.compute_compression_loss_theoretical(feature_matrix, membership_matrices)
@@ -132,8 +134,19 @@ class MaximalCodingRateReductionLoss(nn.Module):
                 [discrimination_loss_theoretical.item(), compression_loss_theoretical.item()],
                 predicted_labels)
 
+    def _convert_labels_to_membership_matrices_differentiable(self, soft_labels: torch.Tensor, num_classes: int) -> torch.Tensor:
+        """E-1 Implementation: Differentiable conversion to membership matrices."""
+        num_samples = soft_labels.shape[0]
+        # Membership matrix Pi_j is diag(soft_labels[:, j])
+        # We return a (C, N, N) tensor where each slice is a diagonal matrix.
+        membership_matrices = torch.zeros((num_classes, num_samples, num_samples), device=soft_labels.device)
+        for j in range(num_classes):
+            membership_matrices[j] = torch.diag(soft_labels[:, j])
+        return membership_matrices
+
     def _convert_labels_to_membership_matrices(self, target_labels: torch.Tensor, num_classes: int) -> np.ndarray:
-        targets_onehot = F.one_hot(target_labels, num_classes).numpy()
+        # Legacy non-differentiable version
+        targets_onehot = F.one_hot(target_labels, num_classes).cpu().numpy()
         num_samples, num_classes = targets_onehot.shape
         membership_matrices = np.zeros((num_classes, num_samples, num_samples))
         max_indices = np.argmax(targets_onehot, axis=1)

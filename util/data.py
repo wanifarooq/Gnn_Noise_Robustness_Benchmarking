@@ -81,23 +81,24 @@ def ensure_splits(data,
     return train_mask, val_mask, test_mask
 
 
-def load_dataset(name, root="./data"):
+def load_dataset(name, root="./data", normalize=True):
     """Load a graph dataset by name.
 
     Supports Planetoid, HeterophilousGraph, CitationFull, Amazon,
     AttributedGraph, GraphLAND (Zenodo), GNNBenchmark, and LRGB families.
     """
     name_lower = name.lower()
+    transform = NormalizeFeatures() if normalize else None
 
     if name_lower in ["cora", "citeseer", "pubmed"]:
         from torch_geometric.datasets import Planetoid
-        dataset = Planetoid(root=f"{root}/{name}", name=name.capitalize(), transform=NormalizeFeatures(), split='public')
+        dataset = Planetoid(root=f"{root}/{name}", name=name.capitalize(), transform=transform, split='public')
         data = dataset[0]
         return data, dataset.num_classes
 
     elif name_lower in ["amazon-ratings", "tolokers", "roman-empire", "minesweeper", "questions"]:
         from torch_geometric.datasets import HeterophilousGraphDataset
-        dataset = HeterophilousGraphDataset(root=f"{root}/{name}", name=name, transform=NormalizeFeatures())
+        dataset = HeterophilousGraphDataset(root=f"{root}/{name}", name=name, transform=transform)
         def _fix_split_masks(data):
             for key in ["train_mask", "val_mask", "test_mask"]:
                 if hasattr(data, key):
@@ -115,20 +116,20 @@ def load_dataset(name, root="./data"):
 
     elif name_lower == "dblp":
         from torch_geometric.datasets import CitationFull
-        dataset = CitationFull(root=f"{root}/{name}", name="dblp", transform=NormalizeFeatures())
+        dataset = CitationFull(root=f"{root}/{name}", name="dblp", transform=transform)
         data = dataset[0]
         return data, dataset.num_classes
 
     elif name_lower in ["amazon-computers", "amazon-photo"]:
         from torch_geometric.datasets import Amazon
         amazon_name = name.split('-')[1].capitalize()
-        dataset = Amazon(root=f"{root}/{name}", name=amazon_name, transform=NormalizeFeatures())
+        dataset = Amazon(root=f"{root}/{name}", name=amazon_name, transform=transform)
         data = dataset[0]
         return data, dataset.num_classes
 
     elif name_lower in ["blogcatalog", "flickr"]:
         from torch_geometric.datasets import AttributedGraphDataset
-        dataset = AttributedGraphDataset(root=f"{root}/{name}", name=name.capitalize(), transform=NormalizeFeatures())
+        dataset = AttributedGraphDataset(root=f"{root}/{name}", name=name.capitalize(), transform=transform)
         data = dataset[0]
         return data, dataset.num_classes
 
@@ -151,6 +152,12 @@ def load_dataset(name, root="./data"):
         features_filled = features.fillna(0)
 
         x = torch.tensor(features_filled.values, dtype=torch.float)
+        if normalize:
+            # Manual L1 normalization for GraphLAND datasets
+            x_sum = x.sum(dim=-1, keepdim=True)
+            x_sum[x_sum == 0] = 1.0
+            x = x / x_sum
+
         targets_series = pd.read_csv(os.path.join(dataset_dir, "targets.csv")).iloc[:, -1]
         targets_values = targets_series.fillna(-1).to_numpy()
 
@@ -175,8 +182,9 @@ def load_dataset(name, root="./data"):
 
     elif name_lower in ["pattern", "cluster"]:
         from torch_geometric.datasets import GNNBenchmarkDataset
-        dataset = GNNBenchmarkDataset(root=f"{root}/{name}", name=name.upper(), split='train', transform=NormalizeFeatures())
-        return dataset, dataset.num_classes
+        dataset = GNNBenchmarkDataset(root=f"{root}/{name}", name=name.upper(), split='train', transform=transform)
+        data = dataset[0]
+        return data, dataset.num_classes
 
     elif name_lower in ["pascalvoc-sp", "coco-sp"]:
         from torch_geometric.datasets import LRGBDataset

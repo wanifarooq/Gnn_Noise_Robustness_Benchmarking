@@ -144,12 +144,9 @@ class CRGNNHelper(MethodHelper):
         # Cross-space consistency
         loss_ccon = torch.tensor(0.0, device=device)
         if beta > 0:
-            try:
-                loss_ccon = compute_cross_space_consistency_fixed(
-                    z1, z2, p1, p2, T, p_threshold
-                )
-            except Exception:
-                loss_ccon = torch.tensor(0.0, device=device)
+            loss_ccon = compute_cross_space_consistency_fixed(
+                z1, z2, p1, p2, T, p_threshold
+            )
 
         total_loss = alpha * loss_con + loss_sup + beta * loss_ccon
 

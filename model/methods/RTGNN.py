@@ -90,60 +90,73 @@ class AdaptiveCoTeachingLoss(nn.Module):
         super().__init__()
         self.training_config = training_config
         self.total_epochs = training_config.epochs
-        self.forget_rate_increment = 0.5 / self.total_epochs
+        # Forget rate starting small and increasing to a max (e.g. noise rate)
+        self.forget_rate_max = 0.5 # default max
+        self.forget_rate_increment = self.forget_rate_max / self.total_epochs
         self.residual_weight_decay = 1.0
 
     def forward(self, first_branch_logits, second_branch_logits, target_labels, current_epoch=0):
-        first_branch_loss = F.cross_entropy(first_branch_logits, target_labels, reduction='none')
-        second_branch_loss = F.cross_entropy(second_branch_logits, target_labels, reduction='none')
-        combined_loss = first_branch_loss + second_branch_loss
+        # R-2 Fix: Proper Co-teaching logic. 
+        # Each branch calculates its own loss, but only trains on the samples 
+        # that the OTHER branch thinks are clean.
+        
+        loss1 = F.cross_entropy(first_branch_logits, target_labels, reduction='none')
+        loss2 = F.cross_entropy(second_branch_logits, target_labels, reduction='none')
         
         if current_epoch == 0:
-            return combined_loss.mean()
+            return loss1.mean() + loss2.mean()
 
-        # Sort samples by loss
-        sorted_loss_indices = torch.argsort(combined_loss)
+        # Calculate how many samples to "remember"
         current_forget_rate = self.forget_rate_increment * current_epoch
-        remember_rate = max(0.5, 1 - current_forget_rate)
-        num_samples_to_remember = int(remember_rate * len(combined_loss))
-        
-        clean_sample_indices = sorted_loss_indices[:num_samples_to_remember]
-        noisy_sample_indices = sorted_loss_indices[num_samples_to_remember:]
+        num_to_remember = int((1 - current_forget_rate) * len(target_labels))
+        num_to_remember = max(int(0.5 * len(target_labels)), num_to_remember)
 
-        # Loss for clean samples
-        clean_samples_loss = combined_loss[clean_sample_indices].mean()
+        # Branch 1 picks clean samples for Branch 2
+        idx1 = torch.argsort(loss1)[:num_to_remember]
+        # Branch 2 picks clean samples for Branch 1
+        idx2 = torch.argsort(loss2)[:num_to_remember]
 
-        # Correction loss for noisy samples
+        # Cross-update: Branch 1 trains on idx2, Branch 2 trains on idx1
+        clean_loss = loss1[idx2].mean() + loss2[idx1].mean()
+
+        # Correction loss for noisy samples (using pseudo-labels)
         correction_loss = torch.tensor(0.0, device=first_branch_logits.device)
-        if len(noisy_sample_indices) > 0:
-            first_probabilities = F.softmax(first_branch_logits, dim=1)
-            second_probabilities = F.softmax(second_branch_logits, dim=1)
-            first_predictions = first_branch_logits.max(1)[1]
-            second_predictions = second_branch_logits.max(1)[1]
-            first_confidences = first_probabilities.max(1)[0]
-            second_confidences = second_probabilities.max(1)[0]
+        
+        # Identified noisy samples (those not picked by either branch)
+        noisy_mask = torch.ones(len(target_labels), dtype=torch.bool, device=first_branch_logits.device)
+        noisy_mask[idx1] = False
+        noisy_mask[idx2] = False
+        noisy_indices = torch.where(noisy_mask)[0]
 
-            predictions_agree = first_predictions[noisy_sample_indices] == second_predictions[noisy_sample_indices]
-            confidence_threshold = 1 - (1 - min(0.5, 1/first_branch_logits.size(0))) * current_epoch/self.total_epochs
-            high_confidence = (first_confidences[noisy_sample_indices] * second_confidences[noisy_sample_indices] > confidence_threshold)
+        if len(noisy_indices) > 0:
+            p1 = F.softmax(first_branch_logits, dim=1)
+            p2 = F.softmax(second_branch_logits, dim=1)
             
-            correction_mask = predictions_agree & high_confidence
-            if correction_mask.sum() > 0:
-                correction_indices = noisy_sample_indices[correction_mask]
-                confidence_weights = (first_confidences[correction_indices] * second_confidences[correction_indices])**(0.5 - 0.5*current_epoch/self.total_epochs)
-                correction_loss = (confidence_weights * (
-                    F.cross_entropy(first_branch_logits[correction_indices], first_predictions[correction_indices], reduction='none') +
-                    F.cross_entropy(second_branch_logits[correction_indices], first_predictions[correction_indices], reduction='none')
+            c1, pred1 = p1.max(1)
+            c2, pred2 = p2.max(1)
+
+            # R-3 Fix: Confidence threshold should start high and decrease
+            # (Paper: starts strict at 1.0, drops toward a lower bound)
+            conf_threshold = 1.0 - (0.5 * current_epoch / self.total_epochs)
+            
+            agree = (pred1[noisy_indices] == pred2[noisy_indices])
+            high_conf = (c1[noisy_indices] * c2[noisy_indices] > (conf_threshold**2))
+            
+            corr_mask = agree & high_conf
+            if corr_mask.sum() > 0:
+                corr_idx = noisy_indices[corr_mask]
+                # R-5 Fix: Detach confidence weights to prevent secondary gradient paths
+                weights = (c1[corr_idx] * c2[corr_idx]).detach()
+                
+                # Align both branches with the agreed pseudo-label
+                correction_loss = (weights * (
+                    F.cross_entropy(first_branch_logits[corr_idx], pred1[corr_idx], reduction='none') +
+                    F.cross_entropy(second_branch_logits[corr_idx], pred1[corr_idx], reduction='none')
                 )).mean()
 
-        # Residual loss
-        residual_loss = self.residual_weight_decay * combined_loss[noisy_sample_indices].mean() if len(noisy_sample_indices) > 0 else 0.0
-
-        # KL divergence regularization
-        kl_regularization = self._compute_kl_divergence(first_branch_logits, second_branch_logits) + \
-                           self._compute_kl_divergence(second_branch_logits, first_branch_logits)
-
-        return clean_samples_loss + correction_loss + residual_loss + self.training_config.co_lambda * kl_regularization
+        # R-4 Fix: Total loss should only include the core co-teaching/correction terms.
+        # co_lambda regularization (KL) is handled separately in RTGNN training step.
+        return clean_loss + correction_loss
 
     def _compute_kl_divergence(self, logits_p, logits_q):
         return F.kl_div(F.log_softmax(logits_p, dim=1),
@@ -378,6 +391,22 @@ class RTGNN(nn.Module):
             })
         
         return base_config
+
+    def estimate_noise_transition_matrix(self, val_predictions, val_labels):
+        """R-1 Implementation: Estimate noise transition matrix from validation data."""
+        num_classes = self.num_classes
+        transition_matrix = torch.zeros((num_classes, num_classes), device=self.device)
+        
+        # Count transitions from true class (approximated by prediction) to noisy label
+        for i in range(num_classes):
+            idx = (val_predictions == i)
+            if idx.sum() > 0:
+                for j in range(num_classes):
+                    transition_matrix[i, j] = (val_labels[idx] == j).sum().float() / idx.sum().float()
+            else:
+                transition_matrix[i, i] = 1.0
+                
+        return transition_matrix
 
     def forward(self, node_features, edge_indices, edge_weights=None):
         return self.dual_branch_predictor(node_features, edge_indices, edge_weights)

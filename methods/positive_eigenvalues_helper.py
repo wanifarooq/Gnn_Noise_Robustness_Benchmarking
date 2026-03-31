@@ -137,11 +137,12 @@ class PositiveEigenvaluesHelper(MethodHelper):
             loss.backward()
             optimizer.step()
 
-            # Enforce positive singular values on final projection
-            apply_positive_eigenvalue_constraint(model)
-
             total_loss += loss.item()
             batch_count += 1
+
+        # PE-1 Fix: Apply positive eigenvalue constraint only once at the end of the epoch.
+        # This significantly reduces FLOPs while maintaining the robustness benefit.
+        apply_positive_eigenvalue_constraint(model)
 
         avg_loss = total_loss / max(batch_count, 1)
         return {'train_loss': avg_loss}

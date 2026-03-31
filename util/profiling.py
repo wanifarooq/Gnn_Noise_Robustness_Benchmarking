@@ -21,10 +21,10 @@ def get_model(model_name, in_channels, hidden_channels, out_channels, **kwargs):
     kwargs.pop('out_channels', None)
 
     model_registry = {
-        'gcn':    (GCN, ['n_layers', 'dropout', 'self_loop']),
+        'gcn':    (GCN, ['n_layers', 'dropout', 'self_loop', 'use_residual']),
         'gin':    (GIN, ['n_layers', 'dropout', 'mlp_layers', 'train_eps']),
-        'gat':    (GAT, ['n_layers', 'dropout', 'heads']),
-        'gatv2':  (GATv2, ['n_layers', 'dropout', 'heads']),
+        'gat':    (GAT, ['n_layers', 'dropout', 'heads', 'use_residual']),
+        'gatv2':  (GATv2, ['n_layers', 'dropout', 'heads', 'use_residual']),
         'gps':    (GPS, ['n_layers', 'dropout', 'heads', 'use_pe', 'pe_dim']),
     }
 

@@ -34,9 +34,8 @@ class GCODHelper(MethodHelper):
 
         lr = float(training_cfg.get('lr', 0.01))
         weight_decay = float(training_cfg.get('weight_decay', 5e-4))
-        uncertainty_lr = float(gcod_params.get('uncertainty_lr', 1.0))
-        batch_size = int(gcod_params.get('batch_size', 32))
-
+        uncertainty_lr = float(gcod_params.get('uncertainty_lr', 0.001))
+        kl_start_epoch = int(gcod_params.get('kl_start_epoch', 2))
         num_classes = int(data.y.max().item()) + 1
 
         backbone_model = backbone_model.to(device)
@@ -56,6 +55,7 @@ class GCODHelper(MethodHelper):
             embedding_dim=embedding_dim,
             sample_labels=data.y,
             train_mask=data.train_mask,
+            kl_start_epoch=kl_start_epoch,
         ).to(device)
 
         # Dual optimizers
@@ -160,6 +160,7 @@ class GCODHelper(MethodHelper):
                 label_onehot=true_labels_onehot,
                 embeddings_detached=embeddings[target_nodes],
                 training_accuracy=training_accuracy,
+                epoch=epoch,
             )
 
             # Model backward + step (L1 + L3 — u is detached in both)
