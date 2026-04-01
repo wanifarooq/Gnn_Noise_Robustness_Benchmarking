@@ -197,9 +197,8 @@ class GNNCleanerHelper(MethodHelper):
         model.eval()
         with torch.no_grad():
             out = model(data)
-            ground_truth = data.y_original if hasattr(data, 'y_original') else data.y
             val_idx = data.val_mask.nonzero(as_tuple=True)[0]
-            return F.cross_entropy(out[val_idx], ground_truth[val_idx]).item()
+            return F.cross_entropy(out[val_idx], data.y[val_idx]).item()
 
     # ── Checkpointing ──────────────────────────────────────────────────────
 
@@ -225,28 +224,18 @@ class GNNCleanerHelper(MethodHelper):
 
     @staticmethod
     def _initialize_clean_set(data, device, clean_set_ratio=0.1):
-        """Identify initially clean training nodes (matching GNNCleanerTrainer)."""
-        if not hasattr(data, 'y_original'):
-            raise ValueError("GNN_Cleaner requires y_original to identify clean samples")
+        """Initialize clean set by random sampling from training nodes.
 
+        No privileged access to y_original — in a real-world setting we don't
+        know which labels are clean.  We randomly select a subset of training
+        nodes as the initial trusted set.  The expanding clean set will be
+        refined during training via label propagation and consistency checks.
+        """
         train_indices = data.train_mask.nonzero(as_tuple=True)[0]
-        clean_train = []
-        for idx in train_indices:
-            if data.y[idx] == data.y_original[idx]:
-                clean_train.append(idx.item())
+        needed = max(1, int(train_indices.size(0) * clean_set_ratio))
 
-        clean_train = torch.tensor(clean_train, device=device)
-
-        needed = int(train_indices.size(0) * clean_set_ratio)
-        if len(clean_train) < needed:
-            remaining = train_indices[~torch.isin(train_indices, clean_train)]
-            extra = needed - len(clean_train)
-            if len(remaining) > 0:
-                additional = remaining[torch.randperm(len(remaining))[:extra]]
-                clean_train = torch.cat([clean_train, additional])
-
-        max_clean = max(1, needed)
-        clean_train = clean_train[:max_clean]
+        perm = torch.randperm(train_indices.size(0), device=device)
+        clean_train = train_indices[perm[:needed]]
 
         initial_clean_mask = torch.zeros(data.y.size(0), dtype=torch.bool, device=device)
         initial_clean_mask[clean_train] = True
@@ -278,30 +267,29 @@ class GNNCleanerHelper(MethodHelper):
         return D_inv_sqrt @ sim @ D_inv_sqrt
 
     @staticmethod
-    def _label_propagation(sim_matrix, ground_truth, clean_mask, data,
+    def _label_propagation(sim_matrix, noisy_labels, clean_mask, data,
                            num_classes, device, iterations):
-        """Run label propagation from clean nodes."""
-        num_nodes = ground_truth.size(0)
+        """Run label propagation from trusted nodes using their (noisy) labels.
+
+        No access to y_original — we propagate from the given labels of the
+        trusted set, which may contain noise.  The expanding clean set and
+        consistency checks mitigate this over training.
+        """
+        num_nodes = noisy_labels.size(0)
         label_probs = torch.zeros(num_nodes, num_classes, device=device)
 
         clean_indices = clean_mask.nonzero(as_tuple=True)[0]
         for idx in clean_indices:
-            if hasattr(data, 'y_original'):
-                lbl = data.y_original[idx].item()
-            else:
-                lbl = ground_truth[idx].item()
+            lbl = noisy_labels[idx].item()
             label_probs[idx, lbl] = 1.0
 
         sim_tensor = torch.from_numpy(sim_matrix.toarray()).float().to(device)
 
         for _ in range(iterations):
             label_probs = torch.matmul(sim_tensor, label_probs)
-            # Reset clean node labels
+            # Reset trusted node labels
             for idx in clean_indices:
-                if hasattr(data, 'y_original'):
-                    lbl = data.y_original[idx].item()
-                else:
-                    lbl = ground_truth[idx].item()
+                lbl = noisy_labels[idx].item()
                 label_probs[idx] = 0.0
                 label_probs[idx, lbl] = 1.0
 

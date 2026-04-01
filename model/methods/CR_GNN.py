@@ -28,45 +28,52 @@ class NodeClassificationHead(torch.nn.Module):
 def contrastive_loss_original_style(z1, z2, tau):
 
     N = z1.size(0)
-    
-    # Positive similarities
-    pos1 = torch.exp(F.cosine_similarity(z1, z2, dim=1) / tau)
-    pos2 = torch.exp(F.cosine_similarity(z2, z1, dim=1) / tau)
-    
-    # Negative similarities
-    neg_matrix_1 = torch.exp(torch.mm(z1, z1.t()) / tau)  
+
+    # Normalize both views so all similarities are cosine (range [-1, 1])
+    z1 = F.normalize(z1, dim=1)
+    z2 = F.normalize(z2, dim=1)
+
+    # Positive similarities (cross-view cosine)
+    pos = torch.exp(torch.sum(z1 * z2, dim=1) / tau)
+
+    # Negative similarities (intra-view cosine, same normalization as positive)
+    neg_matrix_1 = torch.exp(torch.mm(z1, z1.t()) / tau)
     neg_matrix_2 = torch.exp(torch.mm(z2, z2.t()) / tau)
 
     neg1 = torch.sum(neg_matrix_1, dim=1) - torch.diag(neg_matrix_1)
     neg2 = torch.sum(neg_matrix_2, dim=1) - torch.diag(neg_matrix_2)
-    
-    loss1 = -torch.log(pos1 / (pos1 + neg1 + 1e-8))
-    loss2 = -torch.log(pos2 / (pos2 + neg2 + 1e-8))
-    
+
+    loss1 = -torch.log(pos / (pos + neg1 + 1e-8))
+    loss2 = -torch.log(pos / (pos + neg2 + 1e-8))
+
     return (torch.sum(loss1) + torch.sum(loss2)) / (2 * N)
 
 
 def dynamic_cross_entropy_loss_corrected(p1, p2, labels):
-    # C-1 Fix: Use pseudo-labels for samples where both views agree (consistency).
-    # Also handle empty masks to avoid gradient issues.
+    # C-1 Fix: Use pseudo-labels for samples where both views agree AND are confident.
+    # Early in training, views agree by chance — confidence gating prevents
+    # training on random pseudo-labels.
     if len(labels) == 0:
         return (p1.sum() * 0.0)
 
     labels = labels.long()
-    # Predictions (proxy for pseudo-labels)
     pred1 = p1.argmax(dim=1)
     pred2 = p2.argmax(dim=1)
-    consistent_mask = (pred1 == pred2)
 
-    # For inconsistent samples, we use noisy labels (p1/p2 use log_softmax already)
+    # Base loss with given (possibly noisy) labels
     loss = F.nll_loss(p1, labels, reduction='none') + F.nll_loss(p2, labels, reduction='none')
 
-    # C-1 Implementation: For consistent samples, trust the model's agreement over the label
-    if consistent_mask.any():
-        pseudo_labels = pred1[consistent_mask]
-        loss[consistent_mask] = (
-            F.nll_loss(p1[consistent_mask], pseudo_labels, reduction='none') +
-            F.nll_loss(p2[consistent_mask], pseudo_labels, reduction='none')
+    # Use pseudo-labels only when views agree AND both are confident
+    consistent = (pred1 == pred2)
+    conf = torch.min(torch.exp(p1).max(dim=1).values,
+                     torch.exp(p2).max(dim=1).values)
+    use_pseudo = consistent & (conf > 0.5)
+
+    if use_pseudo.any():
+        pseudo_labels = pred1[use_pseudo]
+        loss[use_pseudo] = (
+            F.nll_loss(p1[use_pseudo], pseudo_labels, reduction='none') +
+            F.nll_loss(p2[use_pseudo], pseudo_labels, reduction='none')
         )
 
     return loss.mean() / 2.0

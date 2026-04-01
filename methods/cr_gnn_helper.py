@@ -67,8 +67,6 @@ class CRGNNHelper(MethodHelper):
                   list(class_head.parameters()))
         optimizer = torch.optim.Adam(params, lr=lr, weight_decay=weight_decay)
 
-        clean_labels = getattr(data, 'y_original', data.y)
-
         return {
             'models': [backbone_model, adapter, proj_head, class_head],
             'optimizers': [optimizer],
@@ -84,7 +82,6 @@ class CRGNNHelper(MethodHelper):
             'T': T,
             'p_threshold': p_threshold,
             'pr': pr,
-            'clean_labels': clean_labels,
         }
 
     # ── Train step ─────────────────────────────────────────────────────────

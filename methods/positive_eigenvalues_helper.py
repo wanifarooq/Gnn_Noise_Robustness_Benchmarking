@@ -62,7 +62,9 @@ class PositiveEigenvaluesHelper(MethodHelper):
     """Mini-batch training with positive-eigenvalue SVD constraint."""
 
     def supports_batched_training(self):
-        return True
+        # Returns False — batching is handled internally in train_step via NeighborLoaders.
+        # Returning True would bypass train_step and lose the eigenvalue constraint.
+        return False
 
     def setup(self, backbone_model, data, config, device, init_data):
         training_cfg = config.get('training', {})

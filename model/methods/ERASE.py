@@ -175,7 +175,7 @@ class MaximalCodingRateReductionLoss(nn.Module):
 
         updated_semantic_labels = cosine_weight * semantic_labels + (1 - cosine_weight) * cosine_similarities
 
-        return F.softmax(updated_semantic_labels, dim=1)
+        return updated_semantic_labels
 
 class AdjacencyMatrixProcessor:
 
