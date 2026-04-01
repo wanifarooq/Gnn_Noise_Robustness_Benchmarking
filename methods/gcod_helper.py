@@ -36,6 +36,9 @@ class GCODHelper(MethodHelper):
         weight_decay = float(training_cfg.get('weight_decay', 5e-4))
         uncertainty_lr = float(gcod_params.get('uncertainty_lr', 0.001))
         kl_start_epoch = int(gcod_params.get('kl_start_epoch', 2))
+        momentum = float(gcod_params.get('momentum', 0.9))
+        temperature = float(gcod_params.get('temperature', 1.0))
+        batch_size = int(gcod_params.get('batch_size', training_cfg.get('batch_size', 64)))
         num_classes = int(data.y.max().item()) + 1
 
         backbone_model = backbone_model.to(device)
@@ -56,6 +59,8 @@ class GCODHelper(MethodHelper):
             sample_labels=data.y,
             train_mask=data.train_mask,
             kl_start_epoch=kl_start_epoch,
+            momentum=momentum,
+            temperature=temperature,
         ).to(device)
 
         # Dual optimizers

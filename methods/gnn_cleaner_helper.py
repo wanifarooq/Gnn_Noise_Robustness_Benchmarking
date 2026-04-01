@@ -179,7 +179,7 @@ class GNNCleanerHelper(MethodHelper):
                 if len(clean_indices) > 0:
                     final_emb = model(data)
                     clean_emb = final_emb[clean_indices]
-                    clean_labels = ground_truth[clean_indices]
+                    clean_labels = noisy_labels[clean_indices]
                     clean_loss = F.cross_entropy(clean_emb, clean_labels)
 
                     net_optimizer.zero_grad(set_to_none=True)

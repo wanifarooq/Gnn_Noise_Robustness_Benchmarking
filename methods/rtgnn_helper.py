@@ -63,7 +63,7 @@ class RTGNNHelper(MethodHelper):
 
         # R-1 Implementation: Initialize noise transition matrix if not already present
         if not hasattr(rtgnn, 'transition_matrix'):
-            rtgnn.transition_matrix = torch.eye(num_classes, device=device)
+            rtgnn.transition_matrix = torch.eye(rtgnn.num_classes, device=device)
 
         return {
             'models': [rtgnn.dual_branch_predictor, rtgnn.structure_estimator],
@@ -77,7 +77,7 @@ class RTGNNHelper(MethodHelper):
             'edge_indices': edge_indices,
             'knn_edge_indices': knn_edge_indices,
             'device': device,
-            'num_classes': num_classes,
+            'num_classes': rtgnn.num_classes,
         }
 
     # ── Per-epoch training ─────────────────────────────────────────────────

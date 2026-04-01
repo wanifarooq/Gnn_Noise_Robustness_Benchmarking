@@ -139,7 +139,7 @@ class CRGNNHelper(MethodHelper):
                 p1[train_mask], p2[train_mask], labels[train_mask]
             )
         else:
-            loss_sup = torch.tensor(0.0, device=device, requires_grad=True)
+            loss_sup = (p1.sum() * 0.0)
 
         # Cross-space consistency
         loss_ccon = torch.tensor(0.0, device=device)

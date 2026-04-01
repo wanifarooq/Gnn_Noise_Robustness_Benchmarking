@@ -106,7 +106,7 @@ def load_dataset(name, root="./data", normalize=True):
                     if m is None:
                         continue
                     if m.dim() == 2:
-                        m = m.any(dim=1)
+                        m = m[:, 0]
                     setattr(data, key, m.bool())
             return data
 

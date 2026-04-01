@@ -1,6 +1,6 @@
 seed: 42
 device: cuda
-num_runs: 2
+num_runs: 1
 
 dataset:
   name: cora
@@ -8,15 +8,15 @@ dataset:
   normalize: true      # Set to false for heterophilous datasets (e.g. roman-empire)
 
 noise:
-  type: uniform
+  type: £[uniform, clean]           # uniform, gaussian, or feature_mask
   rate: 0.2
   seed: 42
 
 model:
   name: gcn
   hidden_channels: 16
-  n_layers: 2
-  dropout: 0.5
+  n_layers: 3
+  dropout: 0.2
   self_loop: true
   use_residual: false  # Set to true for heterophilous datasets (e.g. roman-empire)
   mlp_layers: 1
@@ -26,11 +26,12 @@ model:
   pe_dim: 8
 
 training:
-  method: £[gcod, standard, positive_eigenvalues]
+  method: £[standard, gcod, positive_eigenvalues, nrgnn, pi_gnn, cr_gnn, community_defense, rtgnn, graphcleaner, unionnet, gnn_cleaner, erase, gnnguard]
+  # method: gcod
   lr: 0.001
   weight_decay: 5e-4
   epochs: 1500          # keep low for local runs
-  patience: 200
+  patience: 300
   oversmoothing_every: 1  # must be <= epochs to avoid NaN metrics
   mode: transductive   # transductive or inductive
   # batch_size: 512    # uncomment to enable mini-batch processing
@@ -42,9 +43,11 @@ positive_eigenvalues_params:
   batch_size: 32
 
 gcod_params:
-  batch_size: 64
-  uncertainty_lr: 0.0003
+  batch_size: 128
+  uncertainty_lr: 0.001
   kl_start_epoch: 2    # Improvement: Delay KL activation to allow initial stabilization
+  momentum: 0        # Improvement: Centroid momentum for stability
+  temperature: 1     # Improvement: Soften distributions in L3 loss
 
 nrgnn_params:
   edge_hidden: 16

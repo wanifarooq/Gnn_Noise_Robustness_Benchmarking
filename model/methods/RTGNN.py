@@ -298,6 +298,7 @@ class RTGNN(nn.Module):
             (self.node_features, self.node_labels, self.train_node_indices, self.val_node_indices, self.test_node_indices, self.adjacency_matrix) = self._prepare_data(data_for_training)
             input_features = self.node_features.shape[1]
             num_classes = len(np.unique(self.node_labels))
+            self.num_classes = num_classes
 
         gnn_specific_config = self._get_gnn_specific_configuration()
         

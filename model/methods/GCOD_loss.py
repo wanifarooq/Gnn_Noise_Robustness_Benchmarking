@@ -149,6 +149,8 @@ class GraphCentroidOutlierDiscounting(nn.Module):
             prediction + training_accuracy * u_masked.detach(),
             min=eps, max=1.0,
         )
+       
+
 
         # similarity_weighted = 0.8 * similarity + 0.2 * label_onehot
         loss = torch.mean(-torch.sum(similarity * torch.log(prediction), dim=1))
@@ -175,7 +177,7 @@ class GraphCentroidOutlierDiscounting(nn.Module):
             reduction='batchmean',
         )
 
-        loss = (1- training_accuracy) * kl_loss
+        loss = (1 - training_accuracy) * kl_loss
         return loss
 
     def forward(self, batch_indices, model_logits, label_onehot,
@@ -197,6 +199,12 @@ class GraphCentroidOutlierDiscounting(nn.Module):
         # u masked by label — only true-class position (used in L1 and L2)
         u = self.u[batch_indices]       # (batch, 1)
         u_masked = u * label_onehot     # (batch, C)
+
+        # Restore missing L1 call
+        loss_l1 = self.compute_loss_l1(
+            u_masked, model_logits, label_onehot,
+            embeddings_detached, training_accuracy,
+        )
 
         loss_l2 = self.compute_loss_l2(u_masked, model_logits, label_onehot)
 

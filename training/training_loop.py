@@ -105,7 +105,8 @@ class TrainingLoop:
         oversmoothing_evaluator = OversmoothingMetrics(device=device)
 
         # ── Early stopping ────────────────────────────────────────────────
-        early_stopping = EarlyStopping(patience=patience)
+        warmup = min(50, total_epochs // 3)
+        early_stopping = EarlyStopping(patience=patience, warmup_epochs=warmup)
 
         # ── Oversmoothing accumulators ────────────────────────────────────
         per_epochs_oversmoothing = defaultdict(list)
