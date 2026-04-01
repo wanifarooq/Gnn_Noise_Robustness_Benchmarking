@@ -8,7 +8,7 @@ dataset:
   normalize: true      # Set to false for heterophilous datasets (e.g. roman-empire)
 
 noise:
-  type: £[uniform, clean]           # uniform, gaussian, or feature_mask
+  type: £[uniform]           # uniform, gaussian, or feature_mask
   rate: 0.2
   seed: 42
 
@@ -26,7 +26,7 @@ model:
   pe_dim: 8
 
 training:
-  method: £[standard, gcod, positive_eigenvalues, nrgnn, pi_gnn, cr_gnn, community_defense, rtgnn, graphcleaner, unionnet, gnn_cleaner, erase, gnnguard]
+  method: gcod
   # method: gcod
   lr: 0.001
   weight_decay: 5e-4
@@ -43,11 +43,12 @@ positive_eigenvalues_params:
   batch_size: 32
 
 gcod_params:
-  batch_size: 128
-  uncertainty_lr: 0.001
-  kl_start_epoch: 2    # Improvement: Delay KL activation to allow initial stabilization
-  momentum: 0        # Improvement: Centroid momentum for stability
-  temperature: 1     # Improvement: Soften distributions in L3 loss
+  batch_size: 64
+  uncertainty_lr: 0.001     # u needs to adapt quickly to separate clean/noisy samples
+  kl_start_epoch: 2    # Delay KL activation to allow initial stabilization
+  momentum: 0          # No centroid momentum (correction mode uses margin-based filtering)
+  temperature: 1       # Soften distributions in L3 loss
+  similarity_mode: correction  # 'correction' (label correction via centroids) or 'discount' (original)
 
 nrgnn_params:
   edge_hidden: 16

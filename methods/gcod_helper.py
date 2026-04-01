@@ -38,6 +38,7 @@ class GCODHelper(MethodHelper):
         kl_start_epoch = int(gcod_params.get('kl_start_epoch', 2))
         momentum = float(gcod_params.get('momentum', 0.9))
         temperature = float(gcod_params.get('temperature', 1.0))
+        similarity_mode = str(gcod_params.get('similarity_mode', 'correction'))
         batch_size = int(gcod_params.get('batch_size', training_cfg.get('batch_size', 64)))
         num_classes = int(data.y.max().item()) + 1
 
@@ -61,6 +62,7 @@ class GCODHelper(MethodHelper):
             kl_start_epoch=kl_start_epoch,
             momentum=momentum,
             temperature=temperature,
+            similarity_mode=similarity_mode,
         ).to(device)
 
         # Dual optimizers

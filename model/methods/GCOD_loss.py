@@ -65,7 +65,7 @@ class GraphCentroidOutlierDiscounting(nn.Module):
 
     def __init__(self, num_classes, device, num_samples, embedding_dim=None,
                  sample_labels=None, train_mask=None, momentum=0.9, temperature=1.0,
-                 kl_start_epoch=2):
+                 kl_start_epoch=2, similarity_mode='discount'):
         super().__init__()
         self.num_classes = num_classes
         self.device = device
@@ -74,6 +74,7 @@ class GraphCentroidOutlierDiscounting(nn.Module):
         self.momentum = momentum        # Improvement 2: Centroid momentum
         self.temperature = temperature  # Improvement 3: Softmax temperature
         self.kl_start_epoch = kl_start_epoch # Configurable delay
+        self.similarity_mode = similarity_mode  # 'discount' or 'correction'
 
         # Uncertainty parameter — shape (N, 1), init with very small values
         self.u = nn.Parameter(torch.empty(num_samples, 1, dtype=torch.float32))
@@ -139,9 +140,37 @@ class GraphCentroidOutlierDiscounting(nn.Module):
         # Similarity between normalized embeddings and centroids
         out_norm = embeddings_detached.norm(p=2, dim=1, keepdim=True).clamp(min=1e-8)
         out_normalized = embeddings_detached.div(out_norm)
-        similarity = torch.mm(out_normalized, mv_t)
-        similarity = similarity * label_onehot
-        similarity = similarity * (similarity > 0.0).float()
+        similarity = torch.mm(out_normalized, mv_t)  # [batch, C]
+
+        random_sim = 1.0 / self.num_classes
+
+        if self.similarity_mode == 'correction':
+            # Correction mode: correct noisy labels via centroid similarity,
+            # then feed corrected labels through the standard discount loss.
+            # Only correct when centroids clearly disagree with the given label.
+            max_sim, max_idx = similarity.max(dim=1)         # [batch]
+            given_class = label_onehot.argmax(dim=1)         # [batch]
+            top2, _ = similarity.topk(2, dim=1)
+            margin = (top2[:, 0] - top2[:, 1])                # confidence margin
+
+            # Correct label where: centroid is confident AND disagrees with given
+            should_correct = (margin > random_sim) & (max_idx != given_class)
+            corrected_onehot = label_onehot.clone()
+            if should_correct.any():
+                corrected_onehot[should_correct] = F.one_hot(
+                    max_idx[should_correct], self.num_classes
+                ).float()
+
+            # Standard discount loss with (possibly corrected) labels
+            similarity = similarity * corrected_onehot
+            mask = (similarity > random_sim).float()
+            similarity = mask * (similarity + 0.4 * corrected_onehot)
+        else:
+            # Discount mode (original): keep only given-label similarity,
+            # zero out samples below random threshold.
+            similarity = similarity * label_onehot
+            mask = (similarity > random_sim).float()
+            similarity = mask * (similarity + 0.2 * label_onehot)
 
         # Prediction: softmax + uncertainty offset (u detached for L1)
         prediction = F.softmax(model_logits, dim=1)
@@ -152,7 +181,7 @@ class GraphCentroidOutlierDiscounting(nn.Module):
        
 
 
-        # similarity_weighted = 0.8 * similarity + 0.2 * label_onehot
+        # similarity = 0.5 * similarity + 0.5 * label_onehot
         loss = torch.mean(-torch.sum(similarity * torch.log(prediction), dim=1))
         return loss
 
@@ -177,7 +206,7 @@ class GraphCentroidOutlierDiscounting(nn.Module):
             reduction='batchmean',
         )
 
-        loss = (1 - training_accuracy) * kl_loss
+        loss = min(training_accuracy, 0.3) * kl_loss
         return loss
 
     def forward(self, batch_indices, model_logits, label_onehot,
