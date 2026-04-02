@@ -163,14 +163,14 @@ class GraphCentroidOutlierDiscounting(nn.Module):
 
             # Standard discount loss with (possibly corrected) labels
             similarity = similarity * corrected_onehot
-            mask = (similarity > random_sim).float()
-            similarity = mask * (similarity + 0.4 * corrected_onehot)
+            mask = (similarity > 0.0).float()
+            similarity = mask * torch.clamp(similarity + random_sim * corrected_onehot, max=1.0)
         else:
             # Discount mode (original): keep only given-label similarity,
             # zero out samples below random threshold.
             similarity = similarity * label_onehot
-            mask = (similarity > random_sim).float()
-            similarity = mask * (similarity + 0.2 * label_onehot)
+            mask = (similarity > 0.0).float()
+            similarity = mask * torch.clamp(similarity + random_sim * label_onehot, max=1.0)
 
         # Prediction: softmax + uncertainty offset (u detached for L1)
         prediction = F.softmax(model_logits, dim=1)
