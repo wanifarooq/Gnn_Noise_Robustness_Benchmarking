@@ -3,17 +3,17 @@ device: cuda
 num_runs: 1
 
 dataset:
-  name: cora
+  name: £[cora,roman-empire]  # roman-empire is heterophilous
   root: data
   normalize: true      # Set to false for heterophilous datasets (e.g. roman-empire)
 
 noise:
-  type: £[uniform]           # uniform, gaussian, or feature_mask
+  type: £[clean,uniform,flip]           # uniform, gaussian, or feature_mask
   rate: 0.2
   seed: 42
 
 model:
-  name: gcn
+  name: £[gcn,gat]
   hidden_channels: 16
   n_layers: 3
   dropout: 0.2
@@ -26,7 +26,7 @@ model:
   pe_dim: 8
 
 training:
-  method: gcod
+  method: £[standard, positive_eigenvalues, gcod, nrgnn, pi_gnn, cr_gnn, community_defense, rtgnn, graphcleaner, unionnet, gnn_cleaner, erase, gnnguard]  # positive_eigenvalues or gcod
   # method: gcod
   lr: 0.001
   weight_decay: 5e-4
