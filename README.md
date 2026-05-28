@@ -2,9 +2,9 @@
 
 A benchmarking framework for systematically evaluating GNN robustness strategies under label noise. It reproduces 13 robustness methods under standardized conditions across 24 datasets with 10 noise types, enabling fair and reproducible comparisons. The framework measures classification performance, oversmoothing behaviour, and computational cost in a unified pipeline.
 
-<div style="display: flex; justify-content: center; gap: 10px; margin-bottom: 20px;">
-  <img src="images/diagram.png" alt="Symmetric" width="100%">
-</div>
+<p align="center">
+  <img src="images/teaser.png" alt="Benchmark pipeline overview" width="100%">
+</p>
 
 ## Table of Contents
 
@@ -35,7 +35,6 @@ A benchmarking framework for systematically evaluating GNN robustness strategies
 - [Adding New Methods](#adding-new-methods)
 - [Testing](#testing)
 - [Project Structure](#project-structure)
-- [Experiments](#experiments)
 - [Author](#author)
 
 ---
@@ -202,6 +201,7 @@ training:
 |-----------|-------------|
 | `name` | Dataset name (see list below) |
 | `root` | Directory for dataset storage/download (default: `data`) |
+| `normalize` | Row-normalize node features via `NormalizeFeatures` (default: `true`). Set to `false` for heterophilous datasets (e.g. `roman-empire`) where normalization can hurt. |
 
 **24 supported datasets:**
 
@@ -255,6 +255,7 @@ Train and validation noise is applied independently (different random seed) so t
 | `hidden_channels` | Hidden representation size | All |
 | `n_layers` | Number of GNN layers | All |
 | `dropout` | Dropout probability | All |
+| `use_residual` | Add residual (skip) connections between layers of matching width. Helps on heterophilous datasets (e.g. `roman-empire`). | GCN, GAT, GATv2 |
 | `self_loop` | Add self-loops to nodes | GCN |
 | `mlp_layers` | MLP layers inside GIN convolutions | GIN |
 | `train_eps` | Learnable epsilon in GIN | GIN |
@@ -341,8 +342,12 @@ positive_eigenvalues_params:
 #### GCOD
 ```yaml
 gcod_params:
-  batch_size: 32       # Mini-batch size for NeighborLoader
-  uncertainty_lr: 1.0  # Learning rate for uncertainty parameters
+  batch_size: 64                # Mini-batch size for NeighborLoader
+  uncertainty_lr: 0.001         # Learning rate for per-sample uncertainty parameters
+  kl_start_epoch: 2             # Epoch to activate the KL term (delayed for stability)
+  momentum: 0.9                 # Class-centroid momentum (use 0 for margin-based correction)
+  temperature: 1.0             # Softening temperature for the L3 distribution loss
+  similarity_mode: correction   # 'correction' (label correction via centroids) or 'discount'
 ```
 
 #### NRGNN
@@ -968,65 +973,6 @@ Tests use 5 epochs on Cora with reduced hyperparameters for speed. The test suit
 +-- test.sh                         # Test runner
 +-- LICENSE
 ```
-
----
-
-## Experiments
-
-### Cora
-
-Results on the Cora dataset under uniform and instance noise:
-
-<p align="center">
-  <img src="images/Symmetric.png" alt="Uniform Noise" width="49%">
-  <img src="images/Asymmetric.png" alt="Instance Noise" width="49%">
-</p>
-
-<i>Results on the Cora dataset with (left) Uniform noise and (right) Instance noise.</i>
-
-### CiteSeer and Pubmed
-
-<p align="center">
-  <img src="images/CiteSeer_and_Pubmed.png" alt="Uniform noise with 0.6 noise ratio on Cora dataset" width="100%">
-</p>
-
-<i>Performance of models on CiteSeer and Pubmed datasets with Uniform noise (ratio 0.6).</i>
-
-### Ablation Studies
-
-#### Type of Noise
-
-<p align="center">
-  <img src="images/Different_noise_type.png" alt="Uniform noise with 0.6 noise ratio on Cora dataset" width="100%">
-</p>
-
-<i>Performance of GraphCleaner with different noise types (Cora dataset, noise ratio 0.6).</i>
-
-#### Backbone Architectures
-
-<p align="center">
-  <img src="images/Different_Backbone.png" alt="Uniform noise with 0.6 noise ratio on Cora dataset" width="70%">
-</p>
-
-<i>Results on the Cora dataset with Uniform noise (noise ratio 0.6).</i>
-
-#### Oversmoothing Metrics
-
-<p align="center">
-  <img src="images/Loss.png" alt="Loss" width="32%">
-  <img src="images/Accuracy.png" alt="Accuracy" width="31.6%">
-  <img src="images/F1.png" alt="F1-Score" width="31.2%">
-</p>
-
-<i>Evolution of Loss (left), Accuracy (center), and F1-Score (right) during training and validation.</i>
-
-<p align="center">
-  <img src="images/E_dir.png" alt="E_dir" width="32%">
-  <img src="images/Mad.png" alt="MAD" width="31.5%">
-  <img src="images/NumRank.png" alt="Numrank" width="31.2%">
-</p>
-
-<i>Evolution of E<sup>dir</sup> (left), MAD (center), and NumRank (right) during training and validation.</i>
 
 ---
 
