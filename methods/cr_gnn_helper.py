@@ -38,11 +38,16 @@ class CRGNNHelper(MethodHelper):
                                            training_cfg.get('weight_decay', 5e-4)))
         hidden_channels = int(config['model'].get('hidden_channels', 64))
 
+        # Defaults follow the paper / NoisyGL reference (predictor/module/CRGNN.py):
+        # the cross-space consistency term is collapse-prone, so its weight beta
+        # defaults to the paper's 0.2 (NoisyGL even disables it) rather than 1.0,
+        # tau defaults to 0.5 and the consistency threshold p to 0.8.  These are
+        # fallbacks only — explicit config values (e.g. in tests) override them.
         alpha = float(cr_params.get('alpha', 1.0))
-        beta = float(cr_params.get('beta', 1.0))
+        beta = float(cr_params.get('beta', 0.2))
         tau = float(cr_params.get('tau', 0.5))
         T = float(cr_params.get('T', 0.5))
-        p_threshold = float(cr_params.get('p', 0.5))
+        p_threshold = float(cr_params.get('p', 0.8))
         pr = float(cr_params.get('pr', 0.3))
 
         num_classes = init_data.get('num_classes', int(data.y.max().item()) + 1)

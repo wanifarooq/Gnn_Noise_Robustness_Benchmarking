@@ -17,8 +17,18 @@ model:
   hidden_channels: 16
   n_layers: 3
   dropout: 0.2
-  self_loop: true
-  use_residual: false  # Set to true for heterophilous datasets (e.g. roman-empire)
+  # --- Backbone knobs (all switchable here). Recommended settings differ by graph type:
+  #   HOMOPHILIC  (cora, citeseer, pubmed, dblp, amazon-computers/photo):
+  #       self_loop: true,  use_residual: false, jk: none,  normalization: layer (or batch for dense),
+  #       dataset.normalize: true,  n_layers: 2-3
+  #   HETEROPHILIC (roman-empire, amazon-ratings, minesweeper, tolokers, questions):
+  #       self_loop: FALSE, use_residual: true,  jk: cat,   normalization: layer,
+  #       dataset.normalize: false, n_layers: deeper (e.g. 5-11)
+  # (These reproduce the "Classic GNNs are Strong Baselines" (arXiv:2406.08993) setup.)
+  self_loop: true      # Set FALSE for heterophilous datasets (self-loops dilute the neighbour signal -> ~10-15% drop)
+  use_residual: false  # Set true for heterophilous datasets (e.g. roman-empire)
+  jk: none             # none | cat | max — Jumping-Knowledge. Use 'cat' for heterophilous / deep models; needed to match paper numbers there.
+  normalization: layer # none | batch | layer. LayerNorm fixes dense-graph collapse without hurting sparse graphs; batch is strongest on large dense graphs.
   mlp_layers: 1
   train_eps: false
   heads: 8

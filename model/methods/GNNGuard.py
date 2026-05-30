@@ -14,21 +14,39 @@ from model.registry import register
 
 
 class GNNGuardModel(nn.Module):
-    
-    def __init__(self, input_features, hidden_channels, num_classes, dropout=0.5, 
+    """GNNGuard defence wrapper (Zhang & Zitnik, NeurIPS 2020).
+
+    GNNGuard is originally an *adversarial-structure-attack* defence: it
+    reweights edges by the cosine similarity of the incident node
+    representations, prunes dissimilar edges (similarity < P0), row-normalises
+    the resulting attention coefficients and adds an adaptive self-loop term
+    (N_hat / (N_hat + 1) ≈ 1 / (deg + 1)), then passes these edge weights into
+    message passing.  A layer-wise graph-memory term blends the attention of
+    successive layers via a learnable ``beta``:
+
+        omega^k = beta * omega^{k-1} + (1 - beta) * alpha_hat^k
+
+    In this benchmark it is applied (off-label) as a *label-noise* baseline.
+    The defining mechanism is run for real and wired through the shared
+    backbone, whose GCN/GAT/GATv2/GPS layers accept ``edge_weight``.
+    """
+
+    def __init__(self, input_features, hidden_channels, num_classes, dropout=0.5,
                  similarity_threshold=0.5, num_layers=2, attention_dim=16, device=None,
                  backbone=None):
 
         super(GNNGuardModel, self).__init__()
-        
+
         self.device = device
         self.dropout_rate = dropout
         self.similarity_threshold = similarity_threshold
         self.num_layers = num_layers
         self.attention_dim = attention_dim
-        
+
+        # Learnable layer-wise graph-memory coefficient (beta).  Stored as a
+        # raw parameter and squashed through a sigmoid so beta stays in (0, 1).
         self.attention_gate = Parameter(torch.rand(1))
-        
+
         if backbone is not None:
             self.backbone = backbone.to(device)
             self.use_backbone = True
@@ -41,13 +59,55 @@ class GNNGuardModel(nn.Module):
                 self.gcn_layers.append(GCNConv(hidden_channels, self.attention_dim, bias=True))
             final_input_dim = self.attention_dim if self.num_layers > 1 else hidden_channels
             self.gcn_layers.append(GCNConv(final_input_dim, num_classes, bias=True))
-    
+
+    def _guard_edge_weights(self, x, adjacency_tensor):
+        """Compute GNNGuard edge weights via per-layer cosine attention + memory.
+
+        Runs the defining GNNGuard mechanism: at each of the K layers it
+        recomputes the cosine-similarity attention coefficients (with P0
+        pruning, row-normalisation and the adaptive self-loop term) from the
+        node representations propagated through the previous layer's attention,
+        and blends them with the learnable graph-memory term ``beta``.
+
+        Returns ``(edge_index, edge_weight)`` describing the final reweighted
+        sparse adjacency, suitable for passing to the backbone via
+        ``data.edge_weight``.
+        """
+        beta = torch.sigmoid(self.attention_gate).reshape(())
+
+        # Layer 0 attention from the raw input features.
+        omega = self._compute_attention_coefficients(x, adjacency_tensor, 0)
+        rep = x
+
+        for layer_idx in range(1, self.num_layers):
+            # Propagate node representations one hop through the current
+            # attention-weighted adjacency, then recompute attention.
+            rep = torch.sparse.mm(omega, rep)
+            alpha_k = self._compute_attention_coefficients(rep, adjacency_tensor, layer_idx)
+            # Graph-memory term: omega^k = beta * omega^{k-1} + (1 - beta) * alpha_hat^k.
+            # Sum the two sparse tensors (with beta-scaled values) and coalesce so
+            # overlapping indices are merged before the next propagation step.
+            omega_scaled = torch.sparse_coo_tensor(
+                omega.indices(), omega.values() * beta, omega.shape,
+            )
+            alpha_scaled = torch.sparse_coo_tensor(
+                alpha_k.indices(), alpha_k.values() * (1.0 - beta), alpha_k.shape,
+            )
+            omega = (omega_scaled + alpha_scaled).coalesce()
+
+        return omega.indices(), omega.values()
+
     def forward(self, node_features, adjacency_tensor, use_attention=True):
         x = node_features.to_dense() if node_features.is_sparse else node_features
         x = x.to(self.device)
 
         if self.use_backbone:
-            data = Data(x=x, edge_index=adjacency_tensor._indices(), edge_weight=adjacency_tensor._values())
+            if use_attention:
+                edge_index, edge_weight = self._guard_edge_weights(x, adjacency_tensor)
+            else:
+                edge_index = adjacency_tensor._indices()
+                edge_weight = adjacency_tensor._values()
+            data = Data(x=x, edge_index=edge_index, edge_weight=edge_weight)
             out = self.backbone(data)
             return F.log_softmax(out, dim=1)
 
@@ -85,7 +145,12 @@ class GNNGuardModel(nn.Module):
         x = x.to(self.device)
 
         if self.use_backbone:
-            data = Data(x=x, edge_index=adjacency_tensor._indices(), edge_weight=adjacency_tensor._values())
+            if use_attention:
+                edge_index, edge_weight = self._guard_edge_weights(x, adjacency_tensor)
+            else:
+                edge_index = adjacency_tensor._indices()
+                edge_weight = adjacency_tensor._values()
+            data = Data(x=x, edge_index=edge_index, edge_weight=edge_weight)
             return self.backbone.get_embeddings(data)
 
         last_hidden_idx = len(self.gcn_layers) - 2
@@ -169,10 +234,11 @@ class GNNGuardModel(nn.Module):
         ).to(self.device)
         
         tensor_shape = (num_nodes, num_nodes)
-        attention_weighted_adjacency = torch.sparse.FloatTensor(
-            attention_edge_indices, attention_weights_tensor, tensor_shape
-        ).to(self.device)
-        
+        attention_weighted_adjacency = torch.sparse_coo_tensor(
+            attention_edge_indices, attention_weights_tensor, tensor_shape,
+            dtype=torch.float32, device=self.device,
+        ).coalesce()
+
         return attention_weighted_adjacency
 
 

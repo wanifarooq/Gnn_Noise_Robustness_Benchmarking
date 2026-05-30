@@ -149,6 +149,7 @@ def run_benchmarking(base_folder='results', config_path=DEFAULT_CONFIG,
 
         # Execute only the missing runs
         codecarbon_file_name = "emissions.csv"
+        config_failed = False
         for run in runs_needed:
             try:
                 tracker = EmissionsTracker(output_dir=experiment_dir,
@@ -167,6 +168,7 @@ def run_benchmarking(base_folder='results', config_path=DEFAULT_CONFIG,
             run_dir = os.path.join(experiment_dir, f"run_{run}")
             ckpt_path = (os.path.join(experiment_dir, f"best_run_{run}.pt")
                          if save_checkpoint or run_eval_only else None)
+            run_failed = False
             try:
                 run_result = run_experiment(
                     sweep_config, run_id=run,
@@ -177,18 +179,39 @@ def run_benchmarking(base_folder='results', config_path=DEFAULT_CONFIG,
                 print("[OOM] CUDA out of memory — falling back to CPU for this run")
                 torch.cuda.empty_cache()
                 gc.collect()
-                # Retry on CPU
-                cpu_config = {**sweep_config, 'device': 'cpu'}
-                run_result = run_experiment(
-                    cpu_config, run_id=run,
-                    checkpoint_path=ckpt_path, eval_only=run_eval_only,
-                    run_dir=run_dir if not run_eval_only else None,
-                )
-                # Clear any leftover GPU state before next CUDA run
-                torch.cuda.empty_cache()
+                try:
+                    # Retry on CPU
+                    cpu_config = {**sweep_config, 'device': 'cpu'}
+                    run_result = run_experiment(
+                        cpu_config, run_id=run,
+                        checkpoint_path=ckpt_path, eval_only=run_eval_only,
+                        run_dir=run_dir if not run_eval_only else None,
+                    )
+                except Exception as e2:
+                    print(f"[SKIP] {file_name}: run {run} failed after CPU fallback "
+                          f"({type(e2).__name__}: {str(e2)[:200]}). Skipping this configuration.")
+                    run_failed = True
+                finally:
+                    torch.cuda.empty_cache()
+            except Exception as e:
+                # Isolate any per-config failure (e.g. a method that OOMs on a
+                # large/dense graph) so the rest of the sweep still completes.
+                print(f"[SKIP] {file_name}: run {run} failed "
+                      f"({type(e).__name__}: {str(e)[:200]}). Skipping this configuration.")
+                run_failed = True
 
             if run_codecarbon:
-                tracker.stop()
+                try:
+                    tracker.stop()
+                except Exception:
+                    pass
+
+            if run_failed:
+                gc.collect()
+                if device_str == "cuda":
+                    torch.cuda.empty_cache()
+                config_failed = True
+                break
 
             _accumulate_run_result(run_result, classification_runs, oversmoothing_runs, compute_runs)
 
@@ -197,6 +220,15 @@ def run_benchmarking(base_folder='results', config_path=DEFAULT_CONFIG,
             del run_result
             if device_str == "cuda":
                 torch.cuda.empty_cache()
+
+        # A run in this configuration failed unrecoverably — skip saving and
+        # move on to the next configuration so the sweep completes.
+        if config_failed:
+            print(f"[SKIP] {file_name}: configuration skipped due to a failed run.")
+            gc.collect()
+            if device_str == "cuda":
+                torch.cuda.empty_cache()
+            continue
 
         # ── Print summary tables ──
         cls_headers = ['split', 'accuracy', 'f1', 'precision', 'recall']

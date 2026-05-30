@@ -10,6 +10,15 @@ GraphCleaner is a two-phase method:
 
 The noise detection phase reuses GraphCleanerNoiseDetector from the original
 implementation.  The clean training phase is identical to StandardHelper.
+
+GraphCleaner (Li et al., ICML 2023) is a mislabel *detector*.  The paper trains
+a small MLP with an L1 loss on k-hop label/prediction propagation-agreement
+features, using a val-set confident-joint transition matrix and half-val
+synthetic mislabel generation.  Here we use the detector for the benchmark's
+*train-cleaning* adaptation: nodes flagged as mislabelled are removed from
+``train_mask`` and the backbone is then retrained on the cleaned set.  All
+features and the transition matrix use the NOISY observed labels (``data.y`` /
+``y_noisy``); the clean ground truth (``y_original``) is never read.
 """
 
 import torch

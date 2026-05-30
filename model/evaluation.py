@@ -52,6 +52,11 @@ class ClassificationMetrics:
         }
 
     def compute_accuracy(self, predictions, labels):
+        # Fast path: both tensors -> compute on-device, single scalar sync.
+        if isinstance(predictions, torch.Tensor) and isinstance(labels, torch.Tensor):
+            if predictions.numel() == 0:
+                return 0.0
+            return float((predictions == labels).float().mean().item())
         if isinstance(predictions, torch.Tensor):
             predictions = predictions.detach().cpu().numpy()
         if isinstance(labels, torch.Tensor):
@@ -96,7 +101,14 @@ class OversmoothingMetrics:
 
     def compute_all_metrics(self, X, edge_index, edge_weight=None, batch_size=None):
         metrics = {}
-        X_np = X.detach().cpu().numpy()
+
+        # --- Shared singular values: one decomposition feeds NumRank + Erank ---
+        # Computed on-device (torch.linalg.svdvals) to avoid a CPU round-trip and
+        # a redundant second SVD (previously scipy.svd was called once per metric).
+        try:
+            sv = torch.linalg.svdvals(X.detach())
+        except Exception:
+            sv = None
 
         try:
             metrics['EDir'] = self._compute_edir_average(X, edge_index, edge_weight)
@@ -105,25 +117,34 @@ class OversmoothingMetrics:
             metrics['EDir'] = 0.0
 
         try:
-            metrics['NumRank'] = self._compute_numerical_rank(X_np)
+            metrics['NumRank'] = self._compute_numerical_rank(X, sv=sv)
         except Exception as e:
             print(f"Warning: Could not compute NumRank: {e}")
-            metrics['NumRank'] = float(min(X_np.shape))
+            metrics['NumRank'] = float(min(X.shape))
 
         try:
-            metrics['Erank'] = self._compute_effective_rank(X_np)
+            metrics['Erank'] = self._compute_effective_rank(X, sv=sv)
         except Exception as e:
             print(f"Warning: Could not compute Erank: {e}")
-            metrics['Erank'] = float(min(X_np.shape))
+            metrics['Erank'] = float(min(X.shape))
+
+        # --- Shared dominant eigenvector: one eigsh feeds EDir_traditional + EProj ---
+        try:
+            u_dom = self._compute_message_passing_matrix_eigenvector(
+                edge_index, X.size(0), edge_weight)
+        except Exception:
+            u_dom = None
 
         try:
-            metrics['EDir_traditional'] = self._compute_dirichlet_energy_traditional(X, edge_index, edge_weight)
+            metrics['EDir_traditional'] = self._compute_dirichlet_energy_traditional(
+                X, edge_index, edge_weight, u=u_dom)
         except Exception as e:
             print(f"Warning: Could not compute EDir_traditional: {e}")
             metrics['EDir_traditional'] = 0.0
 
         try:
-            metrics['EProj'] = self._compute_projection_energy(X, edge_index, edge_weight)
+            metrics['EProj'] = self._compute_projection_energy(
+                X, edge_index, edge_weight, u=u_dom)
         except Exception as e:
             print(f"Warning: Could not compute EProj: {e}")
             metrics['EProj'] = 0.0
@@ -177,22 +198,24 @@ class OversmoothingMetrics:
             energies = energies * edge_weight
         return energies.sum().item() / 2.0
 
-    def _compute_numerical_rank(self, X):
-        frobenius_norm_sq = np.sum(X**2)
-        try:
-            s = svd(X, full_matrices=False, compute_uv=False)
-            spectral_norm_sq = s[0]**2 if len(s) > 0 else 1e-8
-        except Exception:
-            spectral_norm_sq = np.linalg.norm(X, ord=2)**2
+    def _singular_values_np(self, X, sv=None):
+        """Return singular values as a numpy array, reusing ``sv`` if provided."""
+        if sv is not None:
+            return sv.detach().cpu().numpy() if isinstance(sv, torch.Tensor) else np.asarray(sv)
+        X_np = X.detach().cpu().numpy() if isinstance(X, torch.Tensor) else np.asarray(X)
+        return svd(X_np, full_matrices=False, compute_uv=False)
 
+    def _compute_numerical_rank(self, X, sv=None):
+        s = self._singular_values_np(X, sv)
+        frobenius_norm_sq = float(np.sum(s ** 2))
+        spectral_norm_sq = float(s[0] ** 2) if len(s) > 0 else 1e-8
         if spectral_norm_sq < 1e-12:
             return 1.0
-
         return frobenius_norm_sq / spectral_norm_sq
 
-    def _compute_effective_rank(self, X):
+    def _compute_effective_rank(self, X, sv=None):
         try:
-            s = svd(X, full_matrices=False, compute_uv=False)
+            s = self._singular_values_np(X, sv)
             s = s[s > 1e-12]
 
             if len(s) == 0:
@@ -203,7 +226,7 @@ class OversmoothingMetrics:
             p = p[p > 1e-12]
             entropy = -np.sum(p * np.log(p))
 
-            return np.exp(entropy)
+            return float(np.exp(entropy))
         except Exception:
             return float(min(X.shape))
 
@@ -256,7 +279,7 @@ class OversmoothingMetrics:
     #         total_energy += energy.item()
     #     return total_energy
     
-    def _compute_dirichlet_energy_traditional(self, X, edge_index, edge_weight=None):
+    def _compute_dirichlet_energy_traditional(self, X, edge_index, edge_weight=None, u=None):
         """ Refactored to vectorised form for efficiency.  The logic is preserved. Step by step:
 
         1. Eigenvector computation + normalization — identical in both (u / np.max(u), np.maximum(u, 1e-4)).
@@ -265,10 +288,14 @@ class OversmoothingMetrics:
         3. Per-edge energy — torch.norm(diff, p=2)**2 = sum(diff²) = (diff**2).sum(dim=1). Identical.
         4. Edge weight handling — Both multiply per-edge energy by the corresponding weight. Identical.
         5. Final return — Both return the raw sum (no division). Identical.
+
+        ``u`` (dominant eigenvector) may be passed in to avoid recomputing the
+        eigsh decomposition shared with EProj.
         """
         num_nodes = X.size(0)
 
-        u = self._compute_message_passing_matrix_eigenvector(edge_index, num_nodes, edge_weight)
+        if u is None:
+            u = self._compute_message_passing_matrix_eigenvector(edge_index, num_nodes, edge_weight)
 
         # Normalization
         u = u / np.max(u)
@@ -282,10 +309,11 @@ class OversmoothingMetrics:
             energies = energies * edge_weight
         return energies.sum().item()
 
-    def _compute_projection_energy(self, X, edge_index, edge_weight=None):
+    def _compute_projection_energy(self, X, edge_index, edge_weight=None, u=None):
         num_nodes = X.size(0)
 
-        u = self._compute_message_passing_matrix_eigenvector(edge_index, num_nodes, edge_weight)
+        if u is None:
+            u = self._compute_message_passing_matrix_eigenvector(edge_index, num_nodes, edge_weight)
         u = torch.tensor(u, device=X.device, dtype=X.dtype).unsqueeze(1)
 
         # Normalization

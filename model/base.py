@@ -91,8 +91,11 @@ class BaseTrainer(ABC):
             'val_f1_only_mislabelled_corrected': None,
             'oversmoothing': oversmoothing,
         }
+        # Noise-split metrics are expensive (up to 12 macro-F1 sklearn calls).
+        # They are only needed periodically for training curves, so compute them
+        # on the same cadence as oversmoothing (or on best epochs), not every epoch.
         masks = self._get_noise_split_masks()
-        if train_predictions is not None and masks is not None:
+        if train_predictions is not None and masks is not None and (oversmoothing is not None or is_best):
             cls = ClassificationMetrics(average='macro')
             ny, cy = masks['noisy_labels'], masks['clean_labels']
             if 'clean_idx' in masks:
@@ -114,7 +117,10 @@ class BaseTrainer(ABC):
         self.epoch_log.append(entry)
 
         run_dir = self.init_data.get('run_dir')
-        checkpoint_every = self.config.get('training', {}).get('checkpoint_every_epoch', True)
+        # Default False: the best-epoch checkpoint is tracked in memory
+        # (_best_checkpoint_state) and persisted by run_experiment, so writing a
+        # .pt every epoch is wasteful I/O (1500 files/run). Opt in explicitly.
+        checkpoint_every = self.config.get('training', {}).get('checkpoint_every_epoch', False)
         should_save_disk = (checkpoint_every or is_best) and run_dir
 
         if is_best or should_save_disk:

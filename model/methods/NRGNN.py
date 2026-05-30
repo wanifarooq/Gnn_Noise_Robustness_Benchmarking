@@ -60,7 +60,7 @@ class NRGNN:
         self.original_edge_index = None
         self.potential_edge_index = None
         self.confident_edge_index = None
-        self.confident_node_indices = []
+        self.confident_node_indices = None
         self.unlabeled_node_indices = None
 
         self.node_features = None
@@ -148,16 +148,17 @@ class NRGNN:
         return wrapper
 
     def compute_estimated_edge_weights(self, edge_index, node_representations):
-        #Compute edge weights from node representations
+        # Faithful to EstimateAdj.get_estimated_weigths in the official NRGNN code:
+        #   output = sum(repr[src] * repr[dst]); w = relu(output); w[w < t_small] = 0
         source_nodes = node_representations[edge_index[0]]
         target_nodes = node_representations[edge_index[1]]
         similarity_scores = torch.sum(source_nodes * target_nodes, dim=1)
         estimated_weights = F.relu(similarity_scores)
-        
-        #Apply threshold
-        weight_mask = estimated_weights >= self.edge_threshold
-        estimated_weights = estimated_weights * weight_mask.float()
-        
+        estimated_weights = torch.where(
+            estimated_weights < self.edge_threshold,
+            torch.zeros_like(estimated_weights),
+            estimated_weights,
+        )
         return estimated_weights
 
     def compute_reconstruction_loss(self, edge_index, node_representations):
@@ -292,38 +293,42 @@ class NRGNN:
         return potential_edges_tensor
 
     def identify_confident_edges(self, prediction_probabilities):
-        #Identify edges to confident unlabeled nodes
+        """Faithful re-implementation of the official NRGNN ``get_model_edge``.
+
+        idx_add = unlabeled nodes whose predictor confidence exceeds ``p_u``.
+        Confident pseudo-labeled nodes are linked to the unlabeled nodes
+        (edges from every unlabeled node to each confident node, minus
+        self-loops) so the main GCN can leverage the mined pseudo-labels.
+
+        NOTE: this is the official O(|unlabeled| x |confident|) construction.
+        It is faithful to the paper but does NOT scale — on large graphs it can
+        OOM and on dense graphs it makes the augmented graph near-complete
+        (rank-1 oversmoothing collapse). That is an intrinsic property of NRGNN
+        and is reported as a benchmark finding, not patched here.
+
+        Returns (unlabel_edge_index, idx_add) where idx_add is a LongTensor.
+        """
+        empty_add = torch.empty((0,), dtype=torch.long, device=self.device)
         if len(self.unlabeled_node_indices) == 0:
-            return torch.empty((2, 0), dtype=torch.long, device=self.device), []
+            return torch.empty((2, 0), dtype=torch.long, device=self.device), empty_add
 
         max_probabilities = prediction_probabilities.max(dim=1)[0]
-        confident_mask = max_probabilities[self.unlabeled_node_indices] > self.confidence_threshold
-        confident_nodes = self.unlabeled_node_indices[confident_mask]
-        
-        if len(confident_nodes) == 0:
-            return torch.empty((2, 0), dtype=torch.long, device=self.device), confident_nodes.cpu().numpy()
+        confident_mask = (
+            max_probabilities[self.unlabeled_node_indices] > self.confidence_threshold
+        )
+        idx_add = self.unlabeled_node_indices[confident_mask]
 
-        num_unlabeled = len(self.unlabeled_node_indices)
-        num_confident = len(confident_nodes)
-        
-        if num_unlabeled == 0 or num_confident == 0:
-            return torch.empty((2, 0), dtype=torch.long, device=self.device), confident_nodes.cpu().numpy()
-        
-        # Create all pairs between unlabeled and confident nodes
-        # N-1 Fix: Use repeat_interleave for source to get [u1,u1, u2,u2...] 
-        # and repeat for target to get [c1,c2, c1,c2...] resulting in all pairs.
-        source_nodes = self.unlabeled_node_indices.repeat_interleave(num_confident)
-        target_nodes = confident_nodes.repeat(num_unlabeled)
-        
-        valid_connections_mask = source_nodes != target_nodes
-        
-        if valid_connections_mask.sum() == 0:
-            return torch.empty((2, 0), dtype=torch.long, device=self.device), confident_nodes.cpu().numpy()
-        
-        confident_edge_index = torch.stack([source_nodes[valid_connections_mask], 
-                                          target_nodes[valid_connections_mask]], dim=0)
-        
-        return confident_edge_index, confident_nodes.cpu().numpy()
+        if len(idx_add) == 0:
+            return torch.empty((2, 0), dtype=torch.long, device=self.device), idx_add
+
+        # row = [u1, u2, ..., uN, u1, u2, ...] (idx_unlabel repeated len(idx_add) times)
+        # col = [c1, c1, ..., c1, c2, c2, ...] (each confident node repeated N times)
+        row = self.unlabeled_node_indices.repeat(len(idx_add))
+        col = idx_add.repeat(len(self.unlabeled_node_indices), 1).T.flatten()
+        mask = row != col
+
+        confident_edge_index = torch.stack([row[mask], col[mask]], dim=0)
+        return confident_edge_index, idx_add
 
     def test(self, test_indices):
         self.main_model.eval()

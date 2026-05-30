@@ -1,9 +1,25 @@
-"""CommunityDefense method helper — community-aware regularization training.
+"""CommunityDefense method helper — custom community-structure-regularized baseline.
 
-Runs community detection (Louvain or spectral) on the graph and adds an
-adaptive community regularization loss that encourages node embeddings to
-align with detected community structure.  The regularization weight ramps
-up linearly over the first 50 epochs.
+NOTE: This is a CUSTOM baseline with NO source paper. It does not implement any
+published "community defense" algorithm. Despite the legacy config keys
+(``pos_weight``, ``neg_weight``, ``margin``, ``num_neg_samples``) which suggest a
+contrastive objective, NO contrastive loss is used. Those keys are vestigial and
+are ignored by this implementation.
+
+What it actually does:
+    1. Runs noise-independent community detection (Louvain or spectral) on the
+       graph structure to obtain a fixed community label per node. These labels
+       come purely from the adjacency structure and never touch ``data.y``.
+    2. Trains the backbone with the standard few-shot supervised cross-entropy on
+       the (noisy) train labels, PLUS an auxiliary cross-entropy that classifies
+       every node's backbone embedding into its detected community via a small
+       linear head. This auxiliary term acts as a mild structure-only regularizer.
+
+The auxiliary community loss is BOUNDED so that it cannot dominate the supervised
+signal (see ``train_step``): its effective weight is capped and the term is
+clamped to the magnitude of the supervised CE, so it behaves as a regularizer
+rather than overwhelming the few-shot supervision (which would otherwise cause
+representation collapse, especially on heterophilous graphs).
 
 Mirrors the logic in model/methods/CommunityDefense.py.
 """
@@ -127,7 +143,11 @@ def _detect_spectral(adj_csr, num_nodes, k, y_tensor=None):
 
 @register_helper('community_defense')
 class CommunityDefenseHelper(MethodHelper):
-    """Community-aware regularization training."""
+    """Custom community-structure-regularized baseline (no source paper).
+
+    Plain supervised CE on noisy train labels + a bounded auxiliary community-label
+    CE over all nodes. No contrastive loss is used despite the legacy config keys.
+    """
 
     def supports_batched_training(self):
         return True
@@ -215,12 +235,26 @@ class CommunityDefenseHelper(MethodHelper):
         # CD-2 Fix: Use actual hidden embeddings from the backbone instead of surrogate logits
         embeddings = model.get_embeddings(data)
 
-        # Community regularization loss (adaptive weight ramps over 50 epochs)
-        adaptive_weight = community_loss_weight * min(1.0, (epoch + 1) / 50.0)
+        # Community regularization loss (adaptive weight ramps over 50 epochs).
+        # The all-node community CE is averaged (F.cross_entropy already means over
+        # nodes) so it is on the same per-node scale as the supervised CE.
         comm_logits = community_classifier(embeddings)
         comm_loss = F.cross_entropy(comm_logits, community_labels)
 
-        total_loss = ce_loss + adaptive_weight * comm_loss
+        # Bound the regularizer so it cannot dominate the few-shot supervised CE
+        # (which would cause representation collapse, esp. on heterophilous graphs):
+        #   1. cap the adaptive weight at 1.0 so the configured lambda cannot blow up,
+        #   2. clamp the weighted community term to the (detached) supervised CE
+        #      magnitude, so it acts only as a mild regularizer.
+        ramp = min(1.0, (epoch + 1) / 50.0)
+        adaptive_weight = min(1.0, community_loss_weight) * ramp
+        weighted_comm = adaptive_weight * comm_loss
+        comm_cap = ce_loss.detach()
+        if weighted_comm > comm_cap:
+            # rescale to the cap while preserving gradient direction
+            weighted_comm = weighted_comm * (comm_cap / (weighted_comm.detach() + 1e-12))
+
+        total_loss = ce_loss + weighted_comm
         total_loss.backward()
 
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)

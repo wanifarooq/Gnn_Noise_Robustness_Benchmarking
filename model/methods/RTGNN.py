@@ -21,7 +21,8 @@ class DualBranchGNNModel(nn.Module):
     def __init__(self, gnn_type: str, input_features: int, hidden_dim: int, num_classes: int,
                  dropout_rate: float = 0.5, attention_heads: int = 4,
                  num_layers: int | None = None, device=None, add_self_loops: bool = False,
-                 attn_type: str = 'multihead', use_pe: bool = False, pe_dim: int = 8):
+                 attn_type: str = 'multihead', use_pe: bool = False, pe_dim: int = 8,
+                 model_config: dict | None = None):
         super().__init__()
         self.device = device
         self.gnn_type = gnn_type.lower()
@@ -32,24 +33,17 @@ class DualBranchGNNModel(nn.Module):
         self.pe_dim = pe_dim
 
         def create_gnn_branch():
-            if self.gnn_type == 'gcn':
-                return GCN(input_features, hidden_dim, num_classes, n_layers=num_layers or 2,
-                          dropout=dropout_rate, self_loop=self.add_self_loops)
-            elif self.gnn_type == 'gin':
-                return GIN(input_features, hidden_dim, num_classes, n_layers=num_layers or 3,
-                          mlp_layers=2, dropout=dropout_rate)
-            elif self.gnn_type == 'gat':
-                return GAT(input_features, hidden_dim, num_classes, n_layers=num_layers or 3,
-                          heads=attention_heads, dropout=dropout_rate, self_loop=self.add_self_loops)
-            elif self.gnn_type == 'gatv2':
-                return GATv2(input_features, hidden_dim, num_classes, n_layers=num_layers or 3,
-                            heads=attention_heads, dropout=dropout_rate, self_loop=self.add_self_loops)
-            elif self.gnn_type == 'gps':
-                return GPS(input_features, hidden_dim, num_classes, n_layers=num_layers or 3,
-                          heads=attention_heads, dropout=dropout_rate, 
-                          attn_type=self.attn_type, use_pe=self.use_pe, pe_dim=self.pe_dim)
-            else:
-                raise ValueError(f"GNN type {self.gnn_type} not supported")
+            # Build each branch via the shared factory so RTGNN honours the
+            # configured backbone (including gcn_modified and its flags),
+            # exactly like every other method.
+            from util.profiling import get_model
+            flags = {k: v for k, v in (model_config or {}).items()
+                     if k not in ('name', 'hidden_channels', 'in_channels', 'out_channels')}
+            flags.setdefault('n_layers', num_layers or 2)
+            flags.setdefault('dropout', dropout_rate)
+            flags.setdefault('heads', attention_heads)
+            flags.setdefault('self_loop', self.add_self_loops)
+            return get_model(self.gnn_type, input_features, hidden_dim, num_classes, **flags)
 
         self.first_branch = create_gnn_branch()
         self.second_branch = create_gnn_branch()
@@ -83,85 +77,116 @@ class DualBranchGNNModel(nn.Module):
             self.second_branch.reset_parameters()
 
 
+def kl_loss_compute(pred, soft_targets, reduce=True, temperature=1.0):
+    """KL divergence used for the inter-view consistency term (official RTGNN)."""
+    pred = pred / temperature
+    soft_targets = soft_targets / temperature
+    kl = F.kl_div(F.log_softmax(pred, dim=1),
+                  F.softmax(soft_targets, dim=1), reduction='none')
+    if reduce:
+        return torch.mean(torch.sum(kl, dim=1))
+    return torch.sum(kl, dim=1)
+
+
 class AdaptiveCoTeachingLoss(nn.Module):
-    #Adaptive co-teaching loss
-    
+    """Faithful re-implementation of the paper's ``LabeledDividedLoss``.
+
+    Both branches share a single combined small-loss ranking
+    ``loss_pick = loss1 + loss2`` (NOT classic cross-branch co-teaching).
+    The selected small-loss set is trained directly (``loss_clean``); among the
+    remaining (noisy-candidate) samples, those where both branches agree with
+    high confidence are corrected toward the agreed pseudo-label (``loss_dc``),
+    while the rest are kept with a down-weighted ``decay_w * loss1`` term.
+    An inter-view KL consistency term (scaled by ``co_lambda``) is added.
+    """
+
     def __init__(self, training_config):
         super().__init__()
         self.training_config = training_config
         self.total_epochs = training_config.epochs
-        # Forget rate starting small and increasing to a max (e.g. noise rate)
-        self.forget_rate_max = 0.5 # default max
-        self.forget_rate_increment = self.forget_rate_max / self.total_epochs
-        self.residual_weight_decay = 1.0
+        # forget_rate = increment * epoch, with increment = 0.5 / epochs
+        self.increment = 0.5 / self.total_epochs
+        self.decay_w = getattr(training_config, 'decay_w', 0.1)
 
-    def forward(self, first_branch_logits, second_branch_logits, target_labels, current_epoch=0):
-        # R-2 Fix: Proper Co-teaching logic. 
-        # Each branch calculates its own loss, but only trains on the samples 
-        # that the OTHER branch thinks are clean.
-        
-        loss1 = F.cross_entropy(first_branch_logits, target_labels, reduction='none')
-        loss2 = F.cross_entropy(second_branch_logits, target_labels, reduction='none')
-        
-        if current_epoch == 0:
-            return loss1.mean() + loss2.mean()
+    def forward(self, first_branch_logits, second_branch_logits, target_labels,
+                current_epoch=0, co_lambda=None):
+        y_1, y_2, t = first_branch_logits, second_branch_logits, target_labels
+        device = y_1.device
+        n = y_1.shape[0]
+        if co_lambda is None:
+            co_lambda = self.training_config.co_lambda
 
-        # Calculate how many samples to "remember"
-        current_forget_rate = self.forget_rate_increment * current_epoch
-        num_to_remember = int((1 - current_forget_rate) * len(target_labels))
-        num_to_remember = max(int(0.5 * len(target_labels)), num_to_remember)
+        loss_pick_1 = F.cross_entropy(y_1, t, reduction='none')
+        loss_pick_2 = F.cross_entropy(y_2, t, reduction='none')
+        loss_pick = loss_pick_1 + loss_pick_2
 
-        # Branch 1 picks clean samples for Branch 2
-        idx1 = torch.argsort(loss1)[:num_to_remember]
-        # Branch 2 picks clean samples for Branch 1
-        idx2 = torch.argsort(loss2)[:num_to_remember]
+        # Inter-view consistency between the two branches.
+        inter_view_loss = (kl_loss_compute(y_1, y_2) + kl_loss_compute(y_2, y_1))
 
-        # Cross-update: Branch 1 trains on idx2, Branch 2 trains on idx1
-        clean_loss = loss1[idx2].mean() + loss2[idx1].mean()
+        if n == 0:
+            return co_lambda * inter_view_loss
 
-        # Correction loss for noisy samples (using pseudo-labels)
-        correction_loss = torch.tensor(0.0, device=first_branch_logits.device)
-        
-        # Identified noisy samples (those not picked by either branch)
-        noisy_mask = torch.ones(len(target_labels), dtype=torch.bool, device=first_branch_logits.device)
-        noisy_mask[idx1] = False
-        noisy_mask[idx2] = False
-        noisy_indices = torch.where(noisy_mask)[0]
+        # ── Shared combined-loss ranking ──────────────────────────────────
+        ind_sorted = torch.argsort(loss_pick)
+        loss_sorted = loss_pick[ind_sorted]
 
-        if len(noisy_indices) > 0:
-            p1 = F.softmax(first_branch_logits, dim=1)
-            p2 = F.softmax(second_branch_logits, dim=1)
-            
-            c1, pred1 = p1.max(1)
-            c2, pred2 = p2.max(1)
+        forget_rate = self.increment * current_epoch
+        remember_rate = 1.0 - forget_rate
+        # Data-dependent floor: fraction of samples below the mean loss.
+        mean_v = loss_sorted.mean()
+        idx_small = torch.where(loss_sorted < mean_v)[0]
+        remember_rate_small = idx_small.shape[0] / n
+        remember_rate = max(remember_rate, remember_rate_small)
 
-            # R-3 Fix: Confidence threshold should start high and decrease
-            # (Paper: starts strict at 1.0, drops toward a lower bound)
-            conf_threshold = 1.0 - (0.5 * current_epoch / self.total_epochs)
-            
-            agree = (pred1[noisy_indices] == pred2[noisy_indices])
-            high_conf = (c1[noisy_indices] * c2[noisy_indices] > (conf_threshold**2))
-            
-            corr_mask = agree & high_conf
-            if corr_mask.sum() > 0:
-                corr_idx = noisy_indices[corr_mask]
-                # R-5 Fix: Detach confidence weights to prevent secondary gradient paths
-                weights = (c1[corr_idx] * c2[corr_idx]).detach()
-                
-                # Align both branches with the agreed pseudo-label
-                correction_loss = (weights * (
-                    F.cross_entropy(first_branch_logits[corr_idx], pred1[corr_idx], reduction='none') +
-                    F.cross_entropy(second_branch_logits[corr_idx], pred1[corr_idx], reduction='none')
-                )).mean()
+        num_remember = int(remember_rate * len(loss_sorted))
+        ind_update = ind_sorted[:num_remember]
 
-        # R-4 Fix: Total loss should only include the core co-teaching/correction terms.
-        # co_lambda regularization (KL) is handled separately in RTGNN training step.
-        return clean_loss + correction_loss
+        # Clean (small-loss) samples — trained directly on the given labels.
+        loss_clean = torch.sum(loss_pick[ind_update]) / n
 
-    def _compute_kl_divergence(self, logits_p, logits_q):
-        return F.kl_div(F.log_softmax(logits_p, dim=1),
-                        F.softmax(logits_q.detach(), dim=1),
-                        reduction='batchmean')
+        # Remaining (noisy-candidate) samples.
+        ind_all = torch.arange(n, device=device)
+        remaining_mask = torch.ones(n, dtype=torch.bool, device=device)
+        remaining_mask[ind_update] = False
+        ind_update_1 = ind_all[remaining_mask]
+
+        loss_dc = torch.tensor(0.0, device=device)
+        loss1 = torch.tensor(0.0, device=device)
+
+        if ind_update_1.numel() > 0:
+            p_1 = F.softmax(y_1, dim=-1)
+            p_2 = F.softmax(y_2, dim=-1)
+            pred_1 = y_1.max(dim=1)[1]
+            pred_2 = y_2.max(dim=1)[1]
+
+            conf_threshold = (
+                1 - (1 - min(0.5, 1.0 / n)) * current_epoch / self.total_epochs
+            )
+            filter_condition = (
+                (pred_1[ind_update_1] != t[ind_update_1])
+                & (pred_1[ind_update_1] == pred_2[ind_update_1])
+                & (p_1.max(dim=1)[0][ind_update_1]
+                   * p_2.max(dim=1)[0][ind_update_1] > conf_threshold)
+            )
+            dc_idx = ind_update_1[filter_condition]
+
+            if dc_idx.numel() > 0:
+                adaptive_weight = (
+                    p_1.max(dim=1)[0][dc_idx] * p_2.max(dim=1)[0][dc_idx]
+                ) ** (0.5 - 0.5 * current_epoch / self.total_epochs)
+                loss_dc = adaptive_weight * (
+                    F.cross_entropy(y_1[dc_idx], pred_1[dc_idx], reduction='none')
+                    + F.cross_entropy(y_2[dc_idx], pred_1[dc_idx], reduction='none')
+                )
+                loss_dc = loss_dc.sum() / n
+
+            # Remaining noisy samples not corrected — kept, down-weighted.
+            dc_mask = torch.zeros(n, dtype=torch.bool, device=device)
+            dc_mask[dc_idx] = True
+            remain_idx = ind_update_1[~dc_mask[ind_update_1]]
+            loss1 = torch.sum(loss_pick[remain_idx]) / n
+
+        return loss_clean + loss_dc + self.decay_w * loss1 + co_lambda * inter_view_loss
 
 
 class IntraViewRegularization(nn.Module):
@@ -195,23 +220,22 @@ class IntraViewRegularization(nn.Module):
         if filtered_edge_indices.size(1) == 0:
             return torch.tensor(0.0, device=self.device)
 
-        first_branch_loss = (filtered_edge_weights * self._compute_kl_divergence(
-            first_branch_output[filtered_edge_indices[1]], 
-            first_branch_output[filtered_edge_indices[0]].detach()
+        # Per-edge KL between a node and its neighbour (official neighbor_cons):
+        # sum over edges of edge_weight * KL, normalised by the labeled set size.
+        first_branch_loss = (filtered_edge_weights * kl_loss_compute(
+            first_branch_output[filtered_edge_indices[1]],
+            first_branch_output[filtered_edge_indices[0]].detach(),
+            reduce=False,
         )).sum()
-        
-        second_branch_loss = (filtered_edge_weights * self._compute_kl_divergence(
-            second_branch_output[filtered_edge_indices[1]], 
-            second_branch_output[filtered_edge_indices[0]].detach()
+
+        second_branch_loss = (filtered_edge_weights * kl_loss_compute(
+            second_branch_output[filtered_edge_indices[1]],
+            second_branch_output[filtered_edge_indices[0]].detach(),
+            reduce=False,
         )).sum()
-        
+
         total_loss = (first_branch_loss + second_branch_loss) / labeled_node_indices.size(0)
         return total_loss
-
-    def _compute_kl_divergence(self, logits_p, logits_q):
-        return F.kl_div(F.log_softmax(logits_p, dim=1),
-                        F.softmax(logits_q, dim=1),
-                        reduction='batchmean')
 
 
 class GraphStructureEstimator(nn.Module):
@@ -279,6 +303,7 @@ class RTGNNTrainingConfig:
         self.heads = model_params.get('heads', 8)
                 
         self.co_lambda = rtgnn_params.get('co_lambda', 0.1)
+        self.decay_w = rtgnn_params.get('decay_w', 0.1)
         self.alpha = rtgnn_params.get('alpha', 0.3)
         self.th = rtgnn_params.get('th', 0.8)
         self.K = rtgnn_params.get('K', 50)
@@ -288,11 +313,13 @@ class RTGNNTrainingConfig:
 
 class RTGNN(nn.Module):
 
-    def __init__(self, training_config, device, gnn_backbone='gcn', data_for_training=None):
+    def __init__(self, training_config, device, gnn_backbone='gcn', data_for_training=None,
+                 model_config=None):
         super().__init__()
         self.device = device
         self.training_config = training_config
         self.gnn_backbone = gnn_backbone.lower()
+        self.model_config = model_config or {}
 
         if data_for_training is not None:
             (self.node_features, self.node_labels, self.train_node_indices, self.val_node_indices, self.test_node_indices, self.adjacency_matrix) = self._prepare_data(data_for_training)
@@ -309,6 +336,7 @@ class RTGNN(nn.Module):
             num_classes=num_classes,
             dropout_rate=training_config.dropout,
             device=device,
+            model_config=self.model_config,
             **gnn_specific_config
         )
         
@@ -392,22 +420,6 @@ class RTGNN(nn.Module):
             })
         
         return base_config
-
-    def estimate_noise_transition_matrix(self, val_predictions, val_labels):
-        """R-1 Implementation: Estimate noise transition matrix from validation data."""
-        num_classes = self.num_classes
-        transition_matrix = torch.zeros((num_classes, num_classes), device=self.device)
-        
-        # Count transitions from true class (approximated by prediction) to noisy label
-        for i in range(num_classes):
-            idx = (val_predictions == i)
-            if idx.sum() > 0:
-                for j in range(num_classes):
-                    transition_matrix[i, j] = (val_labels[idx] == j).sum().float() / idx.sum().float()
-            else:
-                transition_matrix[i, i] = 1.0
-                
-        return transition_matrix
 
     def forward(self, node_features, edge_indices, edge_weights=None):
         return self.dual_branch_predictor(node_features, edge_indices, edge_weights)

@@ -255,7 +255,8 @@ Train and validation noise is applied independently (different random seed) so t
 | `hidden_channels` | Hidden representation size | All |
 | `n_layers` | Number of GNN layers | All |
 | `dropout` | Dropout probability | All |
-| `use_residual` | Add residual (skip) connections between layers of matching width. Helps on heterophilous datasets (e.g. `roman-empire`). | GCN, GAT, GATv2 |
+| `use_residual` | Add residual (skip) connections between layers of matching width. Helps on heterophilous datasets (e.g. `roman-empire`). | GCN, GAT, GATv2, GIN |
+| `normalization` | Inter-layer normalization: `none`, `batch` (BatchNorm1d), or `layer` (LayerNorm, **default**). LayerNorm prevents the rank-1 embedding collapse (total oversmoothing) that otherwise occurs on **dense** graphs (e.g. `amazon-computers`: test accuracy 0.52 → 0.87) **without regressing sparse graphs** (cora stays ~0.78, whereas BatchNorm drops it to ~0.66). | All |
 | `self_loop` | Add self-loops to nodes | GCN |
 | `mlp_layers` | MLP layers inside GIN convolutions | GIN |
 | `train_eps` | Learnable epsilon in GIN | GIN |

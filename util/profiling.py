@@ -4,28 +4,65 @@ import threading
 import torch
 from torch.profiler import profile, ProfilerActivity
 
-from model.gnns import GCN, GIN, GAT, GATv2, GPS
+from model.gnns import GCN, GIN, GAT, GATv2, GPS, GCN_modified
 
 _profiler_lock = threading.Lock()
+
+
+_NORM_TYPES = {
+    'batch': 'BatchNorm1d',
+    'batchnorm': 'BatchNorm1d',
+    'batchnorm1d': 'BatchNorm1d',
+    'layer': 'LayerNorm',
+    'layernorm': 'LayerNorm',
+    'pair': 'PairNorm',
+    'pairnorm': 'PairNorm',
+}
+
+
+def _build_norm_info(normalization):
+    """Translate a ``normalization`` config value into a backbone ``norm_info`` dict.
+
+    Accepts: None / 'none' / False  -> no normalization;
+             'batch' (BatchNorm1d, the anti-oversmoothing default) or 'layer' (LayerNorm).
+    """
+    if normalization in (None, False, 'none', 'None', ''):
+        return {'is_norm': False, 'norm_type': 'LayerNorm'}
+    key = str(normalization).lower()
+    if key not in _NORM_TYPES:
+        raise ValueError(
+            f"Unknown normalization '{normalization}'. Use one of: "
+            f"none, batch, layer, pair."
+        )
+    return {'is_norm': True, 'norm_type': _NORM_TYPES[key]}
 
 
 def get_model(model_name, in_channels, hidden_channels, out_channels, **kwargs):
     """Construct a GNN backbone by name using a registry of (class, valid_params).
 
     Filters ``kwargs`` so only parameters recognized by the chosen architecture
-    are forwarded, preventing spurious keyword errors.
+    are forwarded, preventing spurious keyword errors.  ``normalization`` is
+    translated into the backbone's ``norm_info`` dict and applied to all
+    architectures (BatchNorm1d between layers is the default anti-oversmoothing
+    measure that keeps dense graphs from collapsing to rank-1 embeddings).
     """
     model_name = model_name.lower()
     kwargs.pop('in_channels', None)
     kwargs.pop('hidden_channels', None)
     kwargs.pop('out_channels', None)
 
+    # normalization -> norm_info (every backbone accepts norm_info)
+    norm_info = _build_norm_info(kwargs.pop('normalization', None))
+
     model_registry = {
-        'gcn':    (GCN, ['n_layers', 'dropout', 'self_loop', 'use_residual']),
-        'gin':    (GIN, ['n_layers', 'dropout', 'mlp_layers', 'train_eps']),
-        'gat':    (GAT, ['n_layers', 'dropout', 'heads', 'use_residual']),
-        'gatv2':  (GATv2, ['n_layers', 'dropout', 'heads', 'use_residual']),
+        'gcn':    (GCN, ['n_layers', 'dropout', 'self_loop', 'use_residual', 'jk']),
+        'gin':    (GIN, ['n_layers', 'dropout', 'mlp_layers', 'train_eps', 'use_residual', 'jk']),
+        'gat':    (GAT, ['n_layers', 'dropout', 'heads', 'use_residual', 'jk']),
+        'gatv2':  (GATv2, ['n_layers', 'dropout', 'heads', 'use_residual', 'jk']),
         'gps':    (GPS, ['n_layers', 'dropout', 'heads', 'use_pe', 'pe_dim']),
+        'gcn_modified': (GCN_modified, ['n_layers', 'dropout', 'heads', 'self_loop',
+                                        'pre_ln', 'pre_linear', 'lin_res', 'mod_norm',
+                                        'jk', 'inner_gnn']),
     }
 
     if model_name not in model_registry:
@@ -33,6 +70,7 @@ def get_model(model_name, in_channels, hidden_channels, out_channels, **kwargs):
 
     model_cls, valid_params = model_registry[model_name]
     filtered_kwargs = {k: v for k, v in kwargs.items() if k in valid_params}
+    filtered_kwargs['norm_info'] = norm_info
 
     return model_cls(in_channels, hidden_channels, out_channels, **filtered_kwargs)
 
@@ -129,11 +167,19 @@ def profile_training_step_flops(models, device, step_fn):
         Runs the full forward pass and returns a scalar loss.
         ``backward()`` is called by this function.
     """
+    import copy
     import torch.nn as nn
 
     with _profiler_lock:
         if isinstance(models, nn.Module):
             models = [models]
+
+        # FLOPs depend only on tensor shapes, not weight values. Running the
+        # step in train() mode would mutate state (e.g. BatchNorm running stats),
+        # so snapshot every model's state_dict and restore it afterwards to keep
+        # profiling side-effect free (otherwise the post-training evaluate() and a
+        # reloaded checkpoint would diverge).
+        _saved_states = [copy.deepcopy(m.state_dict()) for m in models]
 
         for m in models:
             m.train()
@@ -166,6 +212,10 @@ def profile_training_step_flops(models, device, step_fn):
         for m in models:
             m.zero_grad(set_to_none=True)
             m.eval()
+
+        # Restore pre-profiling state (undo any BatchNorm/buffer mutation).
+        for m, st in zip(models, _saved_states):
+            m.load_state_dict(st)
 
         total_flops = 0
         for e in prof.key_averages():

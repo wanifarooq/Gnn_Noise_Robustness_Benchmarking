@@ -130,7 +130,15 @@ def initialize_experiment(config, run_id=1):
         n_layers=config['model'].get('n_layers', 2),
         dropout=config['model'].get('dropout', 0.5),
         self_loop=config['model'].get('self_loop', True),
-        use_residual=config['model'].get('use_residual', False)
+        use_residual=config['model'].get('use_residual', False),
+        normalization=config['model'].get('normalization', 'layer'),
+        jk=config['model'].get('jk', 'none'),
+        # gcn_modified-only knobs (ignored by other backbones)
+        pre_linear=config['model'].get('pre_linear', False),
+        lin_res=config['model'].get('lin_res', False),
+        mod_norm=config['model'].get('mod_norm', 'none'),
+        pre_ln=config['model'].get('pre_ln', False),
+        inner_gnn=config['model'].get('inner_gnn', 'gcn')
     ).to(device)
 
     compute_info = {

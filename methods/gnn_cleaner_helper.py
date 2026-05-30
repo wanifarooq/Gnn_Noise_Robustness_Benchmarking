@@ -1,21 +1,27 @@
-"""GNN_Cleaner method helper — label propagation + dual-optimizer cleaning.
+"""GNN_Cleaner method helper — label propagation + learnable label correction.
 
-Wraps the GNNCleanerTrainer's per-epoch logic into the shared
-TrainingLoop + MethodHelper system.
+Faithful implementation of "GNN Cleaner: Label Cleaner for Graph-Structured
+Data" (Xia et al., IEEE TKDE 2023).
 
-GNN_Cleaner uses dual optimizers (GNN model + label weighting network),
-an expanding clean-sample set identified via label propagation, and
-sample-wise label correction for nodes where the pseudo-label disagrees
-with the given (noisy) label.
+Per epoch:
+    1. Propagate labels from a trusted (clean) set over a node-representation
+       similarity graph built with SPARSE ops (no dense N x N materialisation,
+       no python edge loops). Similarity is computed on node representations
+       (model.get_embeddings / features) — NOT on the classifier logits.
+    2. Clean-sample selection: nodes whose propagated label agrees with the
+       given (noisy) label form the supervised set D_select; the remaining
+       training nodes D_left are relabelled.
+    3. Learnable interpolation corrector (Eq):
+           y_corrected = w * y_propagated + (1 - w) * y_given
+       where w is produced by a small network from the (CE_given, CE_prop)
+       pair, trained jointly with the GNN in a single optimizer step.
 """
 
 from copy import deepcopy
 
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from scipy import sparse
 
 from methods.base_helper import MethodHelper
 from methods.registry import register_helper
@@ -40,7 +46,7 @@ class GNNCleanerHelper(MethodHelper):
         num_classes = int(data.y.max().item()) + 1
         backbone_model = backbone_model.to(device)
 
-        # Label weighting network (same architecture as GNNCleanerTrainer)
+        # Learnable interpolation corrector: maps (CE_given, CE_prop) -> w in (0,1).
         label_weighting_net = nn.Sequential(
             nn.Linear(2, 32), nn.ReLU(),
             nn.Linear(32, 32), nn.ReLU(),
@@ -54,10 +60,15 @@ class GNNCleanerHelper(MethodHelper):
             label_weighting_net.parameters(), lr=net_lr,
         )
 
-        # Initialize clean set
+        # Trusted (clean) set used as the propagation source.
         initial_clean_mask, expanding_clean_mask = self._initialize_clean_set(
             data, device, gc_params.get('clean_set_ratio', 0.1)
         )
+
+        # Symmetric-normalised sparse adjacency used for propagation. The edge
+        # weights are recomputed each epoch from node representations, but the
+        # COO structure (indices, degree bookkeeping) is built once here.
+        edge_index = data.edge_index.to(device)
 
         return {
             'models': [backbone_model],
@@ -72,6 +83,7 @@ class GNNCleanerHelper(MethodHelper):
             'device': device,
             'label_prop_iterations': label_prop_iterations,
             'similarity_epsilon': similarity_epsilon,
+            'edge_index': edge_index,
         }
 
     # ── Per-epoch training ─────────────────────────────────────────────────
@@ -85,110 +97,81 @@ class GNNCleanerHelper(MethodHelper):
         num_classes = state['num_classes']
         label_prop_iters = state['label_prop_iterations']
         sim_eps = state['similarity_epsilon']
+        edge_index = state['edge_index']
 
         model.train()
         weighting_net.train()
 
+        # data.y holds noisy train+val labels (clean only on test). We NEVER
+        # read y_original — propagation seeds from the trusted set's noisy labels.
         noisy_labels = data.y.to(device)
-        
-        # GNC-1 Fix: Do NOT use y_original (ground_truth) in the training loop.
-        # This is a benchmark for robustness; the model must only see the noisy labels.
-        # We use noisy_labels as the source for propagation from the 'trusted' set.
 
-        # Forward pass
-        node_embeddings = model(data)
+        # ── Build the propagation operator from NODE REPRESENTATIONS ───────
+        # Similarity is computed on embeddings (the paper propagates over node
+        # representation similarity), NOT on classifier logits. Sparse ops only.
+        with torch.no_grad():
+            embeddings = model.get_embeddings(data).detach()
+            prop_edge_index, prop_edge_weight = self._build_sparse_operator(
+                edge_index, embeddings, data.num_nodes, sim_eps, device,
+            )
 
-        # Build similarity matrix from embeddings
-        similarity_matrix = self._build_similarity_matrix(
-            data.edge_index, node_embeddings.detach(), sim_eps
-        )
+            propagated = self._label_propagation(
+                prop_edge_index, prop_edge_weight, noisy_labels,
+                state['expanding_clean_mask'], data.num_nodes, num_classes,
+                device, label_prop_iters,
+            )
+            propagated_label = propagated.argmax(dim=1)
 
-        # Label propagation from expanding clean set (using noisy_labels)
-        propagated_labels = self._label_propagation(
-            similarity_matrix, noisy_labels,
-            state['expanding_clean_mask'], data, num_classes, device,
-            label_prop_iters,
-        )
+        # ── Clean-sample selection (propagated == given) ───────────────────
+        train_mask = data.train_mask.to(device)
+        agree = propagated_label == noisy_labels
+        D_select = train_mask & agree            # supervised CE on given labels
+        D_left = train_mask & (~agree)           # relabel via corrector
 
-        # Sample selection: D_select (pseudo==given), D_left (pseudo!=given)
-        train_indices = data.train_mask.nonzero(as_tuple=True)[0]
-        D_select = torch.zeros_like(data.train_mask, dtype=torch.bool)
-        D_left = torch.zeros_like(data.train_mask, dtype=torch.bool)
-
-        for idx in train_indices:
-            pseudo = propagated_labels[idx].argmax().item()
-            given = noisy_labels[idx].item()
-            # GNC-2 Implementation: Only select if model is confident enough 
-            # (thresholding pseudo-distribution)
-            is_confident = propagated_labels[idx].max() > 0.7
-            
-            if pseudo == given and is_confident:
-                D_select[idx] = True
-            else:
-                D_left[idx] = True
-
-        # Update expanding clean set
-        # GNC-2 Fix: Use the new confident selection
+        # Grow the trusted set with the newly-agreeing nodes.
         state['expanding_clean_mask'] = (
             state['expanding_clean_mask'] | D_select
         ).detach()
 
-        total_loss = 0.0
+        # ── Single forward / single optimizer step ─────────────────────────
+        gnn_optimizer.zero_grad(set_to_none=True)
+        net_optimizer.zero_grad(set_to_none=True)
 
-        # Phase 1: Train on selected (consistent) nodes
-        if D_select.sum() > 0:
-            selected_emb = node_embeddings[D_select]
-            # GNC-1 Fix: Use noisy_labels here too
-            selected_labels = noisy_labels[D_select]
-            select_loss = F.cross_entropy(selected_emb, selected_labels)
+        out = model(data)                        # logits [N, C]
+        log_p = F.log_softmax(out, dim=1)
 
-            gnn_optimizer.zero_grad(set_to_none=True)
-            select_loss.backward(retain_graph=True)
-            gnn_optimizer.step()
-            total_loss += select_loss.item()
+        loss = out.new_zeros(())
 
-        # Phase 2: Label correction for inconsistent nodes
-        if D_left.sum() > 0:
-            updated_emb = model(data)
-            left_indices = D_left.nonzero(as_tuple=True)[0]
+        # Supervised CE on agreeing (clean) nodes.
+        if D_select.any():
+            sel_idx = D_select.nonzero(as_tuple=True)[0]
+            loss = loss + F.cross_entropy(out[sel_idx], noisy_labels[sel_idx])
 
-            corrected_loss = torch.tensor(0.0, device=device)
-            for idx in left_indices:
-                y_hat = updated_emb[idx].unsqueeze(0)
-                given_label = noisy_labels[idx].unsqueeze(0)
-                pseudo_dist = propagated_labels[idx].unsqueeze(0)
+        # Learnable label correction on disagreeing nodes:
+        #   y_corrected = w * y_propagated + (1 - w) * y_given
+        if D_left.any():
+            left_idx = D_left.nonzero(as_tuple=True)[0]
+            given_oh = F.one_hot(noisy_labels[left_idx], num_classes).float()
+            prop_dist = propagated[left_idx]                       # soft propagated dist
 
-                l1 = F.cross_entropy(y_hat, given_label, reduction='none')
-                l2 = -(pseudo_dist * F.log_softmax(y_hat, dim=1)).sum(dim=1)
+            ce_given = F.nll_loss(log_p[left_idx], noisy_labels[left_idx],
+                                  reduction='none')                # [n_left]
+            ce_prop = -(prop_dist * log_p[left_idx]).sum(dim=1)    # [n_left]
 
-                lam = weighting_net(torch.stack([l1.detach(), l2.detach()], dim=1))
-                given_onehot = F.one_hot(given_label, num_classes).float()
-                corrected = lam * given_onehot + (1 - lam) * pseudo_dist
-                node_loss = -(corrected * F.log_softmax(y_hat, dim=1)).sum()
-                corrected_loss = corrected_loss + node_loss
+            # w from the learnable net; detached losses as features (the net is
+            # supervised through the corrected-label CE below).
+            net_in = torch.stack([ce_given.detach(), ce_prop.detach()], dim=1)
+            w = weighting_net(net_in)                              # [n_left, 1]
 
-            if corrected_loss > 0:
-                avg_corr_loss = corrected_loss / len(left_indices)
+            y_corrected = w * prop_dist + (1.0 - w) * given_oh     # [n_left, C]
+            corr_loss = -(y_corrected * log_p[left_idx]).sum(dim=1).mean()
+            loss = loss + corr_loss
 
-                gnn_optimizer.zero_grad(set_to_none=True)
-                avg_corr_loss.backward(retain_graph=True)
-                gnn_optimizer.step()
+        loss.backward()
+        gnn_optimizer.step()
+        net_optimizer.step()
 
-                # Update weighting net on clean set
-                clean_indices = state['initial_clean_mask'].nonzero(as_tuple=True)[0]
-                if len(clean_indices) > 0:
-                    final_emb = model(data)
-                    clean_emb = final_emb[clean_indices]
-                    clean_labels = noisy_labels[clean_indices]
-                    clean_loss = F.cross_entropy(clean_emb, clean_labels)
-
-                    net_optimizer.zero_grad(set_to_none=True)
-                    clean_loss.backward()
-                    net_optimizer.step()
-
-                total_loss += avg_corr_loss.item()
-
-        return {'train_loss': total_loss}
+        return {'train_loss': float(loss.item())}
 
     # ── Validation ─────────────────────────────────────────────────────────
 
@@ -224,12 +207,12 @@ class GNNCleanerHelper(MethodHelper):
 
     @staticmethod
     def _initialize_clean_set(data, device, clean_set_ratio=0.1):
-        """Initialize clean set by random sampling from training nodes.
+        """Initialize the trusted set by random sampling from training nodes.
 
         No privileged access to y_original — in a real-world setting we don't
         know which labels are clean.  We randomly select a subset of training
-        nodes as the initial trusted set.  The expanding clean set will be
-        refined during training via label propagation and consistency checks.
+        nodes as the initial trusted set.  The expanding clean set is refined
+        during training via label propagation and consistency checks.
         """
         train_indices = data.train_mask.nonzero(as_tuple=True)[0]
         needed = max(1, int(train_indices.size(0) * clean_set_ratio))
@@ -244,53 +227,54 @@ class GNNCleanerHelper(MethodHelper):
         return initial_clean_mask, expanding_clean_mask
 
     @staticmethod
-    def _build_similarity_matrix(edge_index, embeddings, eps):
-        """Build normalised similarity matrix from node embeddings."""
-        num_nodes = embeddings.size(0)
-        src, tgt = edge_index.cpu().numpy()
+    def _build_sparse_operator(edge_index, embeddings, num_nodes, eps, device):
+        """Build a symmetric-normalised sparse propagation operator.
 
-        weights, rows, cols = [], [], []
-        emb_np = embeddings.cpu().numpy()
+        Edge weights are representation-similarity based: w_ij = 1 / (||h_i - h_j|| + eps).
+        Self-loops are dropped. Returns (edge_index, edge_weight) of the
+        normalised operator D^-1/2 W D^-1/2 — no dense N x N matrix and no
+        python per-edge loop.
+        """
+        src, dst = edge_index[0], edge_index[1]
+        non_self = src != dst
+        src, dst = src[non_self], dst[non_self]
 
-        for i in range(len(src)):
-            s, t = int(src[i]), int(tgt[i])
-            if s != t:
-                dist = np.linalg.norm(emb_np[s] - emb_np[t]) + eps
-                weights.append(1.0 / dist)
-                rows.append(s)
-                cols.append(t)
+        dist = (embeddings[src] - embeddings[dst]).norm(dim=1) + eps
+        w = 1.0 / dist                                            # [E]
 
-        sim = sparse.coo_matrix((weights, (rows, cols)), shape=(num_nodes, num_nodes))
-        degrees = np.array(sim.sum(axis=1)).flatten()
-        degrees[degrees == 0] = 1.0
-        D_inv_sqrt = sparse.diags(1.0 / np.sqrt(degrees))
-        return D_inv_sqrt @ sim @ D_inv_sqrt
+        # Degree per row, then symmetric normalisation.
+        deg = torch.zeros(num_nodes, device=device)
+        deg.scatter_add_(0, src, w)
+        deg_inv_sqrt = deg.clamp(min=eps).pow(-0.5)
+        norm_w = deg_inv_sqrt[src] * w * deg_inv_sqrt[dst]
+
+        return torch.stack([src, dst], dim=0), norm_w
 
     @staticmethod
-    def _label_propagation(sim_matrix, noisy_labels, clean_mask, data,
-                           num_classes, device, iterations):
-        """Run label propagation from trusted nodes using their (noisy) labels.
+    def _label_propagation(edge_index, edge_weight, noisy_labels, clean_mask,
+                           num_nodes, num_classes, device, iterations):
+        """Iterative label propagation from the trusted set via sparse spmm.
 
-        No access to y_original — we propagate from the given labels of the
-        trusted set, which may contain noise.  The expanding clean set and
-        consistency checks mitigate this over training.
+        No access to y_original — propagation seeds from the given (noisy)
+        labels of the trusted set, clamped each iteration.
         """
-        num_nodes = noisy_labels.size(0)
-        label_probs = torch.zeros(num_nodes, num_classes, device=device)
+        src, dst = edge_index[0], edge_index[1]
 
-        clean_indices = clean_mask.nonzero(as_tuple=True)[0]
-        for idx in clean_indices:
-            lbl = noisy_labels[idx].item()
-            label_probs[idx, lbl] = 1.0
+        seed = torch.zeros(num_nodes, num_classes, device=device)
+        clean_idx = clean_mask.nonzero(as_tuple=True)[0]
+        if clean_idx.numel() > 0:
+            seed[clean_idx] = F.one_hot(
+                noisy_labels[clean_idx], num_classes
+            ).float()
 
-        sim_tensor = torch.from_numpy(sim_matrix.toarray()).float().to(device)
-
+        label_probs = seed.clone()
         for _ in range(iterations):
-            label_probs = torch.matmul(sim_tensor, label_probs)
-            # Reset trusted node labels
-            for idx in clean_indices:
-                lbl = noisy_labels[idx].item()
-                label_probs[idx] = 0.0
-                label_probs[idx, lbl] = 1.0
+            # Sparse message passing: aggregate dst -> src with edge weights.
+            msg = label_probs[dst] * edge_weight.unsqueeze(1)     # [E, C]
+            label_probs = torch.zeros(num_nodes, num_classes, device=device)
+            label_probs.index_add_(0, src, msg)
+            # Clamp trusted nodes back to their seed one-hot.
+            if clean_idx.numel() > 0:
+                label_probs[clean_idx] = seed[clean_idx]
 
         return label_probs

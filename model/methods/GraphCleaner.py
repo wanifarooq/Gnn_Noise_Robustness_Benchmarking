@@ -2,9 +2,9 @@ import copy
 import time
 import numpy as np
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from scipy.sparse import spdiags
-from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
     matthews_corrcoef, roc_auc_score
 )
@@ -14,6 +14,68 @@ from cleanlab.count import estimate_latent, compute_confident_joint
 from model.evaluation import OversmoothingMetrics, ClassificationMetrics, compute_oversmoothing_for_mask
 from model.base import BaseTrainer
 from model.registry import register
+
+
+class _MLPNoiseDetector(nn.Module):
+    """Tiny MLP binary mislabel detector (GraphCleaner, Li et al., ICML 2023).
+
+    The paper trains a small MLP with an L1 (mean-absolute-error) loss on the
+    propagation-agreement features to predict the probability that a node is
+    mislabelled.  This replaces the earlier sklearn LogisticRegression detector
+    to stay faithful to the paper.
+    """
+
+    def __init__(self, input_dim, hidden_dim=32):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1),
+        )
+
+    def forward(self, x):
+        # Sigmoid output in (0, 1): probability that a node is mislabelled.
+        return torch.sigmoid(self.net(x)).squeeze(-1)
+
+
+def _train_mlp_detector(features, labels, device, random_seed,
+                        max_iter=3000, hidden_dim=32, lr=1e-2):
+    """Fit the MLP mislabel detector with an L1 loss (full-batch).
+
+    Returns the trained module set to eval mode.  Training is deterministic
+    for a given seed so save -> load -> predict is reproducible.
+    """
+    generator = torch.Generator(device='cpu').manual_seed(int(random_seed))
+    torch.manual_seed(int(random_seed))
+
+    x = torch.as_tensor(features, dtype=torch.float32, device=device)
+    y = torch.as_tensor(labels, dtype=torch.float32, device=device)
+
+    detector = _MLPNoiseDetector(input_dim=x.shape[1], hidden_dim=hidden_dim).to(device)
+    optimizer = torch.optim.Adam(detector.parameters(), lr=lr)
+
+    detector.train()
+    for _ in range(int(max_iter)):
+        optimizer.zero_grad(set_to_none=True)
+        preds = detector(x)
+        # L1 loss between predicted mislabel probability and the binary target.
+        loss = F.l1_loss(preds, y)
+        loss.backward()
+        optimizer.step()
+
+    detector.eval()
+    # ``generator`` is created to keep seeding explicit even though Adam does
+    # not consume it; reference it so linters do not flag it as unused.
+    del generator
+    return detector
+
+
+@torch.no_grad()
+def _mlp_detector_scores(detector, features, device):
+    """Return per-node mislabel probabilities from a trained MLP detector."""
+    detector.eval()
+    x = torch.as_tensor(features, dtype=torch.float32, device=device)
+    return detector(x).cpu().numpy()
 
 
 
@@ -307,9 +369,14 @@ class GraphCleanerNoiseDetector:
         
         print("Normalized Laplacian matrices calculated.")
 
-        # Prepare label matrices
+        # Prepare label matrices.  Use the NOISY observed labels for the
+        # propagation-agreement features — never the clean ground truth
+        # (``y_original``), which would leak label information.  On train/val
+        # ``y`` already holds the noisy labels; ``y_noisy`` is identical there
+        # and is used explicitly when present to make the source unambiguous.
         negative_indicator_matrix = negative_sample_indicator[:, np.newaxis]
-        original_label_matrix = np.eye(total_classes)[original_graph_data.y.cpu().numpy()]
+        observed_labels = getattr(original_graph_data, 'y_noisy', original_graph_data.y)
+        original_label_matrix = np.eye(total_classes)[observed_labels.cpu().numpy()]
         
         # Create corrected label matrix
         corrected_label_matrix = (negative_indicator_matrix * np.eye(total_classes)[corrupted_graph_data.y.cpu().numpy()] + 
@@ -408,22 +475,34 @@ class GraphCleanerNoiseDetector:
 
         classifier_test_features = detection_features[test_mask_cpu].reshape(
             detection_features[test_mask_cpu].shape[0], -1)
-        
-        # Train binary logistic regression classifier
-        binary_noise_classifier = LogisticRegression(
-            max_iter=self.classifier_max_iterations, 
-            random_state=self.random_seed
+
+        # Train the MLP mislabel detector with an L1 loss (paper-faithful).
+        binary_noise_classifier = _train_mlp_detector(
+            classifier_training_features, classifier_training_labels,
+            device=self.device, random_seed=self.random_seed,
+            max_iter=self.classifier_max_iterations,
         )
-        binary_noise_classifier.fit(classifier_training_features, classifier_training_labels)
 
         # Generate final predictions
-        test_confidence_scores = binary_noise_classifier.predict_proba(classifier_test_features)[:, 1]
+        test_confidence_scores = _mlp_detector_scores(
+            binary_noise_classifier, classifier_test_features, self.device)
         test_binary_predictions = test_confidence_scores > 0.5
-        
+
         return test_binary_predictions, test_confidence_scores, binary_noise_classifier, trained_neural_network
     
     def clean_training_data(self, graph_data, neural_network_model, num_classes):
- 
+        """Benchmark train-cleaning adaptation of the GraphCleaner detector.
+
+        Trains a disposable backbone full-batch on the noisy labels, estimates
+        the val-set confident-joint transition matrix, generates half-val
+        synthetic mislabels, builds the k-hop propagation-agreement features and
+        trains the MLP (L1-loss) detector on the val split.  The detector is
+        then applied to ``train_mask``; flagged nodes are removed so the main
+        training loop can retrain the backbone on the cleaned training set.
+
+        All labels used here are the NOISY observed labels (``y`` / ``y_noisy``);
+        the clean ground truth (``y_original``) is never accessed.
+        """
         print("Starting GraphCleaner Training Data Cleaning")
 
         # Set validation split for noise matrix estimation
@@ -472,19 +551,22 @@ class GraphCleanerNoiseDetector:
             detection_features[validation_mask_cpu].shape[0], -1)
         classifier_training_labels = binary_noise_labels[validation_mask_cpu]
 
-        binary_noise_classifier = LogisticRegression(
-            max_iter=self.classifier_max_iterations, 
-            random_state=self.random_seed
+        # Train the MLP mislabel detector with an L1 loss (paper-faithful).
+        binary_noise_classifier = _train_mlp_detector(
+            classifier_training_features, classifier_training_labels,
+            device=self.device, random_seed=self.random_seed,
+            max_iter=self.classifier_max_iterations,
         )
-        binary_noise_classifier.fit(classifier_training_features, classifier_training_labels)
 
         # Apply detector
         train_mask_cpu = graph_data.train_mask.cpu().numpy()
         train_detection_features = detection_features[train_mask_cpu].reshape(
             detection_features[train_mask_cpu].shape[0], -1)
-        
-        train_noise_predictions = binary_noise_classifier.predict(train_detection_features)
-        
+
+        train_noise_scores = _mlp_detector_scores(
+            binary_noise_classifier, train_detection_features, self.device)
+        train_noise_predictions = (train_noise_scores > 0.5).astype(np.int64)
+
         train_indices = torch.where(graph_data.train_mask)[0]
         detected_noisy_indices = train_indices[torch.tensor(train_noise_predictions.astype(bool))]
         

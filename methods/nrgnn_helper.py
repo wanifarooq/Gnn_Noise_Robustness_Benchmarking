@@ -73,7 +73,8 @@ class NRGNNHelper(MethodHelper):
         nrgnn.edge_weight_estimator.train()
         nrgnn.optimizer.zero_grad(set_to_none=True)
 
-        # Edge weight estimator forward
+        # ── Estimator: node representations + reconstruction loss ──────────
+        # (EstimateAdj.forward in the official code)
         edge_weights = torch.ones(
             nrgnn.original_edge_index.shape[1], device=device, dtype=torch.float32,
         )
@@ -84,7 +85,7 @@ class NRGNNHelper(MethodHelper):
             nrgnn.original_edge_index, node_reps,
         )
 
-        # Potential edges
+        # ── Predictor graph: original edges + candidate (potential) edges ──
         if (nrgnn.potential_edge_index is not None
                 and nrgnn.potential_edge_index.shape[1] > 0):
             potential_weights = nrgnn.compute_estimated_edge_weights(
@@ -103,21 +104,21 @@ class NRGNNHelper(MethodHelper):
                 nrgnn.original_edge_index.shape[1], device=device,
             )
 
-        # Node predictor forward
+        # Node predictor forward (the accurate pseudo-label miner)
         predictor_logits = nrgnn.node_predictor.forward(
             nrgnn.node_features, predictor_edges, predictor_weights,
         )
 
-        # Initialize best_predictions on first epoch
-        if nrgnn.best_predictions is None:
-            with torch.no_grad():
-                pred_probs = F.softmax(predictor_logits, dim=1)
-                nrgnn.best_predictions = pred_probs.detach().to(device)
-                nrgnn.confident_edge_index, nrgnn.confident_node_indices = (
-                    nrgnn.identify_confident_edges(nrgnn.best_predictions)
-                )
+        # ── Mine confident pseudo-labels & build confident edges EVERY epoch
+        # from the CURRENT predictor output (paper: idx_add = unlabeled nodes
+        # with predictor confidence > p_u; link them through the estimator).
+        predictor_probs = F.softmax(predictor_logits, dim=1)
+        nrgnn.confident_edge_index, nrgnn.confident_node_indices = (
+            nrgnn.identify_confident_edges(predictor_probs.detach())
+        )
+        idx_add = nrgnn.confident_node_indices
 
-        # Confident edges
+        # ── Main GCN graph: predictor graph + confident unlabeled edges ────
         if (nrgnn.confident_edge_index is not None
                 and nrgnn.confident_edge_index.shape[1] > 0):
             confident_weights = nrgnn.compute_estimated_edge_weights(
@@ -136,7 +137,7 @@ class NRGNNHelper(MethodHelper):
             nrgnn.node_features, main_edges, main_weights,
         )
 
-        # Losses
+        # ── Losses (paper: loss_gcn + loss_pred + alpha*rec + beta*loss_add)
         predictor_loss = F.cross_entropy(
             predictor_logits[train_indices], nrgnn.node_labels[train_indices],
         )
@@ -144,18 +145,21 @@ class NRGNNHelper(MethodHelper):
             main_output[train_indices], nrgnn.node_labels[train_indices],
         )
 
-        if len(nrgnn.confident_node_indices) > 0:
-            main_probs = torch.clamp(
-                F.softmax(main_output, dim=1), 1e-8, 1 - 1e-8,
-            )
-            # N-2 Fix: detach best_predictions to stop gradient flow into the historical prediction buffer
-            consistency_loss = F.kl_div(
-                torch.log(main_probs[nrgnn.confident_node_indices]),
-                nrgnn.best_predictions[nrgnn.confident_node_indices].detach(),
-                reduction='batchmean',
-            )
+        # Consistency loss (loss_add): cross-entropy pushing the MAIN GCN's
+        # prediction toward the PREDICTOR's soft prediction (detached) on the
+        # confident unlabeled nodes idx_add:
+        #     -mean( sum_c pred_predictor[idx_add] * log(pred_main[idx_add]) )
+        if idx_add is not None and len(idx_add) > 0:
+            pred_main = F.softmax(main_output, dim=1).clamp(1e-8, 1 - 1e-8)
+            consistency_loss = (
+                -torch.sum(
+                    predictor_probs.detach()[idx_add]
+                    * torch.log(pred_main[idx_add]),
+                    dim=1,
+                )
+            ).mean()
         else:
-            consistency_loss = torch.tensor(0.0, device=device, requires_grad=True)
+            consistency_loss = torch.tensor(0.0, device=device)
 
         total_loss = (
             main_loss + predictor_loss
@@ -167,14 +171,14 @@ class NRGNNHelper(MethodHelper):
             total_loss.backward()
             nrgnn.optimizer.step()
 
-        # ── Internal state update (required for next epoch) ────────────────
+        # ── Bookkeeping for inference / checkpointing ──────────────────────
         nrgnn.main_model.eval()
         nrgnn.node_predictor.eval()
         nrgnn.edge_weight_estimator.eval()
 
         with torch.no_grad():
-            nrgnn._current_edge_indices = main_edges
-            nrgnn._current_edge_weights = main_weights.detach()
+            nrgnn._current_edge_indices = main_edges.detach().clone()
+            nrgnn._current_edge_weights = main_weights.detach().clone()
 
             pred_output = nrgnn.node_predictor.forward(
                 nrgnn.node_features, predictor_edges, predictor_weights,
@@ -187,9 +191,6 @@ class NRGNNHelper(MethodHelper):
                 nrgnn.best_predictor_accuracy = pred_val_acc
                 nrgnn.best_predictor_edge_weights = predictor_weights.detach()
                 nrgnn.best_predictions = pred_probs.detach()
-                nrgnn.confident_edge_index, nrgnn.confident_node_indices = (
-                    nrgnn.identify_confident_edges(nrgnn.best_predictions)
-                )
 
         return {'train_loss': total_loss.item() if not torch.isnan(total_loss) else 0.0}
 

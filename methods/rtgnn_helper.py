@@ -38,6 +38,7 @@ class RTGNNHelper(MethodHelper):
             device=device,
             gnn_backbone=config['model']['name'].lower(),
             data_for_training=data,
+            model_config=config.get('model', {}),
         ).to(device)
 
         # Extract tensors (replicating train_model's pre-loop setup)
@@ -60,10 +61,6 @@ class RTGNNHelper(MethodHelper):
             lr=rtgnn_config.lr,
             weight_decay=rtgnn_config.weight_decay,
         )
-
-        # R-1 Implementation: Initialize noise transition matrix if not already present
-        if not hasattr(rtgnn, 'transition_matrix'):
-            rtgnn.transition_matrix = torch.eye(rtgnn.num_classes, device=device)
 
         return {
             'models': [rtgnn.dual_branch_predictor, rtgnn.structure_estimator],
@@ -95,20 +92,6 @@ class RTGNNHelper(MethodHelper):
 
         rtgnn.train()
         optimizer.zero_grad(set_to_none=True)
-
-        # R-1 Implementation: Every few epochs, update transition matrix using validation set
-        if epoch % 5 == 0:
-            rtgnn.eval()
-            with torch.no_grad():
-                out1, out2 = rtgnn.dual_branch_predictor(
-                    node_features, getattr(rtgnn, '_current_edges', edge_indices),
-                    getattr(rtgnn, '_current_weights', torch.ones(edge_indices.size(1), device=device))
-                )
-                val_preds = (out1[val_indices] + out2[val_indices]).argmax(dim=1)
-                rtgnn.transition_matrix = rtgnn.estimate_noise_transition_matrix(
-                    val_preds, node_labels[val_indices]
-                )
-            rtgnn.train()
 
         # Structure estimator forward
         node_reps, recon_loss = rtgnn.structure_estimator(
@@ -159,7 +142,10 @@ class RTGNNHelper(MethodHelper):
             out1, out2, final_edges, final_weights, train_indices,
         )
 
-        # R-4 Fix: Apply co_lambda only once to the intraview_loss term
+        # Paper total loss (official code):
+        #   loss_pred + alpha * rec_loss + loss_add + co_lambda * neighbor_kl
+        # `main_loss` (LabeledDividedLoss) already contains its own internal
+        # co_lambda * inter_view_loss term, matching the official RTGNN.
         total_loss = (
             main_loss
             + rtgnn.training_config.alpha * recon_loss

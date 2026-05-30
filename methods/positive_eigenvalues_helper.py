@@ -1,56 +1,66 @@
-"""Positive Eigenvalues method helper — SVD-constrained mini-batch training.
+"""Positive Eigenvalues method helper.
 
-After every optimizer step the final square Linear layer's weight matrix is
-reconstructed to keep only positive singular values.  Training uses
-NeighborLoader for mini-batch sampling.
+Implements the "negative-eigenvalue removal" strategy from
+Wani et al., "Energy Guided Smoothness to Improve Robustness in Graph
+Classification" (arXiv:2412.08419).  After each optimizer step, every square
+weight matrix W of the backbone is eigendecomposed (W = Phi mu Phi^-1) and its
+negative eigenvalues are clipped to zero (W+ = Phi [mu]+ Phi^-1).  Negative
+eigenvalues induce edge-gradient *expansion* (sharpening); removing them biases
+the layer toward smoothing, which reduces Dirichlet energy and improves
+robustness to label noise.
 
-Mirrors the logic in model/methods/Positive_Eigenvalues.py.
+Training is full-batch on the shared graph (one optimizer step per epoch), so
+"after every optimizer step" == "after every epoch".  This keeps the method on
+the same full-batch footing as the other benchmark methods (no internal
+NeighborLoader), so the comparison is not confounded by the sampling regime.
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.loader import NeighborLoader
 
 from methods.base_helper import MethodHelper
 from methods.registry import register_helper
 
 
 # ---------------------------------------------------------------------------
-# SVD constraint utilities
+# Negative-eigenvalue removal (paper Eq. 16-17)
 # ---------------------------------------------------------------------------
 
 @torch.no_grad()
-def reconstruct_matrix_with_positive_singular_values(weight_matrix, eps=1e-8):
-    """Reconstruct *weight_matrix* keeping only positive singular values."""
-    U, S, Vh = torch.linalg.svd(weight_matrix, full_matrices=False)
-    positive_mask = S > eps
-    if positive_mask.sum() == 0:
-        return (
-            torch.eye(
-                weight_matrix.size(0), weight_matrix.size(1),
-                device=weight_matrix.device,
-            ) * 0.01
-        )
-    S_pos = S[positive_mask]
-    U_pos = U[:, positive_mask]
-    Vh_pos = Vh[positive_mask, :]
-    return U_pos @ torch.diag(S_pos) @ Vh_pos
+def reconstruct_matrix_with_positive_eigenvalues(W):
+    """Return W with its negative eigenvalues clipped to zero.
+
+    W = Phi diag(mu) Phi^-1  ->  W+ = Phi diag(relu(mu)) Phi^-1.
+    W must be square.  Eigenvalues of a general real matrix may be complex; we
+    clip the real part to >= 0 (dropping the negative-eigenvalue directions that
+    sharpen) and take the real part of the reconstruction.
+    """
+    try:
+        eigvals, eigvecs = torch.linalg.eig(W)
+    except Exception:
+        return W  # leave untouched if decomposition fails
+
+    clipped = torch.clamp(eigvals.real, min=0.0).to(eigvals.dtype)
+    try:
+        W_plus = (eigvecs @ torch.diag(clipped) @ torch.linalg.inv(eigvecs)).real
+    except Exception:
+        return W  # singular eigenvector matrix -> skip
+    return W_plus.to(dtype=W.dtype)
 
 
 @torch.no_grad()
 def apply_positive_eigenvalue_constraint(model):
-    """Find the last square Linear layer and enforce positive singular values."""
-    for _name, module in reversed(list(model.named_modules())):
-        if (
-            isinstance(module, nn.Linear)
-            and module.weight.dim() == 2
-            and module.weight.size(0) == module.weight.size(1)
-        ):
-            module.weight.data = reconstruct_matrix_with_positive_singular_values(
-                module.weight.data,
-            )
-            break
+    """Clip negative eigenvalues of every square 2-D weight matrix in the model.
+
+    Eigendecomposition is only defined for square matrices, so non-square
+    projections (e.g. in_features != hidden, hidden != num_classes) are skipped;
+    the constraint acts on the square hidden->hidden weight matrices where the
+    smoothing/sharpening inductive bias lives.
+    """
+    for p in model.parameters():
+        if p.dim() == 2 and p.size(0) == p.size(1) and p.size(0) > 1:
+            p.data.copy_(reconstruct_matrix_with_positive_eigenvalues(p.data))
 
 
 # ---------------------------------------------------------------------------
@@ -59,44 +69,21 @@ def apply_positive_eigenvalue_constraint(model):
 
 @register_helper('positive_eigenvalues')
 class PositiveEigenvaluesHelper(MethodHelper):
-    """Mini-batch training with positive-eigenvalue SVD constraint."""
+    """Full-batch training with the negative-eigenvalue-removal constraint."""
 
     def supports_batched_training(self):
-        # Returns False — batching is handled internally in train_step via NeighborLoaders.
-        # Returning True would bypass train_step and lose the eigenvalue constraint.
+        # The eigenvalue constraint is applied inside train_step after the step,
+        # so we own the gradient flow and keep training full-batch.
         return False
 
     def setup(self, backbone_model, data, config, device, init_data):
         training_cfg = config.get('training', {})
         lr = float(training_cfg.get('lr', 0.01))
         weight_decay = float(training_cfg.get('weight_decay', 5e-4))
-        pe_params = config.get('positive_eigenvalues_params', {})
-        batch_size = int(pe_params.get('batch_size', 32))
 
         backbone_model.to(device)
-        data = data.to(device)
-
         optimizer = torch.optim.Adam(
             backbone_model.parameters(), lr=lr, weight_decay=weight_decay,
-        )
-
-        # --- NeighborLoaders ---
-        train_idx = data.train_mask.nonzero(as_tuple=True)[0]
-        val_idx = data.val_mask.nonzero(as_tuple=True)[0]
-
-        train_loader = NeighborLoader(
-            data,
-            num_neighbors=[15, 10],
-            batch_size=batch_size,
-            input_nodes=train_idx,
-            shuffle=True,
-        )
-        val_loader = NeighborLoader(
-            data,
-            num_neighbors=[15, 10],
-            batch_size=batch_size,
-            input_nodes=val_idx,
-            shuffle=False,
         )
 
         return {
@@ -104,92 +91,26 @@ class PositiveEigenvaluesHelper(MethodHelper):
             'optimizers': [optimizer],
             'backbone': backbone_model,
             'optimizer': optimizer,
-            'train_loader': train_loader,
-            'val_loader': val_loader,
+            'criterion': nn.CrossEntropyLoss(),
             'device': device,
         }
-
-    # ------------------------------------------------------------------
-    # Training
-    # ------------------------------------------------------------------
 
     def train_step(self, state, data, epoch):
         model = state['backbone']
         optimizer = state['optimizer']
-        device = state['device']
-        train_loader = state['train_loader']
+        criterion = state['criterion']
 
         model.train()
-        total_loss = 0.0
-        batch_count = 0
+        optimizer.zero_grad(set_to_none=True)
+        out = model(data)
 
-        for batch in train_loader:
-            batch = batch.to(device)
-            optimizer.zero_grad(set_to_none=True)
+        train_idx = data.train_mask.nonzero(as_tuple=True)[0]
+        loss = criterion(out[train_idx], data.y[train_idx])
+        loss.backward()
+        optimizer.step()
 
-            logits = model(batch)
-
-            # Only seed (target) nodes carry valid masks
-            batch_train_mask = batch.train_mask[:batch.batch_size]
-            target_idx = batch_train_mask.nonzero(as_tuple=True)[0]
-            if len(target_idx) == 0:
-                continue
-
-            loss = F.cross_entropy(logits[target_idx], batch.y[target_idx])
-            loss.backward()
-            optimizer.step()
-
-            total_loss += loss.item()
-            batch_count += 1
-
-        # PE-1 Fix: Apply positive eigenvalue constraint only once at the end of the epoch.
-        # This significantly reduces FLOPs while maintaining the robustness benefit.
+        # Negative-eigenvalue removal right after the parameter update,
+        # excluded from the gradient computation (paper Eq. 16-17).
         apply_positive_eigenvalue_constraint(model)
 
-        avg_loss = total_loss / max(batch_count, 1)
-        return {'train_loss': avg_loss}
-
-    # ------------------------------------------------------------------
-    # Validation (mini-batch)
-    # ------------------------------------------------------------------
-
-    def compute_val_loss(self, state, data):
-        model = state['backbone']
-        device = state['device']
-        val_loader = state['val_loader']
-
-        model.eval()
-        total_loss = 0.0
-        batch_count = 0
-
-        with torch.no_grad():
-            for batch in val_loader:
-                batch = batch.to(device)
-                logits = model(batch)
-
-                batch_val_mask = batch.val_mask[:batch.batch_size]
-                target_idx = batch_val_mask.nonzero(as_tuple=True)[0]
-                if len(target_idx) == 0:
-                    continue
-
-                loss = F.cross_entropy(logits[target_idx], batch.y[target_idx])
-                total_loss += loss.item()
-                batch_count += 1
-
-        return total_loss / max(batch_count, 1)
-
-    # ------------------------------------------------------------------
-    # Predictions & embeddings — full-graph forward (not mini-batch)
-    # ------------------------------------------------------------------
-
-    def get_predictions(self, state, data):
-        model = state['backbone']
-        model.eval()
-        with torch.no_grad():
-            return model(data).argmax(dim=1)
-
-    def get_embeddings(self, state, data):
-        model = state['backbone']
-        model.eval()
-        with torch.no_grad():
-            return model.get_embeddings(data)
+        return {'train_loss': loss.item()}

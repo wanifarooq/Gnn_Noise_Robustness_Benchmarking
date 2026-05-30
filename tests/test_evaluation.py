@@ -306,14 +306,28 @@ class TestLogEpoch:
         assert expected_file.exists()
 
     def test_log_epoch_checkpoint_saved_every_epoch(self, tmp_path):
+        # Per-epoch disk checkpointing is now opt-in (default saves best-only).
         model = nn.Linear(3, 2)
+        dummy = _make_dummy(
+            {
+                'backbone_model': model,
+                'run_dir': str(tmp_path),
+                'compute_info': dict(_ZERO_COMPUTE_INFO),
+            },
+            config={'training': {'checkpoint_every_epoch': True}},
+        )
+        dummy.log_epoch(5, 1.0, 0.5, 0.6, 0.65, is_best=False)
+        assert len(list(tmp_path.glob("epoch_*.pt"))) == 1
+
+    def test_log_epoch_no_checkpoint_by_default(self, tmp_path):
+        # Default: a non-best epoch writes no checkpoint to disk.
         dummy = _make_dummy({
-            'backbone_model': model,
+            'backbone_model': nn.Linear(3, 2),
             'run_dir': str(tmp_path),
             'compute_info': dict(_ZERO_COMPUTE_INFO),
         })
         dummy.log_epoch(5, 1.0, 0.5, 0.6, 0.65, is_best=False)
-        assert len(list(tmp_path.glob("epoch_*.pt"))) == 1
+        assert len(list(tmp_path.glob("epoch_*.pt"))) == 0
 
     def test_save_training_log(self, tmp_path):
         import json

@@ -1,8 +1,16 @@
 """GNNGuard method helper — attention-based edge reweighting for robustness.
 
 Wraps the backbone in a GNNGuardModel that computes cosine-similarity-based
-attention coefficients over the adjacency matrix.  Training uses NLL loss
-(model outputs log_softmax).
+attention coefficients over the adjacency matrix, prunes dissimilar edges
+(similarity < P0), normalises the attention (row-normalise + adaptive
+self-loop term) and blends successive layers via a learnable graph-memory
+coefficient.  These edge weights are fed into the shared backbone's message
+passing.  Training uses NLL loss (model outputs log_softmax).
+
+NOTE: GNNGuard (Zhang & Zitnik, NeurIPS 2020) is an *adversarial-structure-
+attack* defence.  Here it is used (off-label) as a label-noise baseline; the
+defining cosine-attention mechanism is run for real and kept faithful to the
+official implementation (defense/gcn.py, function ``att_coef``).
 """
 
 import numpy as np
@@ -41,9 +49,10 @@ class GNNGuardHelper(MethodHelper):
         diag_idx = torch.arange(n, dtype=torch.int64)
         loop_indices = torch.stack((diag_idx, diag_idx), dim=0)
         loop_values = torch.ones(n, dtype=torch.float32)
-        identity = torch.sparse.FloatTensor(
-            loop_indices, loop_values, adj_tensor.shape
-        ).to(device)
+        identity = torch.sparse_coo_tensor(
+            loop_indices, loop_values, adj_tensor.shape,
+            dtype=torch.float32, device=device,
+        )
         return adj_tensor + identity
 
     # ── Setup ──────────────────────────────────────────────────────────────
@@ -184,7 +193,11 @@ class GNNGuardHelper(MethodHelper):
         }
 
     def load_checkpoint_state(self, state, checkpoint):
+        # Restore everything saved by get_checkpoint_state.  The backbone is a
+        # submodule of gnnguard_model, but we restore it explicitly too so the
+        # standalone 'backbone' object and the wrapped copy stay in sync.
         state['gnnguard_model'].load_state_dict(checkpoint['gnnguard_model'])
+        state['backbone'].load_state_dict(checkpoint['backbone'])
 
     # ── Profiling ──────────────────────────────────────────────────────────
 

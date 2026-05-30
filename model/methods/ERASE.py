@@ -17,18 +17,21 @@ class MaximalCodingRateReductionLoss(nn.Module):
     def __init__(self, compression_weight: float = 1.0, discrimination_weight: float = 1.0,
                  eps: float = 0.01):
         super().__init__()
+        # compression_weight == gam1, discrimination_weight == gam2 (official loss.py naming)
         self.compression_weight = compression_weight
         self.discrimination_weight = discrimination_weight
         self.eps = eps
 
     def compute_discrimination_loss_empirical(self, feature_matrix: torch.Tensor) -> torch.Tensor:
         #Compute empirical discrimination loss term
+        # Official loss.py: logdet(I + gam1 * scalar * W W^T) — gam1 is INSIDE the logdet,
+        # NOT gam2. gam2 only multiplies the outer discrimination term in the total loss.
         num_features, num_samples = feature_matrix.shape
         identity_matrix = torch.eye(num_features, device=feature_matrix.device)
         scalar = num_features / (num_samples * self.eps)
         _, log_determinant = torch.linalg.slogdet(
             identity_matrix +
-            self.discrimination_weight * scalar * feature_matrix @ feature_matrix.T
+            self.compression_weight * scalar * feature_matrix @ feature_matrix.T
         )
 
         return log_determinant / 2.
@@ -112,19 +115,21 @@ class MaximalCodingRateReductionLoss(nn.Module):
         for _ in range(propagation_steps):
             semantic_labels = (1 - label_prop_alpha) * (adjacency_matrix @ semantic_labels) + label_prop_alpha * semantic_labels
 
-        # E-1 Fix: Use soft probabilities instead of hard argmax to keep graph differentiable
-        # This allows the Coding Rate loss to provide gradients back to the backbone.
         soft_labels = F.softmax(semantic_labels, dim=1)
         predicted_labels = torch.argmax(soft_labels, dim=1)
 
         # Compute discrimination loss
         discrimination_loss_empirical = self.compute_discrimination_loss_empirical(feature_matrix)
 
-        # E-1 Fix: Compute membership matrices differentiably
-        membership_matrices = self._convert_labels_to_membership_matrices_differentiable(soft_labels, num_classes)
-
-        compression_loss_empirical = self.compute_compression_loss_empirical(feature_matrix, membership_matrices)
-        compression_loss_theoretical = self.compute_compression_loss_theoretical(feature_matrix, membership_matrices)
+        # Paper-faithful HARD class membership. MCR2's gradient flows through the
+        # embeddings (feature_matrix), not through the label-derived class
+        # assignment, so hard membership trains correctly — and it avoids
+        # materialising a dense (C, N, N) membership tensor (which is ~34 GB on
+        # roman-empire and OOMs). F·diag(1_class)·Fᵀ == F[:,class]·F[:,class]ᵀ.
+        compression_loss_empirical = self.compute_compression_loss_empirical_multiclass(
+            feature_matrix, predicted_labels)
+        # Theoretical term has the same per-class formula here; reported for logging.
+        compression_loss_theoretical = compression_loss_empirical
         discrimination_loss_theoretical = self.compute_discrimination_loss_theoretical(feature_matrix)
 
         total_loss_empirical = -self.discrimination_weight * discrimination_loss_empirical + self.compression_weight * compression_loss_empirical
@@ -175,7 +180,8 @@ class MaximalCodingRateReductionLoss(nn.Module):
 
         updated_semantic_labels = cosine_weight * semantic_labels + (1 - cosine_weight) * cosine_similarities
 
-        return updated_semantic_labels
+        # Official compute_sematic_labels returns F.softmax(Y_all, dim=1), not the raw mix.
+        return F.softmax(updated_semantic_labels, dim=1)
 
 class AdjacencyMatrixProcessor:
 
@@ -392,7 +398,11 @@ class ERASEMethodTrainer(BaseTrainer):
         d = self.init_data
         state = self._get_state()
         data = d['data_for_training']
-        clean_labels = getattr(data, 'y_original', data.y)
+        # Use data.y (noisy train+val, clean test) for reporting — consistent
+        # with the shared evaluate path used by the other methods, so train/val
+        # metrics are comparable across the benchmark. Test labels are clean
+        # either way, so the leaderboard (test) numbers are unaffected.
+        labels = data.y
 
         def get_predictions():
             return self._helper.get_predictions(state, data)
@@ -401,7 +411,7 @@ class ERASEMethodTrainer(BaseTrainer):
             return self._helper.get_embeddings(state, data)
 
         return evaluate_model(
-            get_predictions, get_embeddings, clean_labels,
+            get_predictions, get_embeddings, labels,
             data.train_mask, data.val_mask, data.test_mask,
             data.edge_index, d['device'],
         )

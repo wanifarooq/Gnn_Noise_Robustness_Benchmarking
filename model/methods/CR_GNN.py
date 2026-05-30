@@ -154,7 +154,9 @@ class CRGNNMethodTrainer(BaseTrainer):
         d = self.init_data
         state = self._get_state()
         data = d['data_for_training']
-        clean_labels = getattr(data, 'y_original', data.y)
+        # data.y holds noisy train+val labels and clean test labels; never read
+        # data.y_original (that would leak clean train/val labels into metrics).
+        labels = data.y
 
         def get_predictions():
             return self._helper.get_predictions(state, data)
@@ -163,7 +165,7 @@ class CRGNNMethodTrainer(BaseTrainer):
             return self._helper.get_embeddings(state, data)
 
         return evaluate_model(
-            get_predictions, get_embeddings, clean_labels,
+            get_predictions, get_embeddings, labels,
             data.train_mask, data.val_mask, data.test_mask,
             data.edge_index, d['device'],
         )

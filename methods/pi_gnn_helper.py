@@ -132,18 +132,26 @@ class PiGnnHelper(MethodHelper):
 
         main_model.train()
         mi_model.train()
-        main_opt.zero_grad(set_to_none=True)
-        mi_opt.zero_grad(set_to_none=True)
-
-        main_cls, main_link = main_model(data)
-        mi_cls, mi_link = mi_model(data)
 
         train_labels = data.y[data.train_mask]
 
-        # MI reconstruction loss (computed now, backward later)
+        # ── Stage 1: optimize the MI model FIRST (official: loss_mi.backward();
+        # optimizer_mi.step()).  The MI model is trained purely on link
+        # reconstruction and is decoupled from the main model. ──────────────
+        mi_opt.zero_grad(set_to_none=True)
+        _, mi_link = mi_model(data)
         mi_recon_loss = loss_norm * F.binary_cross_entropy_with_logits(
             mi_link, adj_target, pos_weight=pos_weight
         )
+        mi_recon_loss.backward()
+        mi_opt.step()
+
+        # ── Stage 2: optimize the main model.  Recompute the confidence mask
+        # from the UPDATED MI output and DETACH it so no gradient flows back
+        # into the MI model (official: importance is built from the post-step
+        # MI prediction and used only as a weighting factor). ───────────────
+        main_opt.zero_grad(set_to_none=True)
+        main_cls, main_link = main_model(data)
 
         # Classification loss
         cls_loss = F.nll_loss(main_cls[data.train_mask], train_labels)
@@ -152,19 +160,25 @@ class PiGnnHelper(MethodHelper):
         ctx_loss = 0
         if not vanilla:
             if epoch > mi_start:
-                # Importance-weighted link loss
-                importance = torch.zeros_like(mi_link).view(-1).to(device)
+                # Importance-weighted link loss.  The importance mask is a
+                # weighting factor only — it must not carry gradients into
+                # either model, so it is detached.
+                if use_self_mi:
+                    sig_pred = torch.sigmoid(main_link).detach().view(-1)
+                else:
+                    with torch.no_grad():
+                        _, mi_link_updated = mi_model(data)
+                    sig_pred = torch.sigmoid(mi_link_updated).detach().view(-1)
+
+                importance = torch.zeros_like(sig_pred).to(device)
                 pos_mask = adj_target.view(-1).bool()
                 neg_mask = ~pos_mask
 
-                if use_self_mi:
-                    sig_pred = torch.sigmoid(main_link).view(-1)
-                else:
-                    sig_pred = torch.sigmoid(mi_link).view(-1)
-
                 importance[pos_mask] = sig_pred[pos_mask]
                 importance[neg_mask] = 1 - sig_pred[neg_mask]
-                importance = importance.view(adj_target.size(0), adj_target.size(1))
+                importance = importance.view(
+                    adj_target.size(0), adj_target.size(1)
+                ).detach()
 
                 weighted = F.binary_cross_entropy_with_logits(
                     main_link, adj_target,
@@ -176,12 +190,11 @@ class PiGnnHelper(MethodHelper):
                     main_link, adj_target, pos_weight=pos_weight
                 )
 
-        # Combined backward: MI gets gradients from both mi_recon_loss and ctx_loss
-        total_loss = cls_loss + ctx_loss + mi_recon_loss
-        total_loss.backward()
+        main_loss = cls_loss + ctx_loss
+        main_loss.backward()
         main_opt.step()
-        mi_opt.step()
 
+        total_loss = main_loss + mi_recon_loss
         return {'train_loss': total_loss.item()}
 
     # ── Validation ─────────────────────────────────────────────────────────
