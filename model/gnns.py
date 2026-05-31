@@ -243,6 +243,8 @@ class GCN(nn.Module):
         if self.norms:
             for norm in self.norms:
                 norm.reset_parameters()
+        if hasattr(self, 'jk_lin'):
+            self.jk_lin.reset_parameters()
 
 
 class GIN(nn.Module):
@@ -345,6 +347,8 @@ class GIN(nn.Module):
         if self.norms:
             for norm in self.norms:
                 norm.reset_parameters()
+        if hasattr(self, 'jk_lin'):
+            self.jk_lin.reset_parameters()
 
 
 class GAT(nn.Module):
@@ -460,6 +464,8 @@ class GAT(nn.Module):
         if self.norms:
             for norm in self.norms:
                 norm.reset_parameters()
+        if hasattr(self, 'jk_lin'):
+            self.jk_lin.reset_parameters()
 
 
 class GATv2(nn.Module):
@@ -573,6 +579,8 @@ class GATv2(nn.Module):
         if self.norms:
             for norm in self.norms:
                 norm.reset_parameters()
+        if hasattr(self, 'jk_lin'):
+            self.jk_lin.reset_parameters()
 
 class GPS(nn.Module):
     """Graph Transformer (GPS: General, Powerful, Scalable).
@@ -685,6 +693,8 @@ class GPS(nn.Module):
         if self.norms:
             for norm in self.norms:
                 norm.reset_parameters()
+        if hasattr(self, 'jk_lin'):
+            self.jk_lin.reset_parameters()
 
 class GCN_modified(nn.Module):
     """Faithful port of the "Classic GNNs are Strong Baselines" tuned backbone
@@ -736,8 +746,12 @@ class GCN_modified(nn.Module):
 
         def make_conv(ic, oc):
             if self.inner_gnn == 'gat':
-                return GATConv(ic, oc, heads=heads, concat=True,
-                               add_self_loops=self_loop, bias=False)
+                # concat=False (average heads) keeps the output at `oc` so the
+                # per-layer linear residual matches for any `heads`. Identical to
+                # tunedGNN's GAT (which uses heads=1) at heads=1; add_self_loops
+                # False matches tunedGNN.
+                return GATConv(ic, oc, heads=heads, concat=False,
+                               add_self_loops=False, bias=False)
             if self.inner_gnn == 'sage':
                 from torch_geometric.nn import SAGEConv
                 return SAGEConv(ic, oc)

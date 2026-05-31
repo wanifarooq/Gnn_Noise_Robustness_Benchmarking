@@ -241,21 +241,26 @@ class MethodHelper(ABC):
         total_loss = 0.0
         n_batches = 0
 
-        with torch.no_grad():
-            loader = loaders.val_loader or loaders.inference_loader
-            for batch in loader:
-                batch = batch.to(device)
-                out = model(batch)
-                n_seed = get_seed_indices(batch, loaders.sampler_type)
+        try:
+            with torch.no_grad():
+                loader = loaders.val_loader or loaders.inference_loader
+                for batch in loader:
+                    batch = batch.to(device)
+                    out = model(batch)
+                    n_seed = get_seed_indices(batch, loaders.sampler_type)
 
-                seed_mask = batch.val_mask[:n_seed]
-                idx = seed_mask.nonzero(as_tuple=True)[0]
-                if len(idx) == 0:
-                    continue
+                    seed_mask = batch.val_mask[:n_seed]
+                    idx = seed_mask.nonzero(as_tuple=True)[0]
+                    if len(idx) == 0:
+                        continue
 
-                loss = F.cross_entropy(out[idx], batch.y[idx])
-                total_loss += loss.item()
-                n_batches += 1
+                    loss = F.cross_entropy(out[idx], batch.y[idx])
+                    total_loss += loss.item()
+                    n_batches += 1
+        except (TypeError, AttributeError):
+            # Custom-signature / tuple-returning models can't be batched —
+            # full-graph val loss (matches the predict/embed fallbacks).
+            return self.compute_val_loss(state, data)
 
         return total_loss / max(n_batches, 1)
 
@@ -277,15 +282,23 @@ class MethodHelper(ABC):
         model.eval()
         all_preds = torch.zeros(data.num_nodes, dtype=torch.long, device=device)
 
-        with torch.no_grad():
-            for batch in loaders.inference_loader:
-                batch = batch.to(device)
-                out = model(batch)
-                n_seed = get_seed_indices(batch, loaders.sampler_type)
-                global_ids = get_global_ids(batch, loaders.sampler_type)
+        try:
+            with torch.no_grad():
+                for batch in loaders.inference_loader:
+                    batch = batch.to(device)
+                    out = model(batch)
+                    n_seed = get_seed_indices(batch, loaders.sampler_type)
+                    global_ids = get_global_ids(batch, loaders.sampler_type)
 
-                if global_ids is not None:
-                    all_preds[global_ids] = out[:n_seed].argmax(dim=1)
+                    if global_ids is not None:
+                        all_preds[global_ids] = out[:n_seed].argmax(dim=1)
+        except (TypeError, AttributeError):
+            # Methods whose primary model has a non-standard forward signature
+            # or returns a tuple (e.g. NRGNN/RTGNN/PI-GNN/GNNGuard take
+            # features+edges, not a Data object) cannot be batched at inference
+            # — fall back to their full-graph get_predictions. These methods are
+            # full-graph anyway.
+            return self.get_predictions(state, data)
 
         return all_preds
 
@@ -304,20 +317,25 @@ class MethodHelper(ABC):
         # Determine embedding dim from first batch
         all_embeds = None
 
-        with torch.no_grad():
-            for batch in loaders.inference_loader:
-                batch = batch.to(device)
-                emb = model.get_embeddings(batch)
-                n_seed = get_seed_indices(batch, loaders.sampler_type)
-                global_ids = get_global_ids(batch, loaders.sampler_type)
+        try:
+            with torch.no_grad():
+                for batch in loaders.inference_loader:
+                    batch = batch.to(device)
+                    emb = model.get_embeddings(batch)
+                    n_seed = get_seed_indices(batch, loaders.sampler_type)
+                    global_ids = get_global_ids(batch, loaders.sampler_type)
 
-                if all_embeds is None:
-                    all_embeds = torch.zeros(
-                        data.num_nodes, emb.size(1), device=device,
-                    )
+                    if all_embeds is None:
+                        all_embeds = torch.zeros(
+                            data.num_nodes, emb.size(1), device=device,
+                        )
 
-                if global_ids is not None:
-                    all_embeds[global_ids] = emb[:n_seed]
+                    if global_ids is not None:
+                        all_embeds[global_ids] = emb[:n_seed]
+        except (TypeError, AttributeError):
+            # Custom-signature models (NRGNN/RTGNN/PI-GNN/GNNGuard) can't be
+            # batched at inference — fall back to the full-graph path.
+            return self.get_embeddings(state, data)
 
         if all_embeds is None:
             # Fallback: empty tensor (should never happen with valid data)

@@ -169,15 +169,17 @@ def _safe(s):
 
 
 def get_result_filename(config: dict) -> str:
-    """Build a descriptive filename: {short_hash}_{dataset}_{method}_{seed}_noise-{type}-{rate}"""
+    """Build a descriptive filename:
+    {short_hash}_{dataset}_{backbone}_{method}_{seed}_noise-{type}-{rate}"""
     short_hash = get_config_hash(config)[:8]
     dataset = _safe(config.get("dataset", {}).get("name", "unknown"))
+    backbone = _safe(config.get("model", {}).get("name", "unknown"))
     method = _safe(config.get("training", {}).get("method", "unknown"))
     seed = config.get("seed", 0)
     noise_type = _safe(config.get("noise", {}).get("type", "clean"))
     noise_rate = config.get("noise", {}).get("rate", 0) or 0
     noise_rate_str = f"{float(noise_rate):.2f}"
-    return f"{short_hash}_{dataset}_{method}_{seed}_noise-{noise_type}-{noise_rate_str}"
+    return f"{short_hash}_{dataset}_{backbone}_{method}_{seed}_noise-{noise_type}-{noise_rate_str}"
 
 
 def detect_completed_runs(experiment_dir: str, n_runs: int) -> Dict[int, Dict[str, Any]]:

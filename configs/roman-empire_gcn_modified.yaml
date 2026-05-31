@@ -5,6 +5,7 @@
 seed: 42
 device: cuda
 num_runs: 3
+save_checkpoint: true        # save best-epoch checkpoint per run (best_run_N.pt). Set false to skip (saves disk; no later --eval-only).
 
 dataset:
   name: roman-empire
@@ -28,8 +29,8 @@ model:
   mod_norm: bn         # none|ln|bn (per-layer normalization)
   jk: false              # additive jumping-knowledge (bool)
   pre_ln: false
-  inner_gnn: gcn          # gcn|gat|sage (inner conv type)
-  heads: 1
+  inner_gnn: gcn          # gcn|gat|sage  -> tunedGNN GCN* | GAT* | GraphSAGE*
+  heads: 1                # tunedGNN uses heads=1 for GAT*
 
 training:
   method: £[standard, positive_eigenvalues, gcod, nrgnn, pi_gnn, cr_gnn, community_defense, rtgnn, graphcleaner, unionnet, gnn_cleaner, erase, gnnguard]
@@ -39,20 +40,21 @@ training:
   patience: 2500
   oversmoothing_every: 50
   mode: transductive
+  checkpoint_every_epoch: false  # also save a .pt EVERY epoch (huge #files). Keep false; best-epoch is always kept.
+
+gcod_params:                 # DELIBERATELY TUNED per dataset (do NOT "fix" to paper values)
+  batch_size: 64
+  uncertainty_lr: 0.001        # cora=0.1 (sparse, reliable signal); dblp/amazon/roman=0.001
+  kl_start_epoch: 2
+  momentum: 0
+  temperature: 1.0
+  similarity_mode: correction
 
 positive_eigenvalues_params:
   batch_size: 32          # unused (PE is full-batch now); kept for back-compat
 
-gcod_params:
-  batch_size: 64
-  uncertainty_lr: 0.001
-  kl_start_epoch: 2
-  momentum: 0.9
-  temperature: 1.0
-  similarity_mode: correction
-
 nrgnn_params:
-  edge_hidden: 16
+  edge_hidden: 64         # official EnyanDai/NRGNN --edge_hidden default
   n_p: 50                 # paper default; NOTE: NRGNN builds O(|unlabeled|x|confident|)
   p_u: 0.8                # edges -> can OOM/oversmooth on large/dense graphs (a finding)
   alpha: 0.03
@@ -61,9 +63,9 @@ nrgnn_params:
   n_n: 50
 
 pi_gnn_params:
-  start_epoch: 50         # warm up MI model before masking (fraction of epochs)
+  start_epoch: 200        # official TianBian95/pi-gnn default (absolute epoch; needs epochs > 200)
   miself: false
-  norm: null
+  norm: 10000             # official sentinel (analytic loss_norm); same behaviour as null
   vanilla: false
 
 cr_gnn_params:
@@ -83,16 +85,16 @@ rtgnn_params:
   edge_hidden: 64
   co_lambda: 0.1
   alpha: 1.0
-  th: 0.8
-  K: 50
+  th: 0.95                # official GhostQ99/RobustTrainingGNN --th default
+  K: 100                  # official --K default
   tau: 0.05
   n_neg: 100
   decay_w: 0.1
 
 graphcleaner_params:
-  k: 5
+  k: 3                    # official lywww/GraphCleaner --k default
   sample_rate: 0.5
-  max_iter_classifier: 200
+  max_iter_classifier: 500  # mirrors official binary-detector budget (bc_epochs=500)
   held_split: valid
 
 unionnet_params:
@@ -102,11 +104,11 @@ unionnet_params:
   feat_norm: true
 
 gnn_cleaner_params:
-  label_propagation_iterations: 50
-  similarity_epsilon: 1e-8
+  label_propagation_iterations: 50   # paper: "execute label propagation 50 iterations each epoch for all experiments"
+  similarity_epsilon: 1.0e-8   # float (1e-8 parses as a string in YAML 1.1)
 
 erase_params:
-  n_embedding: 256
+  n_embedding: 512        # official eraseai/erase --n_embedding default
   n_heads: 8
   use_layer_norm: false
   use_residual: false
@@ -116,10 +118,10 @@ erase_params:
   eps: 0.05
   alpha: 0.6
   beta: 0.6
-  T: 3
+  T: 5                    # official default / Cora (3 is the PubMed value)
 
 gnnguard_params:
-  P0: 0.5
+  P0: 0.1                 # official mims-harvard/GNNGuard pruning threshold (sim<0.1=0)
   K: 2
   D2: 16
   attention: true

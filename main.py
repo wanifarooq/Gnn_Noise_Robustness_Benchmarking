@@ -91,7 +91,9 @@ def run_benchmarking(base_folder='results', config_path=DEFAULT_CONFIG,
         save_checkpoint = (not no_checkpoint) and sweep_config.get('save_checkpoint', True)
         run_eval_only = eval_only or sweep_config.get('eval_only', False)
         n_runs = num_runs if num_runs is not None else sweep_config.get('num_runs', 5)
-        force = force or bool(sweep_config.get("force", False))
+        # Per-config local — do NOT reassign the `force` parameter, or one
+        # config's force:true would stick and re-run every later config.
+        cfg_force = force or bool(sweep_config.get("force", False))
 
         # ── Incremental run detection ──
         # Scan existing run_N/training_log.json to find already-completed runs.
@@ -99,9 +101,9 @@ def run_benchmarking(base_folder='results', config_path=DEFAULT_CONFIG,
         # When eval_only=True, detection is also skipped because eval-only passes
         # run_dir=None, so no training_log.json is written — previous eval-only
         # results are never visible to detection and all runs always re-evaluate.
-        if force or run_eval_only:
+        if cfg_force or run_eval_only:
             completed = {}
-            if force:
+            if cfg_force:
                 print(f"[FORCE] Re-running all {n_runs} runs: {experiment_dir}")
             elif run_eval_only:
                 print(f"[EVAL-ONLY] Re-evaluating all {n_runs} runs: {experiment_dir}")

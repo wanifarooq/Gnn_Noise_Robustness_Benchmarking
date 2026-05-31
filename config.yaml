@@ -34,6 +34,13 @@ model:
   heads: 8
   use_pe: false
   pe_dim: 8
+  # --- GCN_modified-only knobs (the tunedGNN "strong baseline" backbone).
+  #     Used ONLY when name: gcn_modified; ignored for every other backbone. ---
+  inner_gnn: gcn       # gcn | gat | sage — inner conv of GCN_modified (gcn=GCN*, gat=GAT*, sage=GraphSAGE*)
+  pre_linear: false    # project features before message passing
+  lin_res: false       # learned linear residual conv(x)+W_i*x (key for heterophily)
+  mod_norm: none       # none | ln | bn — per-layer normalization inside GCN_modified
+  pre_ln: false
 
 training:
   method: £[standard, positive_eigenvalues, gcod, nrgnn, pi_gnn, cr_gnn, community_defense, rtgnn, graphcleaner, unionnet, gnn_cleaner, erase, gnnguard]  # positive_eigenvalues or gcod

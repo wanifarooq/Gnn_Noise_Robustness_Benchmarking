@@ -251,13 +251,14 @@ Train and validation noise is applied independently (different random seed) so t
 
 | Parameter | Description | Used by |
 |-----------|-------------|---------|
-| `name` | Architecture: `gcn`, `gin`, `gat`, `gatv2`, `gps` | All |
+| `name` | Architecture: `gcn`, `gin`, `gat`, `gatv2`, `gps`, `gcn_modified` | All |
 | `hidden_channels` | Hidden representation size | All |
 | `n_layers` | Number of GNN layers | All |
 | `dropout` | Dropout probability | All |
 | `use_residual` | Add residual (skip) connections between layers of matching width. Helps on heterophilous datasets (e.g. `roman-empire`). | GCN, GAT, GATv2, GIN |
-| `normalization` | Inter-layer normalization: `none`, `batch` (BatchNorm1d), or `layer` (LayerNorm, **default**). LayerNorm prevents the rank-1 embedding collapse (total oversmoothing) that otherwise occurs on **dense** graphs (e.g. `amazon-computers`: test accuracy 0.52 → 0.87) **without regressing sparse graphs** (cora stays ~0.78, whereas BatchNorm drops it to ~0.66). | All |
-| `self_loop` | Add self-loops to nodes | GCN |
+| `normalization` | Inter-layer normalization: `none`, `batch` (BatchNorm1d), `layer` (LayerNorm, **default**), or `pair` (PairNorm). LayerNorm prevents the rank-1 embedding collapse (total oversmoothing) that otherwise occurs on **dense** graphs (e.g. `amazon-computers`: test accuracy 0.52 → 0.87) **without regressing sparse graphs** (cora stays ~0.78, whereas BatchNorm drops it to ~0.66). | All |
+| `jk` | Jumping-Knowledge aggregation of all layer outputs: `none`, `cat`, or `max`. Use `cat` for heterophilous / deep models (lets a deep GCN avoid oversmoothing). | GCN, GIN, GAT, GATv2 |
+| `self_loop` | Add self-loops to nodes. **Set `false` for heterophilous datasets** (self-loops dilute the neighbour signal, ~10–15% drop). | GCN, GAT, GATv2 |
 | `mlp_layers` | MLP layers inside GIN convolutions | GIN |
 | `train_eps` | Learnable epsilon in GIN | GIN |
 | `heads` | Number of attention heads | GAT, GATv2, GPS |
@@ -265,6 +266,20 @@ Train and validation noise is applied independently (different random seed) so t
 | `pe_dim` | Positional encoding dimension | GPS |
 
 **Edge weight support:** GCN, GAT, and GATv2 support edge weights (used by methods like NRGNN, RTGNN, GNNGuard that modify graph structure). GIN silently ignores edge weights. GPS does not use edge weights.
+
+#### `gcn_modified` — the tuned strong-baseline backbone
+
+`gcn_modified` is a separate backbone: a faithful port of the tuned classic GNN from **"Classic GNNs are Strong Baselines" (Luo et al., NeurIPS 2024, arXiv:2406.08993)**. Unlike the textbook `gcn`, it adds a learned per-layer linear residual (`conv(x) + Wᵢ·x`, ego/neighbour separation), an optional input projection, and additive jumping-knowledge — which is what makes it reach the paper's numbers (e.g. roman-empire 91.2). The following knobs apply **only** when `name: gcn_modified` (they are ignored by every other backbone):
+
+| Parameter | Description |
+|-----------|-------------|
+| `inner_gnn` | Inner conv: `gcn` (→ GCN\*), `gat` (→ GAT\*), or `sage` (→ GraphSAGE\*) |
+| `pre_linear` | Project features (`Linear`) before message passing |
+| `lin_res` | Learned linear residual `conv(x) + Wᵢ·x` per layer (key for heterophily) |
+| `mod_norm` | Per-layer normalization: `none`, `ln` (LayerNorm), or `bn` (BatchNorm) |
+| `pre_ln` | Pre-normalize each layer's input |
+
+Recommended per-dataset recipes are provided in `configs/<dataset>_gcn_modified.yaml`.
 
 ### Training
 
@@ -934,7 +949,7 @@ Tests use 5 epochs on Cora with reduced hyperparameters for speed. The test suit
 +-- model/
 |   +-- base.py                     # BaseTrainer ABC (checkpoint, logging, profiling, plotting)
 |   +-- registry.py                 # @register decorator + trainer auto-discovery
-|   +-- gnns.py                     # GCN, GIN, GAT, GATv2, GPS backbones
+|   +-- gnns.py                     # GCN, GIN, GAT, GATv2, GPS, GCN_modified backbones (+ PairNorm, JK)
 |   +-- evaluation.py               # ClassificationMetrics, OversmoothingMetrics
 |   +-- methods/                    # Trainer wrappers + algorithm-specific model components
 |       +-- Standard.py
