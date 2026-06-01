@@ -244,12 +244,16 @@ class CommunityDefenseHelper(MethodHelper):
         # Bound the regularizer so it cannot dominate the few-shot supervised CE
         # (which would cause representation collapse, esp. on heterophilous graphs):
         #   1. cap the adaptive weight at 1.0 so the configured lambda cannot blow up,
-        #   2. clamp the weighted community term to the (detached) supervised CE
-        #      magnitude, so it acts only as a mild regularizer.
+        #   2. clamp the weighted community term to a FRACTION of the (detached)
+        #      supervised CE, so it acts only as a mild regularizer. A 1:1 cap let
+        #      the community-CE co-dominate the supervised signal (≈50/50) and the
+        #      embedding drifted toward community structure rather than the labels;
+        #      a quarter keeps it auxiliary.
+        COMM_CAP_FRAC = 0.25
         ramp = min(1.0, (epoch + 1) / 50.0)
         adaptive_weight = min(1.0, community_loss_weight) * ramp
         weighted_comm = adaptive_weight * comm_loss
-        comm_cap = ce_loss.detach()
+        comm_cap = COMM_CAP_FRAC * ce_loss.detach()
         if weighted_comm > comm_cap:
             # rescale to the cap while preserving gradient direction
             weighted_comm = weighted_comm * (comm_cap / (weighted_comm.detach() + 1e-12))

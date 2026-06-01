@@ -105,9 +105,13 @@ class UnionNETHelper(MethodHelper):
         # the gradient flows through `out` (Eq 4/5).
         with torch.no_grad():
             h = model.get_embeddings(data)              # [N, d]
+            # L2-normalize -> cosine similarity. Raw inner products blow up in
+            # magnitude on wide backbones (hidden=512), so the softmax saturates
+            # to a single high-norm neighbour and the support set degenerates.
+            h = F.normalize(h, p=2, dim=1)
             h_train = h[train_idx]                       # [n_train, d]
 
-            # Similarity matrix over labelled nodes (inner product).
+            # Similarity matrix over labelled nodes (cosine, in [-1, 1]).
             sim = h_train @ h_train.t()                  # [n_train, n_train]
             # Exclude self when picking neighbours.
             self_mask = torch.eye(n_train, dtype=torch.bool, device=device)

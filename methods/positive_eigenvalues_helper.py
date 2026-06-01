@@ -49,6 +49,17 @@ def reconstruct_matrix_with_positive_eigenvalues(W):
     return W_plus.to(dtype=W.dtype)
 
 
+def _is_constrainable_square(p):
+    """A 2-D parameter the eigenvalue constraint can act on (square, > 1x1)."""
+    return p.dim() == 2 and p.size(0) == p.size(1) and p.size(0) > 1
+
+
+def has_square_weight(model):
+    """True iff the model already owns a square 2-D weight (e.g. a hidden->hidden
+    conv in a >=3-layer net). Used to decide whether PE must synthesise one."""
+    return any(_is_constrainable_square(p) for p in model.parameters())
+
+
 @torch.no_grad()
 def apply_positive_eigenvalue_constraint(model):
     """Clip negative eigenvalues of every square 2-D weight matrix in the model.
@@ -59,8 +70,45 @@ def apply_positive_eigenvalue_constraint(model):
     smoothing/sharpening inductive bias lives.
     """
     for p in model.parameters():
-        if p.dim() == 2 and p.size(0) == p.size(1) and p.size(0) > 1:
+        if _is_constrainable_square(p):
             p.data.copy_(reconstruct_matrix_with_positive_eigenvalues(p.data))
+
+
+class PESquareHead(nn.Module):
+    """Backbone + an appended square readout, used ONLY by positive_eigenvalues.
+
+    The negative-eigenvalue constraint needs a square weight to act on. Shallow
+    backbones (e.g. a 2-layer GCN) have only rectangular weights, so the
+    constraint is a no-op and PE collapses to `standard`. When that happens we
+    append a square ``out_dim x out_dim`` linear on top of the *full, unchanged*
+    backbone forward — this is the only placement that adds a square operator
+    without dropping a graph hop or altering the backbone's representation, so
+    PE stays directly comparable to `standard` in depth.
+
+    The layer is identity-initialised, so at epoch 0 the wrapped model is exactly
+    the bare backbone; the constraint then shapes its spectrum during training.
+    Deeper backbones already have square hidden->hidden weights, so they are used
+    directly and this wrapper is never built (see setup()).
+    """
+
+    def __init__(self, backbone, dim):
+        super().__init__()
+        self.backbone = backbone
+        self.square = nn.Linear(dim, dim, bias=False)
+        nn.init.eye_(self.square.weight)  # identity -> no-op at initialisation
+
+    def forward(self, data):
+        return self.square(self.backbone(data))
+
+    def get_embeddings(self, data):
+        # Delegate: the smoothing head acts on logits, not the embedding, so the
+        # representation other code reads is the backbone's untouched embedding.
+        return self.backbone.get_embeddings(data)
+
+    def initialize(self):
+        if hasattr(self.backbone, 'initialize'):
+            self.backbone.initialize()
+        nn.init.eye_(self.square.weight)
 
 
 # ---------------------------------------------------------------------------
@@ -82,6 +130,19 @@ class PositiveEigenvaluesHelper(MethodHelper):
         weight_decay = float(training_cfg.get('weight_decay', 5e-4))
 
         backbone_model.to(device)
+
+        # PE needs a square weight to constrain. If the backbone already owns one
+        # (any >=3-layer net has square hidden->hidden convs) use it as-is. Only
+        # when there is none (shallow backbones, e.g. 2-layer GCN, whose weights
+        # are all rectangular) do we append a square out_dim x out_dim readout so
+        # the constraint is active instead of a silent no-op. This is PE-only.
+        if not has_square_weight(backbone_model):
+            num_classes = init_data.get('num_classes', int(data.y.max().item()) + 1)
+            backbone_model = PESquareHead(backbone_model, num_classes).to(device)
+            print(f"[positive_eigenvalues] backbone has no square weight; "
+                  f"appended a square {num_classes}x{num_classes} readout so the "
+                  f"negative-eigenvalue constraint is active.")
+
         optimizer = torch.optim.Adam(
             backbone_model.parameters(), lr=lr, weight_decay=weight_decay,
         )

@@ -273,6 +273,11 @@ class GNNCleanerHelper(MethodHelper):
             msg = label_probs[dst] * edge_weight.unsqueeze(1)     # [E, C]
             label_probs = torch.zeros(num_nodes, num_classes, device=device)
             label_probs.index_add_(0, src, msg)
+            # Row-normalize back to a valid distribution. Without this, the
+            # sub-stochastic operator makes rows decay toward ~0 away from the
+            # seed set, so argmax becomes arbitrary and the corrected-label loss
+            # degenerates (this was destroying gnn_cleaner's training signal).
+            label_probs = label_probs / label_probs.sum(dim=1, keepdim=True).clamp(min=1e-8)
             # Clamp trusted nodes back to their seed one-hot.
             if clean_idx.numel() > 0:
                 label_probs[clean_idx] = seed[clean_idx]

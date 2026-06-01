@@ -54,9 +54,12 @@ class CRGNNHelper(MethodHelper):
 
         backbone_model.to(device)
 
-        # Determine if adapter is needed (backbone output dim != hidden_channels)
+        # Determine if adapter is needed (embedding dim != hidden_channels).
+        # Use get_embeddings (hidden rep), NOT the backbone's logits — the
+        # contrastive/consistency heads must operate on the GNN embedding, not a
+        # num_classes-dim logit bottleneck.
         with torch.no_grad():
-            sample_out = backbone_model(data)
+            sample_out = backbone_model.get_embeddings(data)
         if sample_out.size(1) != hidden_channels:
             adapter = nn.Linear(sample_out.size(1), hidden_channels).to(device)
         else:
@@ -123,8 +126,8 @@ class CRGNNHelper(MethodHelper):
         x2, _ = mask_feature(x, p=pr)
 
         # Forward both views
-        h1 = adapter(backbone(Data(x=x1, edge_index=edge_idx1)))
-        h2 = adapter(backbone(Data(x=x2, edge_index=edge_idx2)))
+        h1 = adapter(backbone.get_embeddings(Data(x=x1, edge_index=edge_idx1)))
+        h2 = adapter(backbone.get_embeddings(Data(x=x2, edge_index=edge_idx2)))
 
         # Contrastive loss on projections
         z1 = proj_head(h1)
@@ -170,7 +173,7 @@ class CRGNNHelper(MethodHelper):
         class_head.eval()
 
         with torch.no_grad():
-            h = adapter(backbone(Data(x=data.x, edge_index=data.edge_index)))
+            h = adapter(backbone.get_embeddings(Data(x=data.x, edge_index=data.edge_index)))
             preds = class_head(h)
             val_idx = data.val_mask.nonzero(as_tuple=True)[0]
             return F.nll_loss(preds[val_idx], data.y[val_idx]).item()
@@ -187,7 +190,7 @@ class CRGNNHelper(MethodHelper):
         class_head.eval()
 
         with torch.no_grad():
-            h = adapter(backbone(Data(x=data.x, edge_index=data.edge_index)))
+            h = adapter(backbone.get_embeddings(Data(x=data.x, edge_index=data.edge_index)))
             return class_head(h).exp().argmax(dim=1)
 
     def get_embeddings(self, state, data):
@@ -220,7 +223,7 @@ class CRGNNHelper(MethodHelper):
         class_head = state['class_head']
 
         def fwd():
-            h = adapter(backbone(Data(x=data.x, edge_index=data.edge_index)))
+            h = adapter(backbone.get_embeddings(Data(x=data.x, edge_index=data.edge_index)))
             return class_head(h)
 
         return fwd
@@ -240,8 +243,8 @@ class CRGNNHelper(MethodHelper):
             x1, _ = mask_feature(data.x, p=pr)
             x2, _ = mask_feature(data.x, p=pr)
 
-            h1 = adapter(backbone(Data(x=x1, edge_index=edge_idx1)))
-            h2 = adapter(backbone(Data(x=x2, edge_index=edge_idx2)))
+            h1 = adapter(backbone.get_embeddings(Data(x=x1, edge_index=edge_idx1)))
+            h2 = adapter(backbone.get_embeddings(Data(x=x2, edge_index=edge_idx2)))
 
             z1 = proj_head(h1)
             z2 = proj_head(h2)
