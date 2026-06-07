@@ -4,7 +4,7 @@ import numpy as np
 from scipy.linalg import svd
 from scipy.sparse import coo_matrix
 from scipy.sparse.linalg import eigsh
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix, classification_report
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, confusion_matrix, classification_report
 
 
 class ClassificationMetrics:
@@ -22,17 +22,19 @@ class ClassificationMetrics:
         self.average = average
         self.zero_division = zero_division
 
-    def compute_all_metrics(self, predictions, labels, average=None):
+    def compute_all_metrics(self, predictions, labels, average=None, probabilities=None):
         """
-        Compute accuracy, precision, recall, and F1 score.
+        Compute accuracy, precision, recall, F1 score, and optionally ROC AUC.
 
         Args:
             predictions: np.ndarray or torch.Tensor of predicted labels
             labels: np.ndarray or torch.Tensor of true labels
             average: str, override default averaging ('macro', 'micro', 'weighted', None)
+            probabilities: np.ndarray or torch.Tensor of shape (n_samples, n_classes)
+                containing softmax/logit outputs. When provided, ROC AUC is included.
 
         Returns:
-            dict with keys: 'accuracy', 'precision', 'recall', 'f1'
+            dict with keys: 'accuracy', 'precision', 'recall', 'f1', and 'roc_auc' if probabilities given
         """
         avg = average or self.average
 
@@ -44,12 +46,48 @@ class ClassificationMetrics:
         predictions = np.asarray(predictions)
         labels = np.asarray(labels)
 
-        return {
+        metrics = {
             'accuracy': float(accuracy_score(labels, predictions)),
             'precision': float(precision_score(labels, predictions, average=avg, zero_division=self.zero_division)),
             'recall': float(recall_score(labels, predictions, average=avg, zero_division=self.zero_division)),
             'f1': float(f1_score(labels, predictions, average=avg, zero_division=self.zero_division)),
         }
+
+        if probabilities is not None:
+            metrics['roc_auc'] = self.compute_roc_auc(probabilities, labels, average=avg)
+
+        return metrics
+
+    def compute_roc_auc(self, probabilities, labels, average=None):
+        """
+        Compute ROC AUC score.
+
+        Args:
+            probabilities: np.ndarray or torch.Tensor of shape (n_samples, n_classes)
+                containing softmax/logit outputs
+            labels: np.ndarray or torch.Tensor of true labels
+            average: str, averaging strategy ('macro', 'weighted', etc.)
+
+        Returns:
+            float ROC AUC score, or 0.0 if computation fails (e.g. single class present)
+        """
+        avg = average or self.average
+        if isinstance(probabilities, torch.Tensor):
+            probabilities = probabilities.detach().cpu().numpy()
+        if isinstance(labels, torch.Tensor):
+            labels = labels.detach().cpu().numpy()
+
+        probabilities = np.asarray(probabilities)
+        labels = np.asarray(labels)
+
+        try:
+            n_classes = probabilities.shape[1] if probabilities.ndim == 2 else 2
+            if n_classes == 2:
+                return float(roc_auc_score(labels, probabilities[:, 1]))
+            else:
+                return float(roc_auc_score(labels, probabilities, multi_class='ovr', average=avg))
+        except (ValueError, IndexError):
+            return 0.0
 
     def compute_accuracy(self, predictions, labels):
         # Fast path: both tensors -> compute on-device, single scalar sync.
@@ -91,6 +129,8 @@ class ClassificationMetrics:
         print(f"  Precision: {metrics['precision']:.6f}")
         print(f"  Recall:    {metrics['recall']:.6f}")
         print(f"  F1 Score:  {metrics['f1']:.6f}")
+        if 'roc_auc' in metrics:
+            print(f"  ROC AUC:   {metrics['roc_auc']:.6f}")
         print("-" * 50)
 
 
@@ -419,7 +459,7 @@ class OversmoothingMetrics:
 
 OVERSMOOTHING_KEYS = ['NumRank', 'Erank', 'EDir', 'EDir_traditional', 'EProj', 'MAD']
 DEFAULT_OVERSMOOTHING = {k: 0.0 for k in OVERSMOOTHING_KEYS}
-ZERO_CLS = {'accuracy': 0.0, 'f1': 0.0, 'precision': 0.0, 'recall': 0.0}
+ZERO_CLS = {'accuracy': 0.0, 'f1': 0.0, 'precision': 0.0, 'recall': 0.0, 'roc_auc': 0.0}
 
 
 def get_noise_split_indices(noisy_labels, clean_labels, train_mask):
@@ -535,7 +575,7 @@ _normalize_metrics = normalize_metrics
 
 @torch.no_grad()
 def evaluate_model(get_predictions, get_embeddings, labels, train_mask, val_mask, test_mask,
-                   edge_index, device):
+                   edge_index, device, get_probabilities=None):
     """Shared final test evaluation.
 
     Args:
@@ -545,19 +585,29 @@ def evaluate_model(get_predictions, get_embeddings, labels, train_mask, val_mask
         train_mask, val_mask, test_mask: boolean masks
         edge_index: edge index tensor for oversmoothing computation
         device: computation device
+        get_probabilities: optional callable returning Tensor[num_nodes, n_classes]
+            of softmax probabilities. When provided, ROC AUC is included in cls metrics.
 
     Returns:
         dict with test_cls, train_cls, val_cls (each a dict with accuracy,
-        f1, precision, recall), test_oversmoothing, train_oversmoothing_final,
-        val_oversmoothing_final
+        f1, precision, recall, and roc_auc if probabilities provided),
+        test_oversmoothing, train_oversmoothing_final, val_oversmoothing_final
     """
     oversmoothing_evaluator = OversmoothingMetrics(device=device)
     cls_evaluator = ClassificationMetrics(average='macro')
 
     predictions = get_predictions()
-    test_cls_metrics = cls_evaluator.compute_all_metrics(predictions[test_mask], labels[test_mask])
-    train_cls_metrics = cls_evaluator.compute_all_metrics(predictions[train_mask], labels[train_mask])
-    val_cls_metrics = cls_evaluator.compute_all_metrics(predictions[val_mask], labels[val_mask])
+    probs = get_probabilities() if get_probabilities is not None else None
+
+    test_cls_metrics = cls_evaluator.compute_all_metrics(
+        predictions[test_mask], labels[test_mask],
+        probabilities=probs[test_mask] if probs is not None else None)
+    train_cls_metrics = cls_evaluator.compute_all_metrics(
+        predictions[train_mask], labels[train_mask],
+        probabilities=probs[train_mask] if probs is not None else None)
+    val_cls_metrics = cls_evaluator.compute_all_metrics(
+        predictions[val_mask], labels[val_mask],
+        probabilities=probs[val_mask] if probs is not None else None)
 
     embeddings = get_embeddings()
     test_oversmoothing = compute_oversmoothing_for_mask(

@@ -264,10 +264,14 @@ class BaseTrainer(ABC):
             def get_embeddings():
                 return model.get_embeddings(data)
 
+            def get_probabilities():
+                return F.softmax(model(data), dim=1)
+
             return evaluate_model(
                 get_predictions, get_embeddings, data.y,
                 data.train_mask, data.val_mask, data.test_mask,
                 data.edge_index, device,
+                get_probabilities=get_probabilities,
             )
 
     def _evaluate_inductive(self, model, d, device) -> dict:
@@ -289,11 +293,13 @@ class BaseTrainer(ABC):
                 continue
 
             with torch.no_grad():
-                preds = model(sub).argmax(dim=1)
+                logits = model(sub)
+                preds = logits.argmax(dim=1)
+                probs = F.softmax(logits, dim=1)
                 emb = model.get_embeddings(sub)
 
             all_true = torch.ones(sub.num_nodes, dtype=torch.bool, device=device)
-            cls_metrics = cls.compute_all_metrics(preds, sub.y)
+            cls_metrics = cls.compute_all_metrics(preds, sub.y, probabilities=probs)
             os_metrics = compute_oversmoothing_for_mask(
                 os_eval, emb, sub.edge_index, all_true,
             )
