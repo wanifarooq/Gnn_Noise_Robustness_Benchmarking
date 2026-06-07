@@ -198,6 +198,20 @@ class RTGNNHelper(MethodHelper):
             )
             return ((out1 + out2) / 2).argmax(dim=1)
 
+    def get_probabilities(self, state, data):
+        rtgnn = state['rtgnn']
+
+        rtgnn.eval()
+        with torch.no_grad():
+            if not self._is_train_graph(state, data):
+                backbone = rtgnn.dual_branch_predictor.first_branch
+                return F.softmax(backbone(data), dim=1)
+            node_features = state['node_features']
+            out1, out2 = rtgnn.dual_branch_predictor(
+                node_features, rtgnn._current_edges, rtgnn._current_weights,
+            )
+            return F.softmax((out1 + out2) / 2, dim=1)
+
     def get_embeddings(self, state, data):
         rtgnn = state['rtgnn']
 

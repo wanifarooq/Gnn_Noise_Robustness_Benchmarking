@@ -216,6 +216,13 @@ class PiGnnHelper(MethodHelper):
             cls_out, _ = model(data)
             return cls_out.argmax(dim=1)
 
+    def get_probabilities(self, state, data):
+        model = state['main_model']
+        model.eval()
+        with torch.no_grad():
+            cls_out, _ = model(data)
+            return F.softmax(cls_out, dim=1)
+
     def get_embeddings(self, state, data):
         backbone = state['main_model'].backbone_gnn
         backbone.eval()

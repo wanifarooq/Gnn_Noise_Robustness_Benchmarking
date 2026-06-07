@@ -148,6 +148,24 @@ class MethodHelper(ABC):
         with torch.no_grad():
             return model(data).argmax(dim=1)
 
+    def get_probabilities(self, state: dict, data) -> torch.Tensor:
+        """Return softmax probabilities for all nodes.
+
+        Default: primary model forward -> softmax.
+        Override for methods with custom inference paths.
+
+        Args:
+            state: Method state dict.
+            data: PyG Data object.
+
+        Returns:
+            Tensor[num_nodes, n_classes] of softmax probabilities.
+        """
+        model = state['models'][0]
+        model.eval()
+        with torch.no_grad():
+            return F.softmax(model(data), dim=1)
+
     def get_embeddings(self, state: dict, data) -> torch.Tensor:
         """Return hidden embeddings for oversmoothing metrics.
 

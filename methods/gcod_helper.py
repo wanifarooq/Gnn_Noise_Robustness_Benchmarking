@@ -207,6 +207,12 @@ class GCODHelper(MethodHelper):
         with torch.no_grad():
             return model(data).argmax(dim=1)
 
+    def get_probabilities(self, state, data):
+        model = state['backbone']
+        model.eval()
+        with torch.no_grad():
+            return F.softmax(model(data), dim=1)
+
     def get_embeddings(self, state, data):
         model = state['backbone']
         model.eval()

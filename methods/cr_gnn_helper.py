@@ -193,6 +193,19 @@ class CRGNNHelper(MethodHelper):
             h = adapter(backbone.get_embeddings(Data(x=data.x, edge_index=data.edge_index)))
             return class_head(h).exp().argmax(dim=1)
 
+    def get_probabilities(self, state, data):
+        backbone = state['backbone']
+        adapter = state['adapter']
+        class_head = state['class_head']
+
+        backbone.eval()
+        adapter.eval()
+        class_head.eval()
+
+        with torch.no_grad():
+            h = adapter(backbone.get_embeddings(Data(x=data.x, edge_index=data.edge_index)))
+            return class_head(h).exp()
+
     def get_embeddings(self, state, data):
         backbone = state['backbone']
         backbone.eval()

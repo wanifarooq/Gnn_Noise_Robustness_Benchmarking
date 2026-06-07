@@ -240,6 +240,20 @@ class NRGNNHelper(MethodHelper):
                 nrgnn.node_features, edges, weights,
             ).argmax(dim=1)
 
+    def get_probabilities(self, state, data):
+        nrgnn = state['nrgnn']
+        nrgnn.main_model.eval()
+        with torch.no_grad():
+            if not self._is_train_graph(state, data):
+                return F.softmax(nrgnn.main_model.forward(
+                    data.x.to(state['device']),
+                    data.edge_index.to(state['device']),
+                ), dim=1)
+            edges, weights = self._get_edges_and_weights(nrgnn, state['device'])
+            return F.softmax(nrgnn.main_model.forward(
+                nrgnn.node_features, edges, weights,
+            ), dim=1)
+
     def get_embeddings(self, state, data):
         nrgnn = state['nrgnn']
         nrgnn.main_model.eval()

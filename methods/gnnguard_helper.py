@@ -171,6 +171,19 @@ class GNNGuardHelper(MethodHelper):
             use_attn = state['use_attention']
             return model(features, adj, use_attention=use_attn).argmax(dim=1)
 
+    def get_probabilities(self, state, data):
+        model = state['gnnguard_model']
+        model.eval()
+        with torch.no_grad():
+            if not self._is_train_graph(state, data):
+                backbone = state['backbone']
+                backbone.eval()
+                return F.softmax(backbone(data), dim=1)
+            features = state['node_features']
+            adj = state['normalized_adjacency']
+            use_attn = state['use_attention']
+            return F.softmax(model(features, adj, use_attention=use_attn), dim=1)
+
     def get_embeddings(self, state, data):
         model = state['gnnguard_model']
         model.eval()

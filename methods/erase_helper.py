@@ -222,6 +222,38 @@ class ERASEHelper(MethodHelper):
         all_predictions = clf.predict(features_np)
         return torch.tensor(all_predictions, device=state['device'], dtype=torch.long)
 
+    def get_probabilities(self, state, data):
+        """Return predict_proba from LogisticRegression on L2-normalised features."""
+        model = state['model']
+        seed = state.get('seed', 42)
+
+        model.eval()
+        with torch.no_grad():
+            features = model(data)
+
+        if not self._is_train_graph(state, data):
+            backbone = model.base_gnn_model if hasattr(model, 'base_gnn_model') else model
+            backbone.eval()
+            with torch.no_grad():
+                return F.softmax(backbone(data), dim=1)
+
+        predicted_labels = state['predicted_labels']
+        features_np = normalize(features.detach().cpu().numpy(), norm='l2')
+
+        train_mask_np = data.train_mask.cpu().numpy()
+        train_features = features_np[train_mask_np]
+        train_labels = predicted_labels[data.train_mask].cpu().numpy()
+
+        clf = LogisticRegression(
+            solver='lbfgs',
+            multi_class='auto',
+            max_iter=1000,
+            random_state=seed,
+        ).fit(train_features, train_labels.ravel())
+
+        all_probs = clf.predict_proba(features_np)
+        return torch.tensor(all_probs, device=state['device'], dtype=torch.float)
+
     # ── Embeddings ─────────────────────────────────────────────────────────
 
     def get_embeddings(self, state, data):
