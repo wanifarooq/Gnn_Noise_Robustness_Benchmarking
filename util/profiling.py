@@ -6,7 +6,6 @@ from torch.profiler import profile, ProfilerActivity
 
 from model.gnns import GCN, GIN, GAT, GATv2, GPS, GCN_modified
 # SheafNN  variants
-from model.SheafNN_Bodnar import SheafNN_Bodnar
 from model.SheafNN_Light import SheafNN_Light
 from model.SheafNN import SheafNN
 _profiler_lock = threading.Lock()
@@ -66,8 +65,7 @@ def get_model(model_name, in_channels, hidden_channels, out_channels, **kwargs):
         'gcn_modified': (GCN_modified, ['n_layers', 'dropout', 'heads', 'self_loop',
                                         'pre_ln', 'pre_linear', 'lin_res', 'mod_norm',
                                         'jk', 'inner_gnn']),
-        'sheafnn': (SheafNN, ['n_layers', 'dropout', 'mlp_layers', 'MLP_maps', 'mlp_hidden_channels', 'stalk', 'act']),
-        "sheafnn_bodnar": (SheafNN_Bodnar, ['n_layers', 'dropout_in', 'dropout', 'stalk', 'non_linear', 'ego', 'act', 'norm_info', 'attention']),
+        "sheafnn": (SheafNN, ['n_layers', 'dropout_in', 'dropout', 'stalk', 'non_linear', 'ego', 'act', 'norm_info', 'attention']),
         "sheafnn_light": (SheafNN_Light, ['n_layers', 'dropout_in', 'dropout', 'stalk', 'act'])
     }
 
