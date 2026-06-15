@@ -59,6 +59,8 @@ class TrainingLoop:
         total_epochs = int(training_cfg.get('epochs', 200))
         patience = int(training_cfg.get('patience', 20))
         oversmoothing_every = int(training_cfg.get('oversmoothing_every', 20))
+        es_metric = training_cfg.get('early_stopping_metric', 'val_acc')
+        es_mode = 'min' if 'loss' in es_metric else 'max'
 
         # ── Mode detection ────────────────────────────────────────────────
         mode = training_cfg.get('mode', 'transductive').lower()
@@ -106,7 +108,8 @@ class TrainingLoop:
 
         # ── Early stopping ────────────────────────────────────────────────
         warmup = min(50, total_epochs // 3)
-        early_stopping = EarlyStopping(patience=patience, warmup_epochs=warmup)
+        early_stopping = EarlyStopping(patience=patience, warmup_epochs=warmup,
+                                              mode=es_mode)
 
         # ── Oversmoothing accumulators ────────────────────────────────────
         per_epochs_oversmoothing = defaultdict(list)
@@ -175,8 +178,14 @@ class TrainingLoop:
                 train_f1 = cls_evaluator.compute_f1(pred[train_idx], data.y[train_idx])
                 val_f1 = cls_evaluator.compute_f1(pred[val_idx], data.y[val_idx])
 
-            # 4. Early stopping (based on validation accuracy)
-            should_stop = early_stopping.step(val_acc, epoch)
+            # 4. Early stopping
+            es_value_map = {
+                'val_acc': val_acc,
+                'val_f1': val_f1,
+                'val_loss': val_loss,
+            }
+            es_value = es_value_map[es_metric]
+            should_stop = early_stopping.step(es_value, epoch)
             is_best = early_stopping.is_best
 
             # 5. Oversmoothing metrics (periodic)
