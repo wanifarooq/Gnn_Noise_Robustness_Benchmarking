@@ -49,6 +49,7 @@ training:
   weight_decay: 5e-4
   epochs: 1500          # keep low for local runs
   patience: 300
+  early_stopping_metric: val_acc
   oversmoothing_every: 1  # must be <= epochs to avoid NaN metrics
   mode: transductive   # transductive or inductive
   # batch_size: 512    # uncomment to enable mini-batch processing
