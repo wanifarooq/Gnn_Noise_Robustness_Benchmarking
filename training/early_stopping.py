@@ -2,27 +2,38 @@
 
 
 class EarlyStopping:
-    """Track validation accuracy and signal when to stop training.
+    """Track a validation metric and signal when to stop training.
 
     Args:
         patience: Number of epochs without improvement before stopping.
-        min_delta: Minimum increase in val_acc to count as improvement.
+        min_delta: Minimum change in metric to count as improvement.
+        mode: 'max' if higher is better (accuracy, f1), 'min' if lower
+              is better (loss).
     """
 
     def __init__(self, patience: int = 20, min_delta: float = 0.0,
-                 warmup_epochs: int = 50):
+                 warmup_epochs: int = 50, mode: str = 'max'):
         self.patience = patience
         self.min_delta = min_delta
         self.warmup_epochs = warmup_epochs
-        self.best_val_acc: float = -float('inf')
+        self.mode = mode
+        if mode == 'min':
+            self.best_value: float = float('inf')
+        else:
+            self.best_value: float = -float('inf')
         self.counter: int = 0
         self.best_epoch: int | None = None
 
-    def step(self, val_acc: float, epoch: int) -> bool:
+    def _is_improvement(self, current: float) -> bool:
+        if self.mode == 'min':
+            return current < self.best_value - self.min_delta
+        return current > self.best_value + self.min_delta
+
+    def step(self, value: float, epoch: int) -> bool:
         """Update state and return True if training should stop.
 
         Args:
-            val_acc: Current epoch's validation accuracy.
+            value: Current epoch's monitored metric value.
             epoch: Current epoch index (0-based).
 
         Returns:
@@ -32,8 +43,8 @@ class EarlyStopping:
             self._in_warmup = True
             return False
         self._in_warmup = False
-        if val_acc > self.best_val_acc + self.min_delta:
-            self.best_val_acc = val_acc
+        if self._is_improvement(value):
+            self.best_value = value
             self.counter = 0
             self.best_epoch = epoch
             return False
