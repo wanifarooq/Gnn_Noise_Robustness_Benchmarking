@@ -66,6 +66,52 @@ validation accuracy). It is **not** in the default config sweep
 (`clean`/`uniform`/`pair`), so it does not affect reported results; documented so
 nobody enables it expecting val to be corrupted too.
 
+### L7 — `community_defense` implements only the self-supervised module of its source paper
+**Source.** `community_defense` is the self-supervised auxiliary task from
+*"Self-supervised robust Graph Neural Networks against noisy graphs and noisy
+labels"* (Applied Intelligence, 2023, DOI 10.1007/s10489-023-04836-6). (The code
+docstring's "no source paper" note is outdated — this is the paper.)
+
+**What the paper is.** A 3-module framework:
+  1. **Graph structure learning** — learn/denoise the adjacency matrix.
+  2. **Sample selection** — use clustering pseudo-labels to pick clean-labelled
+     nodes for the supervised loss.
+  3. **Self-supervised learning** — derive cluster pseudo-labels from structure
+     and train a head (sharing the GNN encoder) to predict them, jointly with the
+     supervised objective.
+
+**What we implement — module 3 only.** We run noise-independent community
+detection (Louvain/spectral) to get a per-node community id, then add a bounded
+auxiliary cross-entropy that classifies each node's backbone embedding into its
+community, on top of the standard supervised CE. Modules 1 and 2 are **not**
+implemented.
+
+**Why only module 3 (a deliberate benchmark-design choice, not an omission):**
+  - **Modules 1 & 2 are already represented by other methods in the suite, so
+    including them would confound the comparison.** Module 1 (structure learning)
+    overlaps with **NRGNN**, **PI-GNN**, and **GNNGuard**; module 2 (clean-sample
+    selection) overlaps with **GraphCleaner**, **GNN_Cleaner**, **RTGNN**, and
+    **GCOD**. Module 3 (community self-supervision) is the *only* mechanism in
+    this paper not already covered by another method, so isolating it keeps
+    `community_defense` a distinct axis instead of a mashup of techniques on the
+    board.
+  - **Same-graph comparability.** Every method in the benchmark runs on the
+    *identical* fixed graph, backbone, splits, and noise. Module 1 **rewrites the
+    adjacency**, so the method would no longer be on the same graph as the others
+    and the result would mix graph-denoising with label-noise robustness — you
+    could not attribute the effect to either.
+  - **Clean scientific question.** Module 3 alone answers exactly: *"does a
+    structure-derived self-supervised auxiliary task help under label noise?"*,
+    with no entanglement.
+
+**Consequence (read the numbers accordingly).** Because the three modules are
+synergistic, this isolated module 3 will likely **underperform the paper's
+reported robustness**, and `community_defense` must **not** be cited as a
+reproduction of that paper's results — only as *"the self-supervised community
+module of [Applied Intelligence 2023], in isolation."* Implementation detail:
+the auxiliary term is capped at ¼ of the supervised CE (`COMM_CAP_FRAC = 0.25`)
+so it acts as a mild regularizer and cannot co-dominate the few-shot supervision.
+
 ---
 
 ## Part 2 — Benchmark-level notes (by design, for fairness)
