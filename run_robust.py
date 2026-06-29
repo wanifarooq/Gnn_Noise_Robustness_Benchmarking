@@ -76,6 +76,9 @@ def main():
     ap.add_argument("--force", action="store_true", help="Re-run everything, ignore completed/failed")
     ap.add_argument("--retry-failed", action="store_true",
                     help="Retry configs that have a ROBUST_FAILED.json marker")
+    ap.add_argument("--cpu-fallback", action="store_true",
+                    help="Re-enable main.py's CPU fallback on GPU OOM. Default OFF: a config "
+                         "that OOMs is skipped immediately (no hours-long CPU crawl).")
     args = ap.parse_args()
 
     with open(args.config, "r", encoding="utf-8") as f:
@@ -117,6 +120,8 @@ def main():
             cmd += ["--num-runs", str(args.num_runs)]
         if args.force:
             cmd += ["--force"]
+        if not args.cpu_fallback:
+            cmd += ["--no-cpu-fallback"]
 
         print(f"[RUN]         {tag} | method={method} | timeout={timeout_s:.0f}s", flush=True)
         t0 = time.time()

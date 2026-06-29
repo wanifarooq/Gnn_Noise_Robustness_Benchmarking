@@ -63,12 +63,15 @@ def parse_args():
     parser.add_argument('--only-index', type=int, default=None,
                         help='Run ONLY the Nth (1-based) config of the expanded sweep, then exit. '
                              'Used by run_robust.py to isolate each config in its own process.')
+    parser.add_argument('--no-cpu-fallback', action='store_true',
+                        help='On CUDA OOM, skip the run immediately instead of retrying on CPU '
+                             '(avoids hours-long CPU crawls for O(N^2) methods on big graphs).')
     return parser.parse_args()
 
 
 def run_benchmarking(base_folder='results', config_path=DEFAULT_CONFIG,
                      eval_only=False, no_checkpoint=False, num_runs=None,
-                     force=False, only_index=None):
+                     force=False, only_index=None, cpu_fallback=True):
     run_codecarbon = False
     print("\n" + "-"*50)
     print("Multi-run experiment with parameter sweep")
@@ -192,22 +195,30 @@ def run_benchmarking(base_folder='results', config_path=DEFAULT_CONFIG,
                     run_dir=run_dir if not run_eval_only else None,
                 )
             except torch.cuda.OutOfMemoryError:
-                print("[OOM] CUDA out of memory — falling back to CPU for this run")
                 torch.cuda.empty_cache()
                 gc.collect()
-                try:
-                    # Retry on CPU
-                    cpu_config = {**sweep_config, 'device': 'cpu'}
-                    run_result = run_experiment(
-                        cpu_config, run_id=run,
-                        checkpoint_path=ckpt_path, eval_only=run_eval_only,
-                        run_dir=run_dir if not run_eval_only else None,
-                    )
-                except Exception as e2:
-                    print(f"[SKIP] {file_name}: run {run} failed after CPU fallback "
-                          f"({type(e2).__name__}: {str(e2)[:200]}). Skipping this configuration.")
+                if cpu_fallback:
+                    print("[OOM] CUDA out of memory — falling back to CPU for this run")
+                    try:
+                        # Retry on CPU
+                        cpu_config = {**sweep_config, 'device': 'cpu'}
+                        run_result = run_experiment(
+                            cpu_config, run_id=run,
+                            checkpoint_path=ckpt_path, eval_only=run_eval_only,
+                            run_dir=run_dir if not run_eval_only else None,
+                        )
+                    except Exception as e2:
+                        print(f"[SKIP] {file_name}: run {run} failed after CPU fallback "
+                              f"({type(e2).__name__}: {str(e2)[:200]}). Skipping this configuration.")
+                        run_failed = True
+                    finally:
+                        torch.cuda.empty_cache()
+                else:
+                    # CPU fallback disabled: fail fast and let the sweep move on
+                    # immediately instead of crawling a huge O(N^2) op on CPU.
+                    print(f"[OOM] {file_name}: run {run} out of memory — skipping "
+                          f"immediately (CPU fallback disabled).")
                     run_failed = True
-                finally:
                     torch.cuda.empty_cache()
             except Exception as e:
                 # Isolate any per-config failure (e.g. a method that OOMs on a
@@ -299,4 +310,5 @@ if __name__ == "__main__":
                      no_checkpoint=args.no_checkpoint,
                      num_runs=args.num_runs,
                      force=args.force,
-                     only_index=args.only_index)
+                     only_index=args.only_index,
+                     cpu_fallback=not args.no_cpu_fallback)
