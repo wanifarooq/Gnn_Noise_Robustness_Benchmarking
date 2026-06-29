@@ -50,6 +50,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Run multi-run benchmark sweeps')
     parser.add_argument('--config', '-c', default=DEFAULT_CONFIG,
                         help=f'Path to YAML config file (default: {DEFAULT_CONFIG})')
+    parser.add_argument('--results', '-r', default='results',
+                        help='Base folder for results (default: results)')
     parser.add_argument('--eval-only', action='store_true',
                         help='Skip training, evaluate from saved checkpoints')
     parser.add_argument('--no-checkpoint', action='store_true',
@@ -58,12 +60,15 @@ def parse_args():
                         help='Number of runs per config (default: from config or 5)')
     parser.add_argument('--force', action='store_true',
                         help='Re-run all experiments from scratch, ignoring completed runs')
+    parser.add_argument('--only-index', type=int, default=None,
+                        help='Run ONLY the Nth (1-based) config of the expanded sweep, then exit. '
+                             'Used by run_robust.py to isolate each config in its own process.')
     return parser.parse_args()
 
 
 def run_benchmarking(base_folder='results', config_path=DEFAULT_CONFIG,
                      eval_only=False, no_checkpoint=False, num_runs=None,
-                     force=False):
+                     force=False, only_index=None):
     run_codecarbon = False
     print("\n" + "-"*50)
     print("Multi-run experiment with parameter sweep")
@@ -74,11 +79,20 @@ def run_benchmarking(base_folder='results', config_path=DEFAULT_CONFIG,
     print("Loaded configuration file")
 
     configs = expand_yaml_sweeps(config)
-    print(f"Number of sweep configurations: {len(configs)}")
+    total_configs = len(configs)
+    print(f"Number of sweep configurations: {total_configs}")
     os.makedirs(base_folder, exist_ok=True)
 
-    for idx, sweep_config in enumerate(configs, 1):
-        print(f"\n=== Sweep Config {idx}/{len(configs)} ===")
+    if only_index is not None:
+        if only_index < 1 or only_index > total_configs:
+            raise SystemExit(f"--only-index {only_index} out of range 1..{total_configs}")
+        indexed_configs = [(only_index, configs[only_index - 1])]
+        print(f"[ONLY] Running single config {only_index}/{total_configs}")
+    else:
+        indexed_configs = list(enumerate(configs, 1))
+
+    for idx, sweep_config in indexed_configs:
+        print(f"\n=== Sweep Config {idx}/{total_configs} ===")
 
         # Decide output path *before* running
         file_name = get_result_filename(sweep_config)
@@ -279,8 +293,10 @@ def run_benchmarking(base_folder='results', config_path=DEFAULT_CONFIG,
 
 if __name__ == "__main__":
     args = parse_args()
-    run_benchmarking(config_path=args.config,
+    run_benchmarking(base_folder=args.results,
+                     config_path=args.config,
                      eval_only=args.eval_only,
                      no_checkpoint=args.no_checkpoint,
                      num_runs=args.num_runs,
-                     force=args.force)
+                     force=args.force,
+                     only_index=args.only_index)

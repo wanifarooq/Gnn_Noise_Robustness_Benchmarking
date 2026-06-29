@@ -40,6 +40,13 @@ class GCODHelper(MethodHelper):
         temperature = float(gcod_params.get('temperature', 1.0))
         similarity_mode = str(gcod_params.get('similarity_mode', 'correction'))
         batch_size = int(gcod_params.get('batch_size', training_cfg.get('batch_size', 64)))
+        # Optional full-graph (full-batch) training: one forward over the whole
+        # graph per epoch instead of NeighborLoader mini-batches. Much faster on
+        # large transductive graphs and consistent with the other (full-batch)
+        # methods, but it changes GCOD's dynamics (u updated once/epoch; full vs
+        # sampled neighbourhoods), so it is OPT-IN and defaults to the original
+        # mini-batch behaviour.
+        full_batch = bool(gcod_params.get('full_batch', False))
         num_classes = int(data.y.max().item()) + 1
 
         backbone_model = backbone_model.to(device)
@@ -73,23 +80,26 @@ class GCODHelper(MethodHelper):
             [gcod_loss.u], lr=uncertainty_lr
         )
 
-        # NeighborLoaders for mini-batch training / evaluation
-        train_indices = data.train_mask.nonzero(as_tuple=True)[0]
-        val_indices = data.val_mask.nonzero(as_tuple=True)[0]
-        test_indices = data.test_mask.nonzero(as_tuple=True)[0]
+        # NeighborLoaders for mini-batch training / evaluation. Skipped entirely
+        # in full-batch mode (which trains/evaluates on the full graph).
+        train_loader = val_loader = test_loader = None
+        if not full_batch:
+            train_indices = data.train_mask.nonzero(as_tuple=True)[0]
+            val_indices = data.val_mask.nonzero(as_tuple=True)[0]
+            test_indices = data.test_mask.nonzero(as_tuple=True)[0]
 
-        train_loader = NeighborLoader(
-            data, num_neighbors=[15, 10], batch_size=batch_size,
-            input_nodes=train_indices, shuffle=True,
-        )
-        val_loader = NeighborLoader(
-            data, num_neighbors=[15, 10], batch_size=batch_size,
-            input_nodes=val_indices, shuffle=False,
-        )
-        test_loader = NeighborLoader(
-            data, num_neighbors=[15, 10], batch_size=batch_size,
-            input_nodes=test_indices, shuffle=False,
-        )
+            train_loader = NeighborLoader(
+                data, num_neighbors=[15, 10], batch_size=batch_size,
+                input_nodes=train_indices, shuffle=True,
+            )
+            val_loader = NeighborLoader(
+                data, num_neighbors=[15, 10], batch_size=batch_size,
+                input_nodes=val_indices, shuffle=False,
+            )
+            test_loader = NeighborLoader(
+                data, num_neighbors=[15, 10], batch_size=batch_size,
+                input_nodes=test_indices, shuffle=False,
+            )
 
         return {
             'models': [backbone_model],
@@ -104,11 +114,14 @@ class GCODHelper(MethodHelper):
             'device': device,
             'num_classes': num_classes,
             'training_accuracy': 0.1,
+            'full_batch': full_batch,
         }
 
     # ── Per-epoch training ─────────────────────────────────────────────────
 
     def train_step(self, state, data, epoch):
+        if state.get('full_batch'):
+            return self._train_step_full(state, data, epoch)
         model = state['backbone']
         gcod_loss_fn = state['gcod_loss']
         model_optimizer = state['model_optimizer']
@@ -189,13 +202,85 @@ class GCODHelper(MethodHelper):
         avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
         return {'train_loss': avg_loss}
 
+    # ── Full-graph (full-batch) training step ──────────────────────────────
+    def _train_step_full(self, state, data, epoch):
+        """One forward over the WHOLE graph per epoch (opt-in via gcod_params.full_batch).
+
+        Algorithmically identical to the mini-batch step but over all training
+        nodes at once: u (per-node) and prevSimilarity are indexed by the global
+        train-node ids, exactly as the batched path uses batch.n_id."""
+        model = state['backbone']
+        gcod_loss_fn = state['gcod_loss']
+        model_optimizer = state['model_optimizer']
+        uncertainty_optimizer = state['uncertainty_optimizer']
+        device = state['device']
+        num_classes = state['num_classes']
+
+        data = data.to(device)
+        train_idx = data.train_mask.nonzero(as_tuple=True)[0]
+
+        # --- Epoch training accuracy (full graph, eval) ---
+        model.eval()
+        with torch.no_grad():
+            eval_logits = model(data)
+            current_acc = ((eval_logits[train_idx].argmax(dim=1) == data.y[train_idx])
+                           .float().mean().item()) if train_idx.numel() else 0.0
+        smooth_factor = 0.9 if epoch > 0 else 0.5
+        state['training_accuracy'] = (smooth_factor * state['training_accuracy']
+                                      + (1 - smooth_factor) * current_acc)
+        training_accuracy = state['training_accuracy']
+
+        # --- Recompute centroids from last epoch's stored embeddings ---
+        gcod_loss_fn.recompute_centroids()
+
+        if train_idx.numel() == 0:
+            return {'train_loss': 0.0}
+
+        model.train()
+        gcod_loss_fn.train()
+
+        with torch.no_grad():
+            embeddings = model.get_embeddings(data)   # detached, for similarity/centroids
+        logits = model(data)                          # with gradient, for L1/L3
+
+        true_labels_onehot = F.one_hot(data.y[train_idx], num_classes=num_classes).float()
+        gcod_total_loss, loss_l1, loss_l2, loss_l3 = gcod_loss_fn(
+            batch_indices=train_idx,
+            model_logits=logits[train_idx],
+            label_onehot=true_labels_onehot,
+            embeddings_detached=embeddings[train_idx],
+            training_accuracy=training_accuracy,
+            epoch=epoch,
+        )
+
+        # Model step (L1 + L3 — u detached inside)
+        model_optimizer.zero_grad(set_to_none=True)
+        (loss_l1 + loss_l3).backward(retain_graph=True)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        model_optimizer.step()
+
+        # Uncertainty step (L2 — model output detached inside)
+        uncertainty_optimizer.zero_grad(set_to_none=True)
+        loss_l2.backward()
+        torch.nn.utils.clip_grad_norm_([gcod_loss_fn.u], max_norm=1.0)
+        uncertainty_optimizer.step()
+
+        return {'train_loss': gcod_total_loss.item()}
+
     # ── Validation ─────────────────────────────────────────────────────────
 
     def compute_val_loss(self, state, data):
         model = state['backbone']
-        val_loader = state['val_loader']
         device = state['device']
 
+        if state.get('full_batch'):
+            model.eval()
+            with torch.no_grad():
+                out = model(data.to(device))
+                val_idx = data.val_mask.nonzero(as_tuple=True)[0]
+                return F.cross_entropy(out[val_idx], data.y[val_idx].to(out.device)).item()
+
+        val_loader = state['val_loader']
         result = evaluate_ce_only(model, val_loader, device=device, mask_name='val')
         return result['ce_loss']
 

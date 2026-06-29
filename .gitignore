@@ -163,6 +163,7 @@ torch_geometric.nn.conv.*.py
 GNN_Cleaner.pdf
 cr_GNN.pdf
 paper/
+/results_romanEmpire
 
 
 
