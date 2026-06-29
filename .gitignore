@@ -160,5 +160,9 @@ output/
 torch_geometric.nn.conv.*.py
 /analysis/plots/
 /.claude
+GNN_Cleaner.pdf
+cr_GNN.pdf
+paper/
+
 
 
