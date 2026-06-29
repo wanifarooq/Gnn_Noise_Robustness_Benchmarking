@@ -27,12 +27,10 @@ NGPU=${NGPU:-3}                      # number of GPUs to use
 CONFIGS=(
   configs/roman-empire_gcn_modified.yaml      # L9 h512, 2500 epochs (longest)
   configs/amazon-computers_gcn_modified.yaml  # h512 dense, 1000 epochs
-  configs/cora_gcn_modified.yaml              # h512, 1000 epochs
   configs/dblp_gcn_modified.yaml              # h256, 1000 epochs
   configs/roman-empire.yaml                   # gcn+gat baseline, 500 epochs
   configs/amazon-computers.yaml               # gcn+gat baseline, dense
   configs/dblp.yaml                           # gcn+gat baseline
-  configs/cora.yaml                           # gcn+gat baseline
 )
 
 echo "[$(date '+%F %T')] START  ${#CONFIGS[@]} configs on $NGPU GPUs  (PY=$PY)"
@@ -43,7 +41,7 @@ launch() {                           # $1=gpu  $2=config
   name=$(basename "$cfg" .yaml)
   echo "[$(date '+%F %T')] GPU$gpu  START  $name"
   CUDA_VISIBLE_DEVICES=$gpu PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-    "$PY" main.py -c "$cfg" > "logs/${name}.log" 2>&1 &
+    "$PY" run_robust.py -c "$cfg" --timeout "${TIMEOUT:-14400}" > "logs/${name}.log" 2>&1 &
   GPU_PID[$gpu]=$!
 }
 
